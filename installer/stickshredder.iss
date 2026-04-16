@@ -4,7 +4,7 @@
 #define MyAppName "StickShredder"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "Robin Oertel"
-#define MyAppURL "https://github.com/roertel16/stickshredder"
+#define MyAppURL "https://github.com/rctom16-bit/stickshredder"
 #define MyAppExeName "StickShredder.exe"
 
 [Setup]
