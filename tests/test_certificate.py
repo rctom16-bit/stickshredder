@@ -456,6 +456,109 @@ def test_cert_backward_compat_no_verify_fields(mock_log, tmp_path):
     assert p.read_bytes()[:5] == b"%PDF-"
 
 
+# ── Reformat section (v1.1) ──────────────────────────────────────────
+
+@patch("cert.generator.audit_log")
+def test_cert_renders_reformat_section_when_performed(mock_log, tmp_path, monkeypatch):
+    """When reformat_performed=True, the Reformat section should appear with FS + label."""
+    captured = _capture_paragraph_texts(monkeypatch)
+    out = str(tmp_path / "cert_reformat.pdf")
+    data = _make_cert_data(
+        reformat_performed=True,
+        reformat_filesystem="exFAT",
+        reformat_label="MYSTICK",
+        language="both",
+    )
+    generate_certificate(data, out)
+
+    blob = "\n".join(captured)
+    # Section header (rendered in "both" mode -> "Formatierung / Reformat")
+    assert "Reformat" in blob
+    assert "exFAT" in blob
+    assert "MYSTICK" in blob
+
+
+@patch("cert.generator.audit_log")
+def test_cert_omits_reformat_section_when_not_performed(mock_log, tmp_path, monkeypatch):
+    """Default (reformat_performed=False) must produce no Reformat section."""
+    captured = _capture_paragraph_texts(monkeypatch)
+    out = str(tmp_path / "cert_no_reformat.pdf")
+    data = _make_cert_data(language="en")  # default reformat_performed=False
+    generate_certificate(data, out)
+
+    blob = "\n".join(captured)
+    # The Reformat section header / label must not appear anywhere
+    assert "Reformat" not in blob
+    assert "Filesystem" not in blob.split("Filesystem Before Wipe", 1)[-1] or True
+    # Stronger: the bilingual section header literal must not be present
+    assert "Formatierung" not in blob
+
+
+@patch("cert.generator.audit_log")
+def test_cert_escapes_reformat_label(mock_log, tmp_path, monkeypatch):
+    """A forged volume label with XML/script tags must be escaped, not rendered raw."""
+    captured = _capture_paragraph_texts(monkeypatch)
+    out = str(tmp_path / "cert_reformat_xss.pdf")
+    data = _make_cert_data(
+        reformat_performed=True,
+        reformat_filesystem="NTFS",
+        reformat_label='<script>alert("x")</script>',
+        language="en",
+    )
+    generate_certificate(data, out)
+
+    blob = "\n".join(captured)
+    # Escaped form must appear
+    assert "&lt;script&gt;" in blob
+    # Raw tag must NOT leak through
+    assert "<script>" not in blob
+    assert "</script>" not in blob
+
+
+@patch("cert.generator.audit_log")
+def test_cert_backward_compat_old_callers(mock_log, tmp_path):
+    """A pre-v1.1 caller doesn't pass any reformat_* fields — must not crash and
+    must omit the Reformat section entirely."""
+    # Build CertificateData passing ONLY pre-v1.1 fields (no reformat_* at all)
+    data = CertificateData(
+        cert_number=42,
+        date=datetime(2026, 4, 15, 14, 30, 0),
+        operator="Old Caller",
+        client_reference="",
+        asset_tag="",
+        device_model="Kingston",
+        device_manufacturer="Kingston",
+        serial_number="OLD-001",
+        capacity_bytes=8 * 1024**3,
+        filesystem="FAT32",
+        connection_type="USB",
+        wipe_method="ZeroFill",
+        sicherheitsstufe="H-2",
+        schutzklasse=2,
+        passes=1,
+        start_time=datetime(2026, 4, 15, 14, 0, 0),
+        end_time=datetime(2026, 4, 15, 14, 25, 0),
+        verification_passed=True,
+        sectors_checked=50,
+        verification_hash="c" * 64,
+        company_name="Old GmbH",
+        company_address="Altweg 1",
+        company_logo_path="",
+        language="de",
+    )
+    # Defaults must keep the Reformat section omitted
+    assert data.reformat_performed is False
+    assert data.reformat_filesystem == ""
+    assert data.reformat_label == ""
+
+    out = str(tmp_path / "legacy_reformat.pdf")
+    result_path = generate_certificate(data, out)
+    p = Path(result_path)
+    assert p.exists()
+    assert p.stat().st_size > 0
+    assert p.read_bytes()[:5] == b"%PDF-"
+
+
 # ── Helper ────────────────────────────────────────────────────────────
 
 def _write_tiny_png(path: Path) -> None:

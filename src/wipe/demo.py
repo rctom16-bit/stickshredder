@@ -11,6 +11,7 @@ from datetime import datetime
 
 from core.log import audit_log
 from wipe.device import DeviceInfo
+from wipe.format import FormatResult
 from wipe.methods import WipeMethod, WipeResult, ProgressCallback
 from wipe.verify import VerifyResult, VerifyProgressCallback
 
@@ -102,12 +103,20 @@ def wipe_demo_file(
     progress_callback: ProgressCallback | None = None,
     verify_mode: str = "none",
     verify_progress_callback: VerifyProgressCallback | None = None,
+    reformat: str = "none",
+    reformat_label: str = "USB",
+    reformat_partition: str = "MBR",
 ) -> WipeResult:
     """Simulate a full wipe (+ optional verify) on a local file.
 
     Mirrors WipeMethod.execute() but uses Python file I/O instead of raw ctypes.
     When verify_mode != "none" and the method's final pass is random, appends
     a zero-blanking pass so verification has a deterministic target.
+
+    If reformat != "none" and the wipe (and any requested verify) succeeded,
+    simulates a reformat by writing a tiny "valid filesystem" signature at the
+    start of the virtual file. No real filesystem is created; demo mode never
+    invokes PowerShell or touches hardware.
     """
     start_time = datetime.now()
     total_written = 0
@@ -198,6 +207,64 @@ def wipe_demo_file(
             audit_log(f"Demo verification crashed: {exc}")
             verify_result = None
 
+    # Simulate reformat after a successful wipe (+ verify, if requested).
+    # If verify was requested, only proceed when verify also passed.
+    wipe_result_verify_ok = (
+        verify_mode == "none"
+        or (verify_result is not None and verify_result.success)
+    )
+    format_result: FormatResult | None = None
+    if reformat != "none" and success and wipe_result_verify_ok:
+        import time as _time
+        start_fmt = _time.monotonic()
+        try:
+            fs_upper = {"fat32": "FAT32", "exfat": "exFAT", "ntfs": "NTFS"}.get(
+                reformat, ""
+            )
+            if not fs_upper:
+                format_result = FormatResult(
+                    success=False,
+                    method="none",
+                    filesystem="none",
+                    label=reformat_label,
+                    partition_style=reformat_partition,
+                    duration_seconds=0.0,
+                    error_message=f"Unknown filesystem: {reformat}",
+                )
+                audit_log(f"Demo reformat skipped: unknown filesystem {reformat!r}")
+            else:
+                # FAT32 volume labels are limited to 11 characters.
+                label = reformat_label[:11] if reformat == "fat32" else reformat_label
+                with open(path, "r+b") as f:
+                    f.seek(0)
+                    # Pretend boot sector signature: jump opcode + OEM-ish tag.
+                    f.write(b"\xEB\x58\x90" + fs_upper.encode("ascii") + b"  ")
+                    f.flush()
+                    os.fsync(f.fileno())
+                format_result = FormatResult(
+                    success=True,
+                    method="powershell",
+                    filesystem=fs_upper,
+                    label=label,
+                    partition_style=reformat_partition,
+                    duration_seconds=_time.monotonic() - start_fmt,
+                )
+                audit_log(
+                    f"Demo reformat: filesystem={fs_upper}, label={label}, "
+                    f"partition_style={reformat_partition}"
+                )
+        except Exception as exc:  # noqa: BLE001
+            audit_log(f"Demo reformat failed: {exc}")
+            format_result = FormatResult(
+                success=False,
+                method="none",
+                filesystem="none",
+                label=reformat_label,
+                partition_style=reformat_partition,
+                duration_seconds=_time.monotonic() - start_fmt,
+                error_message=str(exc),
+            )
+
     end_time = datetime.now()
     audit_log(
         f"Demo wipe finished: method={method.name}, success={success}, "
@@ -205,7 +272,7 @@ def wipe_demo_file(
         f"{verify_result.success if verify_result else None}"
     )
 
-    return WipeResult(
+    wr = WipeResult(
         method_name=method.name,
         passes=total_passes,
         start_time=start_time,
@@ -216,6 +283,14 @@ def wipe_demo_file(
         verify_result=verify_result,
         zero_blank_appended=zero_blank_appended,
     )
+    # Attach format_result via setattr so we don't hard-couple to Agent D's
+    # WipeResult schema change. If the field doesn't exist as a dataclass
+    # field yet, this still attaches it as a dynamic attribute on the instance.
+    try:
+        wr.format_result = format_result
+    except Exception:  # noqa: BLE001 — never fail the wipe over reformat metadata
+        pass
+    return wr
 
 
 def _expected_final_pattern(method: WipeMethod, zero_blanked: bool) -> bytes:

@@ -21,6 +21,7 @@ from wipe.verify import (
 if TYPE_CHECKING:
     # Imported for type hints only so the runtime import surface is minimal.
     from wipe.verify import VerifyResult
+    from wipe.format import FormatResult
 
 # Load kernel32 with last-error tracking enabled so `ctypes.get_last_error()`
 # reliably reports the Win32 error code after a failing API call.
@@ -68,6 +69,7 @@ class WipeResult:
     error_message: str | None
     verify_result: "VerifyResult | None" = None  # populated when verify_mode != "none"
     zero_blank_appended: bool = False  # true if a zero-blanking pass was added for verifiability
+    format_result: "FormatResult | None" = None  # populated when reformat requested
 
 
 ProgressCallback = Callable[[int, int, int, int, float], None]

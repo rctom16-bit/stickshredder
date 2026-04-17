@@ -52,6 +52,9 @@ def main() -> int:
         verify_error_count=0,
         verify_mismatch_offsets=[],
         verify_duration_seconds=1_452.7,
+        reformat_performed=True,
+        reformat_filesystem="exFAT",
+        reformat_label="DEMO-USB",
     )
 
     output = REPO_ROOT / "docs" / "examples" / "sample-certificate.pdf"

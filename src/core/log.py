@@ -63,6 +63,8 @@ CSV_HEADERS = [
     "duration_seconds",
     "result",
     "verification",
+    "reformat",
+    "reformat_label",
     "cert_number",
 ]
 

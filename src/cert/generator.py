@@ -100,6 +100,11 @@ class CertificateData:
     verify_mismatch_offsets: list[int] = field(default_factory=list)
     verify_duration_seconds: float = 0.0
 
+    # Reformat (new for v1.1) — optional, defaults keep backward compat
+    reformat_performed: bool = False
+    reformat_filesystem: str = ""  # "FAT32" | "exFAT" | "NTFS" or ""
+    reformat_label: str = ""
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -684,6 +689,34 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
     # 5. Verification
     # ------------------------------------------------------------------
     elements.extend(_build_verification_elements(data, styles, lang))
+
+    # --------------------------------------------------------------------------
+    # 5b. Reformat (v1.1)
+    # --------------------------------------------------------------------------
+    if data.reformat_performed:
+        elements.append(
+            _section_header(
+                _label("Formatierung", "Reformat", lang),
+                styles,
+            )
+        )
+        reformat_rows = [
+            (
+                _label("Dateisystem", "Filesystem", lang),
+                _safe(data.reformat_filesystem),
+            ),
+            (
+                _label("Volumenbezeichnung", "Volume Label", lang),
+                _safe(data.reformat_label),
+            ),
+            (
+                _label("Ergebnis", "Result", lang),
+                _label("Neu formatiert, einsatzbereit",
+                       "Reformatted, ready for use", lang),
+            ),
+        ]
+        elements.append(_kv_table(reformat_rows, styles))
+        elements.append(Spacer(1, 2 * mm))
 
     # ------------------------------------------------------------------
     # 6. Signature area

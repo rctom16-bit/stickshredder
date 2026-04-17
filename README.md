@@ -141,6 +141,8 @@ stickshredder --drive E: --method vsitr --cert-output "C:\Certificates\wipe_2026
 
 > **Note:** For SSDs and flash-based USB drives, overwrite-based methods have inherent limitations due to wear leveling. See [SSD Limitations](#ssd-limitations) and [SECURITY.md](docs/SECURITY.md).
 
+> **Optional reformat:** After any wipe method, StickShredder can automatically create a fresh partition and format the drive (FAT32 / exFAT / NTFS) so it is immediately usable without a trip through Disk Management. See [Reformat After Wipe](#reformat-after-wipe).
+
 ---
 
 ## Verification Modes
@@ -171,6 +173,29 @@ stickshredder wipe --device E: --method zero --operator "Robin" --verify none
 ```
 
 **GUI:** tick the *"Full verification (doubles runtime)"* checkbox in the wipe configuration panel. Without the checkbox, the GUI still performs sample verification by default.
+
+---
+
+## Reformat After Wipe
+
+By default, StickShredder leaves the drive in a raw (unpartitioned) state after wiping. Windows will show it as an "Unallocated" drive you cannot use until you format it manually in Disk Management.
+
+For convenience, StickShredder can reformat the drive immediately after a successful wipe+verify:
+
+| Filesystem | Size Limits | Compatibility |
+|---|---|---|
+| **exFAT** (recommended) | Up to 128 PB | Windows, macOS, most Linux, cameras, game consoles |
+| **FAT32** | 32 GB per volume, 4 GB per file | Near-universal, but capped at 32 GB — Windows refuses to create FAT32 above that |
+| **NTFS** | 256 TB | Windows-first; macOS and Linux need plugins for write support |
+
+**CLI:**
+```bash
+stickshredder wipe --device E: --method zero --operator "Robin" --reformat exfat --reformat-label "Archive-2026"
+```
+
+**GUI:** tick **"Nach Löschung formatieren / Reformat after wipe"** in the Wipe Configuration panel and choose the filesystem and volume label.
+
+If reformat fails (e.g., Windows refuses to format FAT32 on a drive >32 GB), the wipe itself is still reported successful and the certificate is still generated — only the reformat step is logged as failed.
 
 ---
 
@@ -403,6 +428,8 @@ stickshredder --drive E: --method vsitr --cert-output "C:\Zertifikate\wipe_2026-
 
 > **Hinweis:** Für SSDs und Flash-basierte USB-Datenträger haben überschreibbasierte Methoden systembedingte Einschränkungen aufgrund von Wear Leveling. Siehe [SSD-Einschränkungen](#ssd-einschränkungen) und [SECURITY.md](docs/SECURITY.md).
 
+> **Optionale Neuformatierung:** Nach jeder Löschmethode kann StickShredder automatisch eine frische Partition erstellen und das Laufwerk formatieren (FAT32 / exFAT / NTFS), sodass es sofort ohne Umweg über die Datenträgerverwaltung nutzbar ist. Siehe [Nach dem Löschen neu formatieren](#nach-dem-löschen-neu-formatieren).
+
 ---
 
 ### Verifikationsmodi
@@ -431,6 +458,29 @@ stickshredder wipe --device E: --method zero --operator "Robin" --verify none
 ```
 
 **GUI:** Aktivieren Sie die Checkbox *"Vollständige Verifikation (verdoppelt Laufzeit)"* im Löschkonfigurationsbereich. Ohne Häkchen führt die GUI weiterhin standardmäßig eine Probe-Verifikation durch.
+
+---
+
+### Nach dem Löschen neu formatieren
+
+Standardmäßig hinterlässt StickShredder das Laufwerk nach der Löschung im unpartitionierten Rohzustand. Windows zeigt es als "Nicht zugeordnet" an und das Laufwerk muss erst manuell in der Datenträgerverwaltung formatiert werden, bevor es wieder nutzbar ist.
+
+StickShredder kann das Laufwerk direkt nach erfolgreicher Löschung + Verifikation automatisch neu formatieren:
+
+| Dateisystem | Größenlimits | Kompatibilität |
+|---|---|---|
+| **exFAT** (empfohlen) | bis 128 PB | Windows, macOS, die meisten Linux, Kameras, Spielkonsolen |
+| **FAT32** | 32 GB pro Volume, 4 GB pro Datei | Nahezu universell, aber auf 32 GB begrenzt — Windows verweigert FAT32 darüber |
+| **NTFS** | 256 TB | Windows-zentriert; macOS und Linux benötigen Zusatzsoftware zum Schreiben |
+
+**CLI:**
+```bash
+stickshredder wipe --device E: --method zero --operator "Robin" --reformat exfat --reformat-label "Archiv-2026"
+```
+
+**GUI:** Aktivieren Sie die Checkbox **"Nach Löschung formatieren"** im Löschkonfigurationsbereich und wählen Sie Dateisystem und Volumenbezeichnung.
+
+Schlägt die Formatierung fehl (z. B. weil Windows FAT32 auf Laufwerken >32 GB verweigert), wird die Löschung trotzdem als erfolgreich gemeldet und das Zertifikat erstellt — nur der Formatierungsschritt wird als fehlgeschlagen im Audit-Log vermerkt.
 
 ---
 

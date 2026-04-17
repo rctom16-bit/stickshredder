@@ -383,6 +383,48 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(verify_group)
 
+        # Reformat options
+        reformat_group = QGroupBox("Reformat / Neu formatieren")
+        reformat_layout = QVBoxLayout(reformat_group)
+        reformat_layout.setSpacing(4)
+
+        self.reformat_cb = QCheckBox(
+            "Nach L\u00f6schung formatieren / Reformat after wipe"
+        )
+        self.reformat_cb.setChecked(False)
+        self.reformat_cb.setToolTip(
+            "Creates a fresh partition and filesystem on the drive so "
+            "it's usable immediately. Without this, the drive must be "
+            "manually reformatted in Windows Explorer."
+        )
+        reformat_layout.addWidget(self.reformat_cb)
+
+        # Filesystem dropdown
+        fs_form = QFormLayout()
+        fs_form.setSpacing(4)
+        self.reformat_fs_combo = QComboBox()
+        self.reformat_fs_combo.addItem("exFAT (recommended)", "exfat")
+        self.reformat_fs_combo.addItem("FAT32 (\u226432 GB)", "fat32")
+        self.reformat_fs_combo.addItem("NTFS (Windows only)", "ntfs")
+        self.reformat_fs_combo.setCurrentIndex(0)
+        self.reformat_fs_combo.setEnabled(False)
+        fs_form.addRow("Filesystem:", self.reformat_fs_combo)
+
+        # Volume label
+        self.reformat_label_edit = QLineEdit()
+        self.reformat_label_edit.setText("USB")
+        self.reformat_label_edit.setPlaceholderText("Volume label")
+        self.reformat_label_edit.setMaxLength(32)
+        self.reformat_label_edit.setEnabled(False)
+        fs_form.addRow("Label:", self.reformat_label_edit)
+
+        reformat_layout.addLayout(fs_form)
+
+        # Wire enable/disable: when checkbox toggles, enable/disable controls
+        self.reformat_cb.toggled.connect(self._on_reformat_toggled)
+
+        layout.addWidget(reformat_group)
+
         layout.addStretch()
 
         # Wipe button
@@ -742,6 +784,12 @@ class MainWindow(QMainWindow):
         if sk_value is not None:
             self.sk_desc.setText(_SK_INFO.get(sk_value, ""))
 
+    def _on_reformat_toggled(self, checked: bool) -> None:
+        """Enable/disable the filesystem combo and label edit based on the
+        reformat checkbox state."""
+        self.reformat_fs_combo.setEnabled(checked)
+        self.reformat_label_edit.setEnabled(checked)
+
     def _get_wipe_method(self) -> WipeMethod:
         """Create the WipeMethod instance from the current UI selection."""
         method_key = self.method_combo.currentData()
@@ -989,6 +1037,16 @@ class MainWindow(QMainWindow):
         self.operator_edit.setEnabled(enabled)
         if hasattr(self, "full_verify_cb"):
             self.full_verify_cb.setEnabled(enabled)
+        if hasattr(self, "reformat_cb"):
+            self.reformat_cb.setEnabled(enabled)
+            # When re-enabling, the dependent controls follow the checkbox
+            # state. When disabling (wipe in progress), grey them all out
+            # regardless of the checkbox.
+            if enabled:
+                self._on_reformat_toggled(self.reformat_cb.isChecked())
+            else:
+                self.reformat_fs_combo.setEnabled(False)
+                self.reformat_label_edit.setEnabled(False)
         for cb in self._device_checkboxes:
             cb.setEnabled(enabled and not self.devices[
                 self._device_checkboxes.index(cb)
@@ -1006,6 +1064,18 @@ class MainWindow(QMainWindow):
         total_bytes: int,
         speed: float,
     ) -> None:
+        # Defensive: PySide6 Signal(int, ...) marshals through C `int`
+        # (signed 32-bit). For drives >2 GiB the byte counts overflow and
+        # arrive here as negative two's-complement values. Re-interpret
+        # negatives as their unsigned 32-bit equivalents so the progress
+        # math stays correct on real USB sticks. The proper long-term
+        # fix is to declare the worker signal with `'qlonglong'` for the
+        # byte fields; this clamp keeps the UI honest in the meantime.
+        if bytes_written < 0:
+            bytes_written += 1 << 32
+        if total_bytes < 0:
+            total_bytes += 1 << 32
+
         # Show device name next to progress bar. Use the wipe-specific
         # list (the selected subset passed to the worker), NOT self.devices
         # (the full discovered list) — the indices come from the worker.
@@ -1103,6 +1173,12 @@ class MainWindow(QMainWindow):
         speed: float,
     ) -> None:
         """Drive the verify progress bar during full verification."""
+        # Same 32-bit overflow guard as in _on_progress — see comment there.
+        if bytes_done < 0:
+            bytes_done += 1 << 32
+        if total_bytes < 0:
+            total_bytes += 1 << 32
+
         pct = int(max(0.0, min(1.0, fraction)) * 100)
         self.verify_progress_bar.setValue(pct)
 

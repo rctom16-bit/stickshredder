@@ -519,11 +519,40 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         if handle is not None:
             close_drive(handle)
 
+    # -- Reformat (optional) ------------------------------------------------
+    if args.reformat != "none" and wipe_result.success:
+        _info(f"Reformatting drive to {args.reformat.upper()}...")
+        from wipe.format import reformat_drive
+        # Extract the disk index from device_id like r"\\.\PhysicalDrive1" -> 1
+        import re
+        m = re.search(r"PhysicalDrive(\d+)", device.device_id)
+        if not m:
+            _warn("Could not parse disk number; skipping reformat")
+            format_result = None
+        else:
+            disk_number = int(m.group(1))
+            format_result = reformat_drive(
+                disk_number=disk_number,
+                filesystem=args.reformat,
+                label=args.reformat_label,
+                partition_style=args.reformat_partition,
+                progress_callback=lambda msg: _info(f"  {msg}"),
+            )
+            if format_result.success:
+                _success(
+                    f"Reformat completed: {format_result.filesystem} "
+                    f"label={format_result.label!r} in {format_result.duration_seconds:.1f}s"
+                )
+            else:
+                _warn(f"Reformat failed: {format_result.error_message}")
+    else:
+        format_result = None
+
     # -- Generate certificate -----------------------------------------------
     cert_number = get_next_cert_number()
     cert_date = datetime.now()
 
-    cert_data = CertificateData(
+    cert_kwargs = dict(
         cert_number=cert_number,
         date=cert_date,
         operator=args.operator,
@@ -554,7 +583,18 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         verify_error_count=verify_result.error_count if verify_result else 0,
         verify_mismatch_offsets=list(verify_result.mismatch_offsets) if verify_result else [],
         verify_duration_seconds=verify_result.duration_seconds if verify_result else 0.0,
+        reformat_performed=bool(format_result and format_result.success),
+        reformat_filesystem=(format_result.filesystem if format_result and format_result.success else ""),
+        reformat_label=(format_result.label if format_result and format_result.success else ""),
     )
+    try:
+        cert_data = CertificateData(**cert_kwargs)
+    except TypeError:
+        # Reformat fields not yet present on CertificateData (agent F not landed).
+        # Drop them and retry so the certificate can still be generated.
+        for _key in ("reformat_performed", "reformat_filesystem", "reformat_label"):
+            cert_kwargs.pop(_key, None)
+        cert_data = CertificateData(**cert_kwargs)
 
     cert_filename = f"SS-{cert_number:06d}_{device.serial_number or 'UNKNOWN'}_{cert_date.strftime('%Y%m%d')}.pdf"
     cert_path = str(Path(output_dir) / cert_filename)
@@ -586,6 +626,8 @@ def cmd_wipe(args: argparse.Namespace) -> None:
             f"{verify_result.method.upper()}-{'PASSED' if verify_result.success else 'FAILED'}"
         ),
         "cert_number": str(cert_number),
+        "reformat": format_result.filesystem if format_result and format_result.success else "NONE",
+        "reformat_label": format_result.label if format_result and format_result.success else "",
     })
 
     # -- Summary ------------------------------------------------------------
@@ -611,6 +653,13 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         print(f"    Verification:    {v_status}")
     else:
         print(f"    Verification:    {_c(_Ansi.YELLOW, 'SKIPPED')}")
+
+    if format_result:
+        if format_result.success:
+            print(f"    Reformat:        {_c(_Ansi.GREEN, format_result.filesystem)} "
+                  f"(label: {format_result.label})")
+        else:
+            print(f"    Reformat:        {_c(_Ansi.RED, 'FAILED')}")
 
     print(f"    Certificate:     SS-{cert_number:06d}")
     if abs_cert_path:
@@ -821,6 +870,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", "-y",
         action="store_true",
         help="Skip all confirmation prompts (for scripting)",
+    )
+    sub_wipe.add_argument(
+        "--reformat",
+        choices=["none", "fat32", "exfat", "ntfs"],
+        default="none",
+        help=(
+            "Reformat the drive after wiping so it's immediately usable "
+            "(default: none). 'fat32' caps at 32 GB, 'exfat' recommended for "
+            "modern USB, 'ntfs' for Windows-only use."
+        ),
+    )
+    sub_wipe.add_argument(
+        "--reformat-label",
+        default="USB",
+        metavar="LABEL",
+        help="Volume label when --reformat is set (default: USB). "
+             "Max 11 chars for FAT32.",
+    )
+    sub_wipe.add_argument(
+        "--reformat-partition",
+        choices=["MBR", "GPT"],
+        default="MBR",
+        help="Partition style when --reformat is set (default: MBR).",
     )
     sub_wipe.set_defaults(func=cmd_wipe)
 

@@ -253,3 +253,107 @@ def test_cert_uses_wipe_result_passes_not_method_passes():
     assert captured_csv["row"]["passes"] == "8", (
         f"CSV passes should be '8', got {captured_csv['row']['passes']!r}"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# --reformat flag parsing
+# ─────────────────────────────────────────────────────────────────────
+
+def test_reformat_flag_default_none():
+    """When --reformat is omitted, args.reformat == 'none'."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_REQUIRED_WIPE_ARGS)
+    assert args.reformat == "none"
+
+
+def test_reformat_flag_accepts_exfat():
+    """--reformat exfat is accepted and stored."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_REQUIRED_WIPE_ARGS + ["--reformat", "exfat"])
+    assert args.reformat == "exfat"
+
+
+def test_reformat_flag_rejects_invalid():
+    """--reformat xfs is rejected by argparse with SystemExit."""
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(_REQUIRED_WIPE_ARGS + ["--reformat", "xfs"])
+
+
+def test_reformat_label_default():
+    """When --reformat-label is omitted, args.reformat_label == 'USB'."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_REQUIRED_WIPE_ARGS)
+    assert args.reformat_label == "USB"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# cmd_wipe invokes reformat_drive when --reformat is requested
+# ─────────────────────────────────────────────────────────────────────
+
+def _fake_format_result(success: bool = True, filesystem: str = "exfat",
+                        label: str = "USB"):
+    """Build a minimal FormatResult-like object."""
+    return SimpleNamespace(
+        success=success,
+        method="diskpart" if success else "",
+        filesystem=filesystem,
+        label=label,
+        partition_style="MBR",
+        duration_seconds=1.5,
+        error_message=None if success else "format failed",
+    )
+
+
+def test_cmd_wipe_calls_reformat_when_requested():
+    """cmd_wipe must call reformat_drive with the chosen filesystem when --reformat is set."""
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        _REQUIRED_WIPE_ARGS + ["--reformat", "exfat", "--yes"]
+    )
+
+    fake_method = MagicMock()
+    fake_method.name = "ZeroFill"
+    fake_method.passes = 1
+    fake_method.sicherheitsstufe = "1-2"
+    fake_method.execute.return_value = _fake_wipe_result()
+
+    fake_reformat = MagicMock(return_value=_fake_format_result(
+        success=True, filesystem="exfat", label="USB"
+    ))
+
+    # Pre-register a stub wipe.format module so the inline import inside
+    # cmd_wipe resolves to our mock without requiring agent A's module.
+    import sys as _sys
+    import types as _types
+    fake_format_mod = _types.ModuleType("wipe.format")
+    fake_format_mod.reformat_drive = fake_reformat
+    _sys.modules["wipe.format"] = fake_format_mod
+
+    try:
+        with (
+            patch.object(cli, "is_admin", return_value=True),
+            patch.object(cli, "list_devices", return_value=[_fake_device()]),
+            patch.object(cli, "_resolve_wipe_method", return_value=fake_method),
+            patch.object(cli, "dismount_volume"),
+            patch.object(cli, "open_physical_drive", return_value=12345),
+            patch.object(cli, "close_drive"),
+            patch.object(cli, "lock_volume"),
+            patch.object(cli, "unlock_volume"),
+            patch.object(cli, "get_drive_size", return_value=1024 * 1024),
+            patch.object(cli, "get_next_cert_number", return_value=1),
+            patch.object(cli, "generate_certificate", return_value="C:/tmp/fake.pdf"),
+            patch.object(cli, "log_wipe_to_csv"),
+            patch.object(cli, "audit_log"),
+        ):
+            cli.cmd_wipe(args)
+    finally:
+        _sys.modules.pop("wipe.format", None)
+
+    fake_reformat.assert_called_once()
+    kwargs = fake_reformat.call_args.kwargs
+    assert kwargs.get("filesystem") == "exfat"
+    # device_id is r"\\.\PhysicalDrive99" → disk_number == 99
+    assert kwargs.get("disk_number") == 99
+    assert kwargs.get("label") == "USB"
+    assert kwargs.get("partition_style") == "MBR"

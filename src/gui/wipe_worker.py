@@ -32,6 +32,10 @@ if TYPE_CHECKING:
 # Accepted values for the verify_mode parameter passed to WipeMethod.execute().
 VERIFY_MODES = ("none", "sample", "full")
 
+# Accepted values for the reformat parameter on WipeWorker.
+# "none" means do not reformat; the others select the target filesystem.
+REFORMAT_MODES = ("none", "fat32", "exfat", "ntfs")
+
 
 def _expected_pattern_for(method: WipeMethod) -> bytes:
     """Return the expected post-wipe byte pattern for the given method.
@@ -69,15 +73,17 @@ class WipeWorker(QThread):
     verify_progress(device_index, fraction, bytes_done, total_bytes, speed_mbps)
         Emitted during full-verification reads. Fraction is 0.0..1.0.
     phase_changed(device_index, phase)
-        phase is one of "wiping", "verifying", "done".
+        phase is one of "wiping", "verifying", "reformatting", "done".
     device_completed(device_index, success, cert_path)
     all_completed()
     error(device_index, message)
     status_message(message)
     """
 
-    progress_updated = Signal(int, int, int, int, int, float)
-    verify_progress = Signal(int, float, int, int, float)
+    # byte counts use 'qlonglong' (int64) so drives >2 GiB don't overflow
+    # Qt's default signed 32-bit `int` marshalling.
+    progress_updated = Signal(int, int, int, 'qlonglong', 'qlonglong', float)
+    verify_progress = Signal(int, float, 'qlonglong', 'qlonglong', float)
     phase_changed = Signal(int, str)
     device_completed = Signal(int, bool, str)
     all_completed = Signal()
@@ -92,6 +98,9 @@ class WipeWorker(QThread):
         schutzklasse: int = 2,
         operator: str = "",
         verify_mode: str = "sample",
+        reformat: str = "none",
+        reformat_label: str = "USB",
+        reformat_partition: str = "MBR",
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -107,6 +116,15 @@ class WipeWorker(QThread):
             )
             verify_mode = "sample"
         self.verify_mode = verify_mode
+        if reformat not in REFORMAT_MODES:
+            audit_log(
+                f"WipeWorker: unknown reformat={reformat!r}, "
+                f"falling back to 'none'"
+            )
+            reformat = "none"
+        self.reformat = reformat
+        self.reformat_label = reformat_label
+        self.reformat_partition = reformat_partition
         self._cancel_event = threading.Event()
 
     def cancel(self) -> None:
@@ -191,6 +209,9 @@ class WipeWorker(QThread):
                         progress_callback=_progress_cb,
                         verify_mode=self.verify_mode,
                         verify_progress_callback=_verify_progress_cb,
+                        reformat=self.reformat,
+                        reformat_label=self.reformat_label,
+                        reformat_partition=self.reformat_partition,
                     )
 
                     if not wipe_result.success:
@@ -207,6 +228,16 @@ class WipeWorker(QThread):
                     if self.verify_mode != "none" and verify_result is None:
                         audit_log("Demo verification was requested but returned None")
 
+                    # Demo path: pull format result Agent C attached to the
+                    # WipeResult (None if reformat == "none" or it failed).
+                    format_result = getattr(wipe_result, "format_result", None)
+                    if self.reformat != "none":
+                        self.phase_changed.emit(idx, "reformatting")
+                        self.status_message.emit(
+                            f"Demo: reformatted virtual disk to "
+                            f"{self.reformat.upper()}"
+                        )
+
                 else:
                     # ── Real device mode ──
                     # 1. Dismount volume
@@ -220,12 +251,16 @@ class WipeWorker(QThread):
                     self.status_message.emit(f"Opening {device.device_id}...")
                     handle = open_physical_drive(device.device_id)
 
-                    # 3. Lock volume
-                    self.status_message.emit(f"Locking {device.drive_letter}...")
-                    try:
-                        lock_volume(handle)
-                    except OSError as exc:
-                        audit_log(f"Lock warning for {device.drive_letter}: {exc}")
+                    # 3. Physical-drive lock intentionally skipped.
+                    # FSCTL_LOCK_VOLUME is documented for volume handles
+                    # (\\.\E:), not physical-drive handles (\\.\PhysicalDrive1).
+                    # On some USB controllers this deadlocks WriteFile, and
+                    # the prior dismount_volume() already gave us exclusive
+                    # access to the media.
+                    audit_log(
+                        f"Physical-drive lock skipped for {device.drive_letter} "
+                        f"(dismount already exclusive)"
+                    )
 
                     # 4. Get drive size
                     drive_size = get_drive_size(handle)
@@ -306,6 +341,46 @@ class WipeWorker(QThread):
                     ):
                         self.phase_changed.emit(idx, "verifying")
 
+                    # 6b. Optional reformat — only when wipe (and any verify)
+                    # succeeded. Reformat failures are logged but do NOT fail
+                    # the device-level wipe; the cert is still issued and
+                    # simply omits the reformat fields.
+                    format_result = None
+                    if self.reformat != "none" and wipe_result.success:
+                        self.phase_changed.emit(idx, "reformatting")
+                        self.status_message.emit(
+                            f"Reformatting {device.drive_letter} to "
+                            f"{self.reformat.upper()}..."
+                        )
+                        from wipe.format import reformat_drive
+                        import re
+                        m = re.search(r"PhysicalDrive(\d+)", device.device_id)
+                        if m:
+                            disk_number = int(m.group(1))
+                            format_result = reformat_drive(
+                                disk_number=disk_number,
+                                filesystem=self.reformat,
+                                label=self.reformat_label,
+                                partition_style=self.reformat_partition,
+                                progress_callback=lambda msg: self.status_message.emit(msg),
+                            )
+                            # Attach to the wipe result so cert generation can see it
+                            try:
+                                wipe_result.format_result = format_result
+                            except Exception:
+                                pass
+                            if not format_result.success:
+                                audit_log(
+                                    f"Reformat failed for {device.drive_letter}: "
+                                    f"{format_result.error_message}"
+                                )
+                        else:
+                            audit_log(
+                                f"Reformat skipped for {device.drive_letter}: "
+                                f"could not parse PhysicalDrive number from "
+                                f"{device.device_id!r}"
+                            )
+
                     # 7. Unlock
                     try:
                         unlock_volume(handle)
@@ -331,7 +406,27 @@ class WipeWorker(QThread):
                     getattr(verify_result, "sample_hash", "") or ""
                 )
 
-                cert_data = CertificateData(
+                # Reformat metadata for the cert. Agent F is adding these
+                # optional fields to CertificateData; build the kwargs dict
+                # and try the call once with them, falling back without them
+                # if the dataclass doesn't accept them yet.
+                reformat_kwargs = {
+                    "reformat_performed": bool(
+                        format_result and format_result.success
+                    ),
+                    "reformat_filesystem": (
+                        format_result.filesystem
+                        if format_result and format_result.success
+                        else ""
+                    ),
+                    "reformat_label": (
+                        format_result.label
+                        if format_result and format_result.success
+                        else ""
+                    ),
+                }
+
+                base_kwargs = dict(
                     cert_number=cert_number,
                     date=datetime.now(),
                     operator=self.operator,
@@ -357,6 +452,13 @@ class WipeWorker(QThread):
                     company_logo_path=self.config.company.logo_path,
                     language=self.config.cert_language,
                 )
+
+                try:
+                    cert_data = CertificateData(**base_kwargs, **reformat_kwargs)
+                except TypeError:
+                    # Agent F's fields aren't merged yet — fall back so we
+                    # don't break the wipe pipeline on a transient ordering.
+                    cert_data = CertificateData(**base_kwargs)
 
                 cert_filename = (
                     f"SS-{cert_number:06d}_"
