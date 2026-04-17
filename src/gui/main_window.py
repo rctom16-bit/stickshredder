@@ -982,6 +982,15 @@ class MainWindow(QMainWindow):
         sk_value = self.sk_combo.currentData() or 2
         verify_mode = "full" if self.full_verify_cb.isChecked() else "sample"
 
+        # Read reformat options from the UI. If the checkbox is unticked we
+        # pass "none" so the worker skips the reformat phase entirely.
+        if self.reformat_cb.isChecked():
+            reformat = self.reformat_fs_combo.currentData() or "exfat"
+            reformat_label = self.reformat_label_edit.text().strip() or "USB"
+        else:
+            reformat = "none"
+            reformat_label = "USB"
+
         # Track the exact subset being wiped so progress signals can look
         # up the correct DeviceInfo. self.devices contains ALL discovered
         # devices, but the worker emits indices into its own (selected)
@@ -995,6 +1004,8 @@ class MainWindow(QMainWindow):
             schutzklasse=sk_value,
             operator=self.operator_edit.text().strip(),
             verify_mode=verify_mode,
+            reformat=reformat,
+            reformat_label=reformat_label,
             parent=self,
         )
         self.worker.progress_updated.connect(self._on_progress)

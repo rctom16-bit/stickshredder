@@ -244,6 +244,62 @@ def test_checkbox_changes_verify_mode(qtbot, main_window, demo_device, monkeypat
     assert captured["verify_mode"] == "full"
 
 
+def test_reformat_checkbox_propagates_to_worker(qtbot, main_window, demo_device, monkeypatch):
+    """Ticking the Reformat checkbox + choosing a filesystem + label must make
+    _start_wipe construct the worker with the matching reformat kwargs. A
+    regression test for the silent bug where the reformat UI existed but its
+    value was never read into the WipeWorker.
+    """
+    from gui import main_window as mw_module
+
+    captured: dict = {}
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            for name in (
+                "progress_updated", "verify_progress", "phase_changed",
+                "device_completed", "all_completed", "error",
+                "status_message", "stall_detected",
+            ):
+                setattr(self, name, MagicMock())
+
+        def start(self): pass
+        def isRunning(self): return False  # noqa: N802
+        def cancel(self): pass
+        def wait(self, timeout=0): return True
+
+    monkeypatch.setattr(mw_module, "WipeWorker", FakeWorker)
+
+    # Case 1: checkbox unchecked -> reformat should be "none"
+    main_window.reformat_cb.setChecked(False)
+    main_window._start_wipe([demo_device])
+    assert captured["reformat"] == "none"
+    captured.clear()
+
+    # Case 2: checkbox checked + exFAT + custom label
+    main_window.reformat_cb.setChecked(True)
+    # Find and select the exFAT item (userData "exfat")
+    for i in range(main_window.reformat_fs_combo.count()):
+        if main_window.reformat_fs_combo.itemData(i) == "exfat":
+            main_window.reformat_fs_combo.setCurrentIndex(i)
+            break
+    main_window.reformat_label_edit.setText("MYSTICK")
+    main_window._start_wipe([demo_device])
+    assert captured["reformat"] == "exfat"
+    assert captured["reformat_label"] == "MYSTICK"
+
+    captured.clear()
+
+    # Case 3: checked + NTFS selection
+    for i in range(main_window.reformat_fs_combo.count()):
+        if main_window.reformat_fs_combo.itemData(i) == "ntfs":
+            main_window.reformat_fs_combo.setCurrentIndex(i)
+            break
+    main_window._start_wipe([demo_device])
+    assert captured["reformat"] == "ntfs"
+
+
 def test_stall_watchdog_fires_when_no_progress(qtbot, app_config, demo_device):
     """If _note_progress is never called within STALL_THRESHOLD_SECONDS, the
     watchdog thread emits stall_detected with a non-zero second count and a
