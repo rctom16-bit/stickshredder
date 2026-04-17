@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -78,6 +78,14 @@ class CertificateData:
     company_logo_path: str  # optional, can be empty
     language: str  # "de", "en", or "both"
 
+    # Verification (new for v1.1) — optional, defaults keep backward compat
+    verify_method: str = "sample"  # "none" | "sample" | "full"
+    verify_bytes: int = 0  # bytes verified (0 for sample mode)
+    verify_pattern: str = ""  # human-readable, e.g. "zeros", "0xFF", "non-zero (random)"
+    verify_error_count: int = 0
+    verify_mismatch_offsets: list[int] = field(default_factory=list)
+    verify_duration_seconds: float = 0.0
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -106,6 +114,23 @@ def format_duration(start: datetime, end: datetime) -> str:
     hours, remainder = divmod(total_seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def _format_seconds(seconds: float) -> str:
+    """Return *HH:MM:SS* from a float seconds value (e.g. 1234.5 -> "00:20:34")."""
+    total = int(seconds) if seconds > 0 else 0
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _format_offsets_hex(offsets: list[int], limit: int = 10) -> str:
+    """Return first N offsets as comma-separated uppercase hex.
+
+    Example: ``[0x400000, 0x10000200]`` -> ``"0x00400000, 0x10000200"``.
+    """
+    shown = offsets[:limit]
+    return ", ".join(f"0x{off:08X}" for off in shown)
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +231,14 @@ def _build_styles() -> dict[str, ParagraphStyle]:
             leading=12,
             textColor=FAIL_RED,
         ),
+        "result_skipped": ParagraphStyle(
+            "ResultSkipped",
+            parent=base["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=10,
+            leading=12,
+            textColor=TEXT_GRAY,
+        ),
         "footer": ParagraphStyle(
             "Footer",
             parent=base["Normal"],
@@ -289,6 +322,150 @@ def _kv_table(
     tbl = Table(data, colWidths=[label_w, value_w])
     tbl.setStyle(TableStyle(_COMMON_TABLE_STYLE))
     return tbl
+
+
+# ---------------------------------------------------------------------------
+# Verification section builder (split out for testability)
+# ---------------------------------------------------------------------------
+def _build_verification_elements(
+    data: CertificateData,
+    styles: dict[str, ParagraphStyle],
+    lang: str,
+) -> list:
+    """Build the flowables for the Verification section.
+
+    Branches on ``data.verify_method``:
+
+    * ``"sample"`` — sectors checked + SHA-256 hash (legacy behaviour)
+    * ``"full"`` — verified bytes, expected pattern, duration, error count,
+      plus first 10 mismatch offsets when errors occurred
+    * ``"none"`` — a single "Skipped" row rendered in gray
+    """
+    elements: list = []
+
+    # Section header (always)
+    elements.append(
+        _section_header(
+            _label("Verifizierung", "Verification", lang),
+            styles,
+        )
+    )
+
+    # -------- Branch: "none" (verification skipped) --------
+    if data.verify_method == "none":
+        skipped_label = _label("Ergebnis", "Result", lang)
+        skipped_text = _label("Nicht durchgeführt", "Skipped", lang)
+        skipped_row = [
+            [
+                Paragraph(skipped_label, styles["cell_label"]),
+                Paragraph(skipped_text, styles["result_skipped"]),
+            ]
+        ]
+        skipped_tbl = Table(
+            skipped_row,
+            colWidths=[_TABLE_WIDTH * 0.42, _TABLE_WIDTH * 0.58],
+        )
+        skipped_tbl.setStyle(TableStyle(_COMMON_TABLE_STYLE))
+        elements.append(skipped_tbl)
+
+        # Also show the verification mode row so reviewers see "none"
+        mode_label = _label("Verifizierungsmodus", "Verification Mode", lang)
+        mode_value = _label("Nicht durchgeführt", "Skipped", lang)
+        elements.append(_kv_table([(mode_label, mode_value)], styles))
+        elements.append(Spacer(1, 4 * mm))
+        return elements
+
+    # -------- Common: Result PASS/FAIL row --------
+    if data.verification_passed:
+        result_text = _label("BESTANDEN", "PASSED", lang)
+        result_style = styles["result_pass"]
+    else:
+        result_text = _label("NICHT BESTANDEN", "FAILED", lang)
+        result_style = styles["result_fail"]
+
+    result_label = _label("Ergebnis", "Result", lang)
+    result_row_data = [
+        [
+            Paragraph(result_label, styles["cell_label"]),
+            Paragraph(result_text, result_style),
+        ]
+    ]
+    result_tbl = Table(
+        result_row_data,
+        colWidths=[_TABLE_WIDTH * 0.42, _TABLE_WIDTH * 0.58],
+    )
+    result_tbl.setStyle(TableStyle(_COMMON_TABLE_STYLE))
+    elements.append(result_tbl)
+
+    # -------- Common: Verification Mode --------
+    mode_label = _label("Verifizierungsmodus", "Verification Mode", lang)
+    if data.verify_method == "full":
+        mode_value = _label(
+            "Vollständig (alle Sektoren)", "Full (all sectors)", lang
+        )
+    else:  # sample
+        mode_value = _label(
+            "Probe (Zufallsprüfung)", "Sample (random)", lang
+        )
+
+    verif_rows: list[tuple[str, str]] = [(mode_label, mode_value)]
+
+    # -------- Branch: "full" --------
+    if data.verify_method == "full":
+        verif_rows.append(
+            (
+                _label("Geprüfte Datenmenge", "Verified Bytes", lang),
+                format_capacity(data.verify_bytes),
+            )
+        )
+        verif_rows.append(
+            (
+                _label("Erwartetes Muster", "Expected Pattern", lang),
+                data.verify_pattern or "-",
+            )
+        )
+        verif_rows.append(
+            (
+                _label("Dauer", "Duration", lang),
+                _format_seconds(data.verify_duration_seconds),
+            )
+        )
+        verif_rows.append(
+            (
+                _label("Anzahl Fehler", "Error Count", lang),
+                f"{data.verify_error_count:,}".replace(",", "."),
+            )
+        )
+        if data.verify_error_count > 0 and data.verify_mismatch_offsets:
+            verif_rows.append(
+                (
+                    _label(
+                        "Erste Fehler-Offsets",
+                        "First Mismatch Offsets",
+                        lang,
+                    ),
+                    _format_offsets_hex(data.verify_mismatch_offsets, limit=10),
+                )
+            )
+
+    # -------- Branch: "sample" (default, backward compat) --------
+    else:
+        verif_rows.append(
+            (
+                _label("Geprüfte Sektoren", "Sectors Checked", lang),
+                f"{data.sectors_checked:,}".replace(",", "."),
+            )
+        )
+        verif_rows.append(
+            (
+                _label("Prüf-Hash (SHA-256)", "Verification Hash (SHA-256)", lang),
+                data.verification_hash or "N/A",
+            )
+        )
+
+    elements.append(_kv_table(verif_rows, styles))
+    elements.append(Spacer(1, 4 * mm))
+    return elements
 
 
 # ---------------------------------------------------------------------------
@@ -486,48 +663,7 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
     # ------------------------------------------------------------------
     # 5. Verification
     # ------------------------------------------------------------------
-    elements.append(
-        _section_header(
-            _label("Verifizierung", "Verification", lang),
-            styles,
-        )
-    )
-
-    if data.verification_passed:
-        result_text = _label("BESTANDEN", "PASSED", lang)
-        result_style = styles["result_pass"]
-    else:
-        result_text = _label("NICHT BESTANDEN", "FAILED", lang)
-        result_style = styles["result_fail"]
-
-    verif_rows: list[tuple[str, str]] = [
-        (
-            _label("Geprüfte Sektoren", "Sectors Checked", lang),
-            f"{data.sectors_checked:,}".replace(",", "."),
-        ),
-        (
-            _label("Prüf-Hash (SHA-256)", "Verification Hash (SHA-256)", lang),
-            data.verification_hash,
-        ),
-    ]
-
-    # Result row as its own prominent table
-    result_label = _label("Ergebnis", "Result", lang)
-    result_row_data = [
-        [
-            Paragraph(result_label, styles["cell_label"]),
-            Paragraph(result_text, result_style),
-        ]
-    ]
-    result_tbl = Table(
-        result_row_data,
-        colWidths=[_TABLE_WIDTH * 0.42, _TABLE_WIDTH * 0.58],
-    )
-    result_tbl.setStyle(TableStyle(_COMMON_TABLE_STYLE))
-    elements.append(result_tbl)
-
-    elements.append(_kv_table(verif_rows, styles))
-    elements.append(Spacer(1, 4 * mm))
+    elements.extend(_build_verification_elements(data, styles, lang))
 
     # ------------------------------------------------------------------
     # 6. Signature area

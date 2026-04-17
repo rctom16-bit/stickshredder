@@ -23,9 +23,33 @@ from wipe.methods import (
     BsiVsitr,
     CustomWipe,
     WipeResult,
+    WipeMethod,
     _write_block,
     _set_file_pointer,
 )
+
+
+def _make_fake_verify_result(success: bool = True, method: str = "sample"):
+    """Build a minimal stand-in for a verify.VerifyResult.
+
+    The real dataclass lives in wipe.verify (being implemented in parallel).
+    Tests only depend on a small subset of its attributes, so a SimpleNamespace
+    avoids coupling to the other module.
+    """
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        success=success,
+        method=method,
+        bytes_verified=0,
+        expected_pattern=r"\x00",
+        error_count=0,
+        mismatch_offsets=[],
+        duration_seconds=0.0,
+        sectors_checked=0,
+        sectors_matched=0,
+        sample_hash="",
+        timestamp=datetime.now(),
+    )
 
 
 # ── ZeroFill ──────────────────────────────────────────────────────────
@@ -210,3 +234,206 @@ def test_execute_seek_error(mock_audit):
 
     assert result.success is False
     assert result.error_message is not None
+
+
+# ── verify_mode integration (v1.1) ────────────────────────────────────
+
+@patch("wipe.methods.audit_log")
+def test_execute_verify_mode_none_no_extra_pass(mock_audit):
+    """verify_mode='none' should keep legacy behaviour: no extra pass, no verify call."""
+    rtp = RandomThreePass()  # random method — would otherwise trigger zero-blanking
+    drive_size = 2048
+    block_size = 1024
+
+    with patch("wipe.methods._write_block", return_value=block_size) as mock_wb, \
+         patch("wipe.methods._set_file_pointer", return_value=True), \
+         patch("wipe.methods.sample_verify") as mock_sample, \
+         patch("wipe.methods.full_verify") as mock_full:
+        result = rtp.execute(
+            handle=999,
+            drive_size=drive_size,
+            block_size=block_size,
+            verify_mode="none",
+        )
+
+    assert result.success is True
+    assert result.zero_blank_appended is False
+    assert result.verify_result is None
+    assert result.passes == 3  # unchanged — 3 random passes, no zero blank
+    # Exactly 3 passes * 2 blocks each = 6 write calls.
+    assert mock_wb.call_count == 3 * (drive_size // block_size)
+    mock_sample.assert_not_called()
+    mock_full.assert_not_called()
+
+
+@patch("wipe.methods.audit_log")
+def test_execute_random_method_appends_zero_pass_when_verify_on(mock_audit):
+    """RandomThreePass + verify='sample' appends a zero-blanking pass as the 4th pass."""
+    rtp = RandomThreePass()
+    drive_size = 2048
+    block_size = 1024
+
+    captured_writes: list[bytes] = []
+
+    def record_write(handle, data):
+        captured_writes.append(bytes(data))
+        return len(data)
+
+    with patch("wipe.methods._write_block", side_effect=record_write), \
+         patch("wipe.methods._set_file_pointer", return_value=True), \
+         patch("wipe.methods.sample_verify",
+               return_value=_make_fake_verify_result(success=True)):
+        result = rtp.execute(
+            handle=999,
+            drive_size=drive_size,
+            block_size=block_size,
+            verify_mode="sample",
+        )
+
+    assert result.success is True
+    assert result.zero_blank_appended is True
+    assert result.passes == 4  # 3 random + 1 zero blank
+    # Last 2 writes (drive_size // block_size == 2 blocks) belong to zero-blank.
+    blocks_per_pass = drive_size // block_size
+    last_pass_writes = captured_writes[-blocks_per_pass:]
+    assert all(chunk == b"\x00" * block_size for chunk in last_pass_writes), (
+        "Final pass must write all-zeros for zero-blanking"
+    )
+
+
+@patch("wipe.methods.audit_log")
+def test_execute_zero_fill_no_zero_pass_appended(mock_audit):
+    """ZeroFill (final_pass_is_random=False) must NOT get an extra zero-blank pass."""
+    zf = ZeroFill()
+    drive_size = 2048
+    block_size = 1024
+
+    with patch("wipe.methods._write_block", return_value=block_size), \
+         patch("wipe.methods._set_file_pointer", return_value=True), \
+         patch("wipe.methods.sample_verify",
+               return_value=_make_fake_verify_result(success=True)):
+        result = zf.execute(
+            handle=999,
+            drive_size=drive_size,
+            block_size=block_size,
+            verify_mode="sample",
+        )
+
+    assert result.success is True
+    assert result.zero_blank_appended is False
+    assert result.passes == 1
+    assert result.verify_result is not None
+
+
+@patch("wipe.methods.audit_log")
+def test_execute_calls_sample_verify_when_mode_sample(mock_audit):
+    """verify_mode='sample' invokes wipe.methods.sample_verify with correct args."""
+    zf = ZeroFill()
+    drive_size = 2048
+    block_size = 1024
+    fake_result = _make_fake_verify_result(success=True, method="sample")
+
+    with patch("wipe.methods._write_block", return_value=block_size), \
+         patch("wipe.methods._set_file_pointer", return_value=True), \
+         patch("wipe.methods.sample_verify", return_value=fake_result) as mock_sample, \
+         patch("wipe.methods.full_verify") as mock_full:
+        result = zf.execute(
+            handle=777,
+            drive_size=drive_size,
+            block_size=block_size,
+            verify_mode="sample",
+        )
+
+    mock_sample.assert_called_once()
+    mock_full.assert_not_called()
+    # Positional args: (handle, drive_size, expected_pattern)
+    args, _kwargs = mock_sample.call_args
+    assert args[0] == 777
+    assert args[1] == drive_size
+    assert args[2] == b"\x00"  # ZeroFill writes zeros, so we expect zeros
+    assert result.verify_result is fake_result
+
+
+@patch("wipe.methods.audit_log")
+def test_execute_calls_full_verify_when_mode_full(mock_audit):
+    """verify_mode='full' invokes full_verify and wires through the progress callback."""
+    zf = ZeroFill()
+    drive_size = 2048
+    block_size = 1024
+    fake_result = _make_fake_verify_result(success=True, method="full")
+    vp_cb = MagicMock(name="verify_progress_cb")
+
+    with patch("wipe.methods._write_block", return_value=block_size), \
+         patch("wipe.methods._set_file_pointer", return_value=True), \
+         patch("wipe.methods.full_verify", return_value=fake_result) as mock_full, \
+         patch("wipe.methods.sample_verify") as mock_sample:
+        result = zf.execute(
+            handle=555,
+            drive_size=drive_size,
+            block_size=block_size,
+            verify_mode="full",
+            verify_progress_callback=vp_cb,
+        )
+
+    mock_full.assert_called_once()
+    mock_sample.assert_not_called()
+    args, kwargs = mock_full.call_args
+    assert args[0] == 555
+    assert args[1] == drive_size
+    assert args[2] == b"\x00"
+    assert kwargs.get("progress_callback") is vp_cb
+    assert result.verify_result is fake_result
+
+
+@patch("wipe.methods.audit_log")
+def test_execute_skips_verify_on_wipe_failure(mock_audit):
+    """If the wipe itself fails, verification must not be attempted."""
+    zf = ZeroFill()
+
+    with patch("wipe.methods._write_block", side_effect=OSError("disk error")), \
+         patch("wipe.methods._set_file_pointer", return_value=True), \
+         patch("wipe.methods.sample_verify") as mock_sample, \
+         patch("wipe.methods.full_verify") as mock_full:
+        result = zf.execute(
+            handle=999,
+            drive_size=4096,
+            block_size=1024,
+            verify_mode="sample",
+        )
+
+    assert result.success is False
+    assert result.verify_result is None
+    mock_sample.assert_not_called()
+    mock_full.assert_not_called()
+
+
+# ── _expected_final_pattern helper ────────────────────────────────────
+
+def test_expected_final_pattern_random_returns_zero():
+    """RandomThreePass is random-final, so expected pattern is zero (post-blank)."""
+    rtp = RandomThreePass()
+    assert rtp._expected_final_pattern() == b"\x00"
+
+
+def test_expected_final_pattern_zerofill_returns_zero():
+    """ZeroFill's last pass writes zeros, so expected pattern is zero."""
+    zf = ZeroFill()
+    assert zf._expected_final_pattern() == b"\x00"
+
+
+def test_expected_final_pattern_bsi_returns_zero():
+    """BsiVsitr has a random 7th pass → zero-blank appended → expect zeros."""
+    bsi = BsiVsitr()
+    assert bsi._expected_final_pattern() == b"\x00"
+
+
+# ── CustomWipe.final_pass_is_random ───────────────────────────────────
+
+def test_custom_method_random_marks_final_pass_random():
+    cw = CustomWipe(passes=2, pattern="random")
+    assert cw.final_pass_is_random is True
+
+
+def test_custom_method_zero_marks_final_pass_not_random():
+    cw = CustomWipe(passes=2, pattern="zero")
+    assert cw.final_pass_is_random is False

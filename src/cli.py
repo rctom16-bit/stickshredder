@@ -16,7 +16,7 @@ from core.config import AppConfig, get_next_cert_number, DEFAULT_CERT_OUTPUT
 from core.log import audit_log, log_wipe_to_csv, read_wipe_history, setup_logging
 from wipe.device import DeviceInfo, list_devices, open_physical_drive, close_drive, get_drive_size, lock_volume, unlock_volume, dismount_volume
 from wipe.methods import ZeroFill, RandomThreePass, BsiVsitr, CustomWipe, WipeResult
-from wipe.verify import verify_wipe, VerificationResult
+from wipe.verify import VerifyResult
 
 
 # -- ANSI colour helpers ----------------------------------------------------
@@ -117,6 +117,45 @@ def _progress_bar(
     pass_info = f"Pass {pass_num}/{total_passes} " if total_passes > 1 else ""
     suffix = f" {pct_display:5.1f}% {speed_mbps:6.1f} MB/s ETA {_format_eta(eta_sec)}"
     prefix = f"\r  {pass_info}"
+
+    bar_space = term_width - len(prefix) - len(suffix) - 3  # 3 for [ ] and >
+    if bar_space < 10:
+        bar_space = 10
+
+    filled = int(bar_space * pct)
+    if filled > bar_space:
+        filled = bar_space
+
+    arrow = ">" if filled < bar_space else ""
+    bar = "=" * filled + arrow + " " * (bar_space - filled - len(arrow))
+    line = f"{prefix}[{bar}]{suffix}"
+
+    sys.stdout.write(line)
+    sys.stdout.flush()
+
+
+def _verify_progress_bar(
+    fraction: float,
+    bytes_done: int,
+    total_bytes: int,
+    speed_mbps: float,
+) -> None:
+    """Render an in-place ASCII progress bar for full verification."""
+    term_width = shutil.get_terminal_size((80, 24)).columns
+
+    pct = fraction if fraction >= 0 else 0.0
+    if pct > 1.0:
+        pct = 1.0
+    pct_display = pct * 100
+
+    if speed_mbps > 0:
+        remaining_bytes = max(0, total_bytes - bytes_done)
+        eta_sec = (remaining_bytes / (1024 * 1024)) / speed_mbps
+    else:
+        eta_sec = 0.0
+
+    suffix = f" {pct_display:5.1f}% {speed_mbps:6.1f} MB/s ETA {_format_eta(eta_sec)}"
+    prefix = "\r  Verify "
 
     bar_space = term_width - len(prefix) - len(suffix) - 3  # 3 for [ ] and >
     if bar_space < 10:
@@ -308,7 +347,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     asset_tag: str = getattr(args, "asset_tag", "") or ""
     output_dir: str = getattr(args, "output_dir", "") or config.cert_output_dir
     language: str = getattr(args, "language", "") or config.cert_language
-    skip_verify: bool = getattr(args, "no_verify", False)
+    verify_mode: str = getattr(args, "verify", "sample") or "sample"
     auto_yes: bool = getattr(args, "yes", False)
 
     # -- Display device details ---------------------------------------------
@@ -328,7 +367,12 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         print(f"    Client:          {client}")
     if asset_tag:
         print(f"    Asset Tag:       {asset_tag}")
-    print(f"    Verification:    {'Skipped' if skip_verify else 'Enabled'}")
+    verify_label = {
+        "none": "Skipped",
+        "sample": "Sample (100 random sectors)",
+        "full": "Full (every sector read-back)",
+    }.get(verify_mode, verify_mode)
+    print(f"    Verification:    {verify_label}")
     print()
 
     # -- SSD warning --------------------------------------------------------
@@ -369,7 +413,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     # -- Execute wipe -------------------------------------------------------
     handle: int | None = None
     wipe_result: WipeResult | None = None
-    verification: VerificationResult | None = None
+    verify_result: VerifyResult | None = None
 
     try:
         # Dismount the volume first
@@ -403,14 +447,17 @@ def cmd_wipe(args: argparse.Namespace) -> None:
             f"operator={args.operator}"
         )
 
+        verify_cb = _verify_progress_bar if verify_mode == "full" else None
         wipe_result = wipe_method.execute(
             handle=handle,
             drive_size=drive_size,
             block_size=1_048_576,
             progress_callback=_progress_bar,
+            verify_mode=verify_mode,
+            verify_progress_callback=verify_cb,
         )
 
-        # Clear the progress bar line
+        # Clear the progress bar line (covers both wipe and verify bars)
         sys.stdout.write("\r" + " " * shutil.get_terminal_size((80, 24)).columns + "\r")
         sys.stdout.flush()
 
@@ -421,26 +468,39 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         print()
 
         # -- Verification --------------------------------------------------
-        if not skip_verify:
-            _info("Verifying wipe (sampling sectors)...")
-            expected = _expected_pattern_for_verification(wipe_method.name)
-            verification = verify_wipe(
-                handle=handle,
-                drive_size=drive_size,
-                expected_pattern=expected,
-                sample_count=100,
-            )
-            if verification.passed:
-                _success(f"Verification PASSED ({verification.sectors_checked} sectors checked).")
+        verify_result = wipe_result.verify_result
+
+        if verify_result is None:
+            _info("Verification: skipped.")
+        elif verify_result.method == "sample":
+            if verify_result.success:
+                _success(
+                    f"Sample verification PASSED "
+                    f"({verify_result.sectors_checked} sectors checked)."
+                )
             else:
                 _warn(
-                    f"Verification FAILED ({verification.sectors_matched}/{verification.sectors_checked} "
-                    f"sectors matched). The drive may not be fully wiped."
+                    f"Sample verification FAILED "
+                    f"({verify_result.sectors_matched}/{verify_result.sectors_checked} sectors matched). "
+                    f"The drive may not be fully wiped."
                 )
-            print()
-        else:
-            _info("Verification skipped (--no-verify).")
-            print()
+        elif verify_result.method == "full":
+            gb = verify_result.bytes_verified / (1024 ** 3)
+            if verify_result.success:
+                _success(
+                    f"Full verification PASSED ({gb:.2f} GB verified, "
+                    f"pattern={verify_result.expected_pattern}, "
+                    f"duration={verify_result.duration_seconds:.1f}s)."
+                )
+            else:
+                offsets = ", ".join(
+                    f"0x{o:08X}" for o in verify_result.mismatch_offsets[:10]
+                )
+                _warn(
+                    f"Full verification FAILED: {verify_result.error_count} mismatches. "
+                    f"First 10 offsets: {offsets}"
+                )
+        print()
 
         # -- Unlock --------------------------------------------------------
         try:
@@ -477,13 +537,19 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         passes=wipe_method.passes,
         start_time=wipe_result.start_time,
         end_time=wipe_result.end_time,
-        verification_passed=verification.passed if verification else False,
-        sectors_checked=verification.sectors_checked if verification else 0,
-        verification_hash=verification.sample_hash if verification else "N/A (skipped)",
+        verification_passed=verify_result.success if verify_result else False,
+        sectors_checked=verify_result.sectors_checked if verify_result else 0,
+        verification_hash=verify_result.sample_hash if verify_result else "N/A (skipped)",
         company_name=config.company.name,
         company_address=config.company.address,
         company_logo_path=config.company.logo_path,
         language=language,
+        verify_method=verify_result.method if verify_result else "none",
+        verify_bytes=verify_result.bytes_verified if verify_result else 0,
+        verify_pattern=verify_result.expected_pattern if verify_result else "",
+        verify_error_count=verify_result.error_count if verify_result else 0,
+        verify_mismatch_offsets=list(verify_result.mismatch_offsets) if verify_result else [],
+        verify_duration_seconds=verify_result.duration_seconds if verify_result else 0.0,
     )
 
     cert_filename = f"SS-{cert_number:06d}_{device.serial_number or 'UNKNOWN'}_{cert_date.strftime('%Y%m%d')}.pdf"
@@ -512,9 +578,8 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         "duration_seconds": str(duration_seconds),
         "result": "SUCCESS" if wipe_result.success else "FAILED",
         "verification": (
-            "PASSED" if (verification and verification.passed)
-            else "FAILED" if (verification and not verification.passed)
-            else "SKIPPED"
+            "SKIPPED" if verify_result is None else
+            f"{verify_result.method.upper()}-{'PASSED' if verify_result.success else 'FAILED'}"
         ),
         "cert_number": str(cert_number),
     })
@@ -528,12 +593,17 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     print(f"    Duration:        {_format_duration(wipe_result.start_time, wipe_result.end_time)}")
     print(f"    Result:          {_c(_Ansi.GREEN + _Ansi.BOLD, 'SUCCESS') if wipe_result.success else _c(_Ansi.RED + _Ansi.BOLD, 'FAILED')}")
 
-    if verification:
-        v_status = (
-            _c(_Ansi.GREEN + _Ansi.BOLD, "PASSED")
-            if verification.passed
-            else _c(_Ansi.RED + _Ansi.BOLD, "FAILED")
-        )
+    if verify_result:
+        if verify_result.success:
+            v_status = _c(
+                _Ansi.GREEN + _Ansi.BOLD,
+                f"{verify_result.method.upper()} PASSED",
+            )
+        else:
+            v_status = _c(
+                _Ansi.RED + _Ansi.BOLD,
+                f"{verify_result.method.upper()} FAILED",
+            )
         print(f"    Verification:    {v_status}")
     else:
         print(f"    Verification:    {_c(_Ansi.YELLOW, 'SKIPPED')}")
@@ -582,7 +652,7 @@ def cmd_history(args: argparse.Namespace) -> None:
 
     # Table headers
     headers = ["Date", "Model", "Serial", "Method", "Passes", "Result", "Verify", "Cert #", "Operator"]
-    widths = [20, 22, 16, 16, 7, 8, 8, 10, 16]
+    widths = [20, 22, 16, 16, 7, 8, 14, 10, 16]
 
     header_line = "  ".join(h.ljust(w) for h, w in zip(headers, widths))
     print(f"  {_c(_Ansi.BOLD, header_line)}")
@@ -599,10 +669,10 @@ def cmd_history(args: argparse.Namespace) -> None:
         else:
             result_display = result_raw
 
-        if verify_raw == "PASSED":
-            verify_display = _c(_Ansi.GREEN, "PASSED")
-        elif verify_raw == "FAILED":
-            verify_display = _c(_Ansi.RED, "FAILED")
+        if "PASSED" in verify_raw:
+            verify_display = _c(_Ansi.GREEN, verify_raw)
+        elif "FAILED" in verify_raw:
+            verify_display = _c(_Ansi.RED, verify_raw)
         elif verify_raw == "SKIPPED":
             verify_display = _c(_Ansi.YELLOW, "SKIPPED")
         else:
@@ -723,9 +793,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Certificate output directory (default: from config)",
     )
     sub_wipe.add_argument(
-        "--no-verify",
-        action="store_true",
-        help="Skip post-wipe verification",
+        "--verify",
+        choices=["none", "sample", "full"],
+        default="sample",
+        help=(
+            "Verification mode after wiping (default: sample). "
+            "'none' skips verification. "
+            "'sample' checks 100 random sectors (fast, probabilistic). "
+            "'full' reads every sector and compares against the expected pattern "
+            "(slow -- roughly doubles runtime -- but detects silent sector failures). "
+            "Random-data methods (standard, bsi, custom-random) add a final zero-blanking "
+            "pass automatically when verification is enabled."
+        ),
     )
     sub_wipe.add_argument(
         "--language",

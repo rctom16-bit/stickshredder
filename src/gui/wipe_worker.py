@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import threading
-import time
-from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QThread, Signal
 
@@ -23,11 +21,50 @@ from wipe.device import (
     unlock_volume,
 )
 from wipe.methods import WipeMethod, WipeResult
-from wipe.verify import verify_wipe
 from wipe.demo import create_demo_file, wipe_demo_file, verify_demo_file
 
 if TYPE_CHECKING:
     pass
+
+
+# Accepted values for the verify_mode parameter passed to WipeMethod.execute().
+VERIFY_MODES = ("none", "sample", "full")
+
+
+def _expected_pattern_for(method: WipeMethod) -> bytes:
+    """Return the expected post-wipe byte pattern for the given method.
+
+    Used by the demo code path which still runs verification out-of-band.
+    Real-device verification is handled inside WipeMethod.execute() and
+    does not need this helper.
+    """
+    from wipe.methods import ZeroFill, RandomThreePass, BsiVsitr
+    if isinstance(method, ZeroFill):
+        return b"\x00"
+    if isinstance(method, (RandomThreePass, BsiVsitr)):
+        return b""  # random — verify just checks "non-zero"
+    # CustomWipe or anything else: delegate to the method if it exposes it.
+    try:
+        return method._expected_final_pattern()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return b"\x00"
+
+
+def _verify_ok(verify_result: Any) -> bool | None:
+    """Normalize the success flag across VerifyResult and its legacy alias.
+
+    Returns True/False when verification ran, or None if no verification
+    result is available (verify_mode="none" or verify raised internally).
+    """
+    if verify_result is None:
+        return None
+    # New field name used by wipe.verify.VerifyResult.
+    if hasattr(verify_result, "success"):
+        return bool(verify_result.success)
+    # Legacy field name still used by some demo paths.
+    if hasattr(verify_result, "passed"):
+        return bool(verify_result.passed)
+    return None
 
 
 class WipeWorker(QThread):
@@ -36,6 +73,11 @@ class WipeWorker(QThread):
     Signals
     -------
     progress_updated(device_index, pass_num, total_passes, bytes_written, total_bytes, speed_mbps)
+        Emitted during the overwrite phase.
+    verify_progress(device_index, fraction, bytes_done, total_bytes, speed_mbps)
+        Emitted during full-verification reads. Fraction is 0.0..1.0.
+    phase_changed(device_index, phase)
+        phase is one of "wiping", "verifying", "done".
     device_completed(device_index, success, cert_path)
     all_completed()
     error(device_index, message)
@@ -43,6 +85,8 @@ class WipeWorker(QThread):
     """
 
     progress_updated = Signal(int, int, int, int, int, float)
+    verify_progress = Signal(int, float, int, int, float)
+    phase_changed = Signal(int, str)
     device_completed = Signal(int, bool, str)
     all_completed = Signal()
     error = Signal(int, str)
@@ -55,6 +99,7 @@ class WipeWorker(QThread):
         config: AppConfig,
         schutzklasse: int = 2,
         operator: str = "",
+        verify_mode: str = "sample",
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -63,6 +108,13 @@ class WipeWorker(QThread):
         self.config = config
         self.schutzklasse = schutzklasse
         self.operator = operator or config.operator_name or "Unknown"
+        if verify_mode not in VERIFY_MODES:
+            audit_log(
+                f"WipeWorker: unknown verify_mode={verify_mode!r}, "
+                f"falling back to 'sample'"
+            )
+            verify_mode = "sample"
+        self.verify_mode = verify_mode
         self._cancel_event = threading.Event()
 
     def cancel(self) -> None:
@@ -90,7 +142,11 @@ class WipeWorker(QThread):
             demo_file_path: str | None = None
             cert_path = ""
             success = False
+            verify_result: Any = None
             is_demo = device.device_id.startswith(r"\\.\DemoDevice")
+
+            # Signal that this device is entering the wipe phase.
+            self.phase_changed.emit(idx, "wiping")
 
             try:
                 if is_demo:
@@ -135,19 +191,21 @@ class WipeWorker(QThread):
                     if self.is_cancelled:
                         raise InterruptedError("Cancelled after wipe")
 
-                    # Verify
-                    self.status_message.emit("Demo: verifying virtual disk...")
-                    from wipe.methods import ZeroFill, RandomThreePass, BsiVsitr
-                    if isinstance(self.wipe_method, ZeroFill):
-                        expected_pattern = b"\x00"
-                    elif isinstance(self.wipe_method, (RandomThreePass, BsiVsitr)):
-                        expected_pattern = b""
-                    else:
-                        expected_pattern = b"\x00"
-
-                    verification = verify_demo_file(
-                        demo_file_path, expected_pattern, sample_count=100,
-                    )
+                    # Demo verification (out-of-band; the demo wipe path does
+                    # not yet accept verify_mode through the method). Tolerant
+                    # of either VerifyResult (success=) or legacy
+                    # VerificationResult (passed=) via _verify_ok.
+                    if self.verify_mode != "none":
+                        self.phase_changed.emit(idx, "verifying")
+                        self.status_message.emit("Demo: verifying virtual disk...")
+                        expected_pattern = _expected_pattern_for(self.wipe_method)
+                        try:
+                            verify_result = verify_demo_file(
+                                demo_file_path, expected_pattern, sample_count=100,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            audit_log(f"Demo verification failed to run: {exc}")
+                            verify_result = None
 
                 else:
                     # ── Real device mode ──
@@ -178,7 +236,12 @@ class WipeWorker(QThread):
                     if self.is_cancelled:
                         raise InterruptedError("Cancelled before wipe")
 
-                    # 5. Execute wipe with progress callback
+                    # 5. Execute wipe + (optional) verification in one call.
+                    # Verify runs inline inside WipeMethod.execute() when
+                    # verify_mode != "none". The verify callback announces the
+                    # phase transition on its first tick.
+                    verifying_announced = {"value": False}
+
                     def _progress_cb(
                         pass_num: int,
                         total_passes: int,
@@ -194,11 +257,34 @@ class WipeWorker(QThread):
                             bytes_written, total_bytes, speed,
                         )
 
+                    def _verify_cb(
+                        fraction: float,
+                        bytes_done: int,
+                        total_bytes: int,
+                        speed: float,
+                        _idx: int = idx,
+                    ) -> None:
+                        if self.is_cancelled:
+                            raise InterruptedError("Cancelled during verify")
+                        if not verifying_announced["value"]:
+                            verifying_announced["value"] = True
+                            self.phase_changed.emit(_idx, "verifying")
+                            self.status_message.emit(
+                                f"Verifying {device.friendly_name}..."
+                            )
+                        self.verify_progress.emit(
+                            _idx, fraction, bytes_done, total_bytes, speed,
+                        )
+
                     self.status_message.emit(
                         f"Wiping {device.friendly_name} with {self.wipe_method.name}..."
                     )
                     wipe_result = self.wipe_method.execute(
-                        handle, drive_size, progress_callback=_progress_cb,
+                        handle,
+                        drive_size,
+                        progress_callback=_progress_cb,
+                        verify_mode=self.verify_mode,
+                        verify_progress_callback=_verify_cb,
                     )
 
                     if not wipe_result.success:
@@ -209,19 +295,16 @@ class WipeWorker(QThread):
                     if self.is_cancelled:
                         raise InterruptedError("Cancelled after wipe")
 
-                    # 6. Verify
-                    self.status_message.emit(f"Verifying {device.friendly_name}...")
-                    from wipe.methods import ZeroFill, RandomThreePass, BsiVsitr
-                    if isinstance(self.wipe_method, ZeroFill):
-                        expected_pattern = b"\x00"
-                    elif isinstance(self.wipe_method, (RandomThreePass, BsiVsitr)):
-                        expected_pattern = b""
-                    else:
-                        expected_pattern = b"\x00"
+                    # Pull the verify result produced by execute() itself.
+                    verify_result = wipe_result.verify_result
 
-                    verification = verify_wipe(
-                        handle, drive_size, expected_pattern, sample_count=100,
-                    )
+                    # Sample verification doesn't emit verify_progress ticks,
+                    # so announce the phase here if it wasn't already.
+                    if (
+                        self.verify_mode != "none"
+                        and not verifying_announced["value"]
+                    ):
+                        self.phase_changed.emit(idx, "verifying")
 
                     # 7. Unlock
                     try:
@@ -236,6 +319,18 @@ class WipeWorker(QThread):
                 # 9. Generate certificate
                 self.status_message.emit("Generating certificate...")
                 cert_number = get_next_cert_number()
+                verify_ok = _verify_ok(verify_result)
+                # Certificate field still takes a bool; skipped verify counts
+                # as False for the document. The device-level success flag
+                # further down is what gates the UI red/green indicator.
+                verification_passed_bool = bool(verify_ok) if verify_ok else False
+                verification_sectors = int(
+                    getattr(verify_result, "sectors_checked", 0) or 0
+                )
+                verification_hash = str(
+                    getattr(verify_result, "sample_hash", "") or ""
+                )
+
                 cert_data = CertificateData(
                     cert_number=cert_number,
                     date=datetime.now(),
@@ -254,9 +349,9 @@ class WipeWorker(QThread):
                     passes=self.wipe_method.passes,
                     start_time=wipe_result.start_time,
                     end_time=wipe_result.end_time,
-                    verification_passed=verification.passed,
-                    sectors_checked=verification.sectors_checked,
-                    verification_hash=verification.sample_hash,
+                    verification_passed=verification_passed_bool,
+                    sectors_checked=verification_sectors,
+                    verification_hash=verification_hash,
                     company_name=self.config.company.name,
                     company_address=self.config.company.address,
                     company_logo_path=self.config.company.logo_path,
@@ -278,6 +373,12 @@ class WipeWorker(QThread):
                 duration = (
                     wipe_result.end_time - wipe_result.start_time
                 ).total_seconds()
+                if verify_ok is True:
+                    verification_text = "PASSED"
+                elif verify_ok is False:
+                    verification_text = "FAILED"
+                else:
+                    verification_text = "SKIPPED"
                 log_wipe_to_csv({
                     "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "device_model": device.model,
@@ -290,16 +391,19 @@ class WipeWorker(QThread):
                     "end_time": wipe_result.end_time.isoformat(),
                     "duration_seconds": int(duration),
                     "result": "SUCCESS" if wipe_result.success else "FAILED",
-                    "verification": (
-                        "PASSED" if verification.passed else "FAILED"
-                    ),
+                    "verification": verification_text,
                     "cert_number": cert_number,
                 })
 
-                success = True
+                # Treat "verify ran and failed" as an unsuccessful device.
+                # "Verify not run" or "verify passed" both count as success.
+                success = verify_ok is not False
                 self.status_message.emit(
-                    f"Device {device.friendly_name} completed successfully."
+                    f"Device {device.friendly_name} completed "
+                    f"{'successfully' if success else 'with verification errors'}."
                 )
+                # Stash the verify result on the worker for tests/inspectors.
+                self._last_verify_result = verify_result
 
             except InterruptedError:
                 self.status_message.emit("Wipe cancelled.")
@@ -329,6 +433,7 @@ class WipeWorker(QThread):
                     except OSError:
                         pass
 
+            self.phase_changed.emit(idx, "done")
             self.device_completed.emit(idx, success, cert_path)
 
         self.all_completed.emit()

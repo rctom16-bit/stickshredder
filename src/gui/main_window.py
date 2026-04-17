@@ -352,6 +352,37 @@ class MainWindow(QMainWindow):
         operator_layout.addRow("Operator:", self.operator_edit)
         layout.addLayout(operator_layout)
 
+        # Verification options
+        verify_group = QGroupBox("Verification / Verifikation")
+        verify_layout = QVBoxLayout(verify_group)
+        verify_layout.setSpacing(4)
+
+        self.full_verify_cb = QCheckBox(
+            "Vollst\u00e4ndige Verifikation (verdoppelt Laufzeit) / "
+            "Full verification (doubles runtime)"
+        )
+        self.full_verify_cb.setChecked(False)
+        self.full_verify_cb.setToolTip(
+            "Liest nach dem \u00dcberschreiben jeden Sektor erneut und "
+            "vergleicht mit dem erwarteten Muster. Erkennt stumm "
+            "fehlschlagende Sektoren. Verdoppelt etwa die Laufzeit.\n\n"
+            "Reads every sector after wiping and compares against the "
+            "expected pattern. Detects silently failing sectors. Roughly "
+            "doubles runtime."
+        )
+        self.full_verify_cb.stateChanged.connect(self._update_time_estimate)
+        verify_layout.addWidget(self.full_verify_cb)
+
+        verify_hint = QLabel(
+            "Standard: Stichprobenpr\u00fcfung (100 Sektoren) / "
+            "Default: sample check (100 sectors)"
+        )
+        verify_hint.setWordWrap(True)
+        verify_hint.setStyleSheet("color: #718096; font-size: 10px;")
+        verify_layout.addWidget(verify_hint)
+
+        layout.addWidget(verify_group)
+
         layout.addStretch()
 
         # Wipe button
@@ -376,6 +407,12 @@ class MainWindow(QMainWindow):
         group = QGroupBox("Progress / Fortschritt")
         layout = QVBoxLayout(group)
         layout.setSpacing(8)
+
+        # Phase badge — shows Idle / Wiping / Verifying / Complete
+        self.phase_label = QLabel(self._phase_text("idle"))
+        self.phase_label.setObjectName("phaseLabel")
+        self.phase_label.setStyleSheet(self._phase_style("idle"))
+        layout.addWidget(self.phase_label)
 
         # Current device info
         self.progress_device_label = QLabel("No operation in progress.")
@@ -403,6 +440,14 @@ class MainWindow(QMainWindow):
         details_row.addStretch()
         layout.addLayout(details_row)
 
+        # Verify progress bar (hidden until verify phase begins)
+        self.verify_progress_bar = QProgressBar()
+        self.verify_progress_bar.setRange(0, 100)
+        self.verify_progress_bar.setValue(0)
+        self.verify_progress_bar.setFormat("Verify: %p%")
+        self.verify_progress_bar.setVisible(False)
+        layout.addWidget(self.verify_progress_bar)
+
         # Batch progress
         self.batch_progress = QProgressBar()
         self.batch_progress.setRange(0, 100)
@@ -418,6 +463,42 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.cancel_btn)
 
         return group
+
+    # ── Phase helpers ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _phase_text(phase: str) -> str:
+        """DE/EN human label for a worker phase. Module-level testable."""
+        return {
+            "idle": "Bereit / Ready",
+            "wiping": "\u00dcberschreiben... / Wiping...",
+            "verifying": "Verifikation... / Verifying...",
+            "done": "Fertig / Complete",
+        }.get(phase, phase)
+
+    @staticmethod
+    def _phase_style(phase: str) -> str:
+        """Qt stylesheet for the phase badge. Color-coded per phase."""
+        base = (
+            "QLabel#phaseLabel {"
+            " padding: 4px 10px;"
+            " border-radius: 4px;"
+            " font-weight: bold;"
+            " font-size: 12px;"
+            "}"
+        )
+        color = {
+            "idle": "QLabel#phaseLabel { background-color: #edf2f7; color: #4a5568; }",
+            "wiping": "QLabel#phaseLabel { background-color: #fefcbf; color: #744210; }",
+            "verifying": "QLabel#phaseLabel { background-color: #bee3f8; color: #2c5282; }",
+            "done": "QLabel#phaseLabel { background-color: #c6f6d5; color: #22543d; }",
+        }.get(phase, "QLabel#phaseLabel { background-color: #edf2f7; color: #4a5568; }")
+        return base + "\n" + color
+
+    def _set_phase(self, phase: str) -> None:
+        """Update the phase badge label and style."""
+        self.phase_label.setText(self._phase_text(phase))
+        self.phase_label.setStyleSheet(self._phase_style(phase))
 
     # ── Status bar ───────────────────────────────────────────────────────
 
@@ -620,6 +701,11 @@ class MainWindow(QMainWindow):
     # ══════════════════════════════════════════════════════════════════════
 
     def _on_method_changed(self) -> None:
+        # This handler can fire while the control panel is still being built
+        # (method_combo.setCurrentIndex() triggers currentIndexChanged before
+        # the sibling widgets below are created). Guard accordingly.
+        if not hasattr(self, "custom_group") or not hasattr(self, "method_info"):
+            return
         method_key = self.method_combo.currentData()
         self.custom_group.setVisible(method_key == "custom")
 
@@ -685,6 +771,13 @@ class MainWindow(QMainWindow):
         total_mb = total_bytes / (1024 * 1024)
         total_seconds = (total_mb / _ESTIMATE_MBPS) * method.passes
 
+        # Full verification reads the drive once more at roughly the same speed.
+        verify_full = (
+            hasattr(self, "full_verify_cb") and self.full_verify_cb.isChecked()
+        )
+        if verify_full:
+            total_seconds += total_mb / _ESTIMATE_MBPS
+
         if total_seconds < 60:
             time_str = f"~{int(total_seconds)}s"
         elif total_seconds < 3600:
@@ -694,9 +787,10 @@ class MainWindow(QMainWindow):
             mins = int((total_seconds % 3600) // 60)
             time_str = f"~{hours}h {mins}min"
 
+        verify_suffix = " + full verify" if verify_full else ""
         self.estimate_label.setText(
             f"{time_str} for {len(selected)} device(s), "
-            f"{method.passes} pass(es)"
+            f"{method.passes} pass(es){verify_suffix}"
         )
 
     # ══════════════════════════════════════════════════════════════════════
@@ -838,6 +932,7 @@ class MainWindow(QMainWindow):
         """Launch the wipe worker thread."""
         method = self._get_wipe_method()
         sk_value = self.sk_combo.currentData() or 2
+        verify_mode = "full" if self.full_verify_cb.isChecked() else "sample"
 
         self.worker = WipeWorker(
             devices=devices,
@@ -845,9 +940,12 @@ class MainWindow(QMainWindow):
             config=self.config,
             schutzklasse=sk_value,
             operator=self.operator_edit.text().strip(),
+            verify_mode=verify_mode,
             parent=self,
         )
         self.worker.progress_updated.connect(self._on_progress)
+        self.worker.verify_progress.connect(self._on_verify_progress)
+        self.worker.phase_changed.connect(self._on_phase_changed)
         self.worker.device_completed.connect(self._on_device_completed)
         self.worker.all_completed.connect(self._on_all_completed)
         self.worker.error.connect(self._on_wipe_error)
@@ -859,15 +957,19 @@ class MainWindow(QMainWindow):
 
         self.device_progress.setValue(0)
         self.device_progress.setStyleSheet("")  # reset color from prior run
+        self.verify_progress_bar.setValue(0)
+        self.verify_progress_bar.setVisible(False)
         self.batch_progress.setValue(0)
         self.batch_progress.setMaximum(len(devices) * 100)
 
         self._completed_count = 0
         self._total_devices = len(devices)
+        self._verify_mode = verify_mode
 
         audit_log(
             f"Starting batch wipe: {len(devices)} device(s), "
-            f"method={method.name}, schutzklasse={sk_value}"
+            f"method={method.name}, schutzklasse={sk_value}, "
+            f"verify_mode={verify_mode}"
         )
 
         self.worker.start()
@@ -879,6 +981,8 @@ class MainWindow(QMainWindow):
         self.custom_group.setEnabled(enabled)
         self.refresh_btn.setEnabled(enabled)
         self.operator_edit.setEnabled(enabled)
+        if hasattr(self, "full_verify_cb"):
+            self.full_verify_cb.setEnabled(enabled)
         for cb in self._device_checkboxes:
             cb.setEnabled(enabled and not self.devices[
                 self._device_checkboxes.index(cb)
@@ -957,6 +1061,65 @@ class MainWindow(QMainWindow):
                 min(batch_pct, self._total_devices * 100)
             )
 
+    @Slot(int, str)
+    def _on_phase_changed(self, device_index: int, phase: str) -> None:
+        """Update the phase badge and verify-bar visibility as the worker
+        transitions between wipe and verify phases."""
+        self._set_phase(phase)
+        if phase == "verifying":
+            # Reset verify bar to 0 and show it.
+            self.verify_progress_bar.setValue(0)
+            self.verify_progress_bar.setVisible(True)
+            # Sample verify produces no progress ticks, so mark
+            # indeterminate by showing the label + 0%. Full verify
+            # will animate via _on_verify_progress.
+            if getattr(self, "_verify_mode", "sample") == "sample":
+                self.verify_progress_bar.setFormat("Verify (sample): running...")
+            else:
+                self.verify_progress_bar.setFormat("Verify (full): %p%")
+        elif phase == "wiping":
+            # Hide the verify bar at the start of each device.
+            self.verify_progress_bar.setVisible(False)
+        elif phase == "done":
+            # Leave the verify bar visible so the operator can see its final state.
+            pass
+
+    @Slot(int, float, int, int, float)
+    def _on_verify_progress(
+        self,
+        device_index: int,
+        fraction: float,
+        bytes_done: int,
+        total_bytes: int,
+        speed: float,
+    ) -> None:
+        """Drive the verify progress bar during full verification."""
+        pct = int(max(0.0, min(1.0, fraction)) * 100)
+        self.verify_progress_bar.setValue(pct)
+
+        if speed >= 1024:
+            speed_str = f"{speed / 1024:.1f} GB/s"
+        elif speed >= 1:
+            speed_str = f"{speed:.1f} MB/s"
+        elif speed > 0:
+            speed_str = f"{speed * 1024:.0f} KB/s"
+        else:
+            speed_str = "-- MB/s"
+        self.speed_label.setText(speed_str)
+
+        # ETA for verify pass.
+        if speed > 0 and total_bytes > 0:
+            remaining = total_bytes - bytes_done
+            eta_seconds = remaining / (speed * 1024 * 1024)
+            if eta_seconds < 60:
+                self.eta_label.setText(f"~{int(eta_seconds)} sec remaining")
+            elif eta_seconds < 3600:
+                self.eta_label.setText(f"~{int(eta_seconds // 60)} min remaining")
+            else:
+                h = int(eta_seconds // 3600)
+                m = int((eta_seconds % 3600) // 60)
+                self.eta_label.setText(f"~{h}h {m}min remaining")
+
     @Slot(int, bool, str)
     def _on_device_completed(
         self, device_index: int, success: bool, cert_path: str
@@ -969,13 +1132,25 @@ class MainWindow(QMainWindow):
             else f"Device {device_index}"
         )
 
+        # Pull the final verify result from the worker (if available) so
+        # we can show a more specific message when full-verify found errors.
+        worker = self.worker
+        verify_result = getattr(worker, "_last_verify_result", None) if worker else None
+        verify_method = getattr(verify_result, "method", "") or ""
+        verify_errors = int(getattr(verify_result, "error_count", 0) or 0)
+
         if success:
             # Green progress bar for successful verification
             self.device_progress.setStyleSheet(
                 "QProgressBar::chunk { background-color: #38a169; }"
             )
+            method_note = ""
+            if verify_method == "full":
+                method_note = " (full verify passed)"
+            elif verify_method == "sample":
+                method_note = " (sample verify passed)"
             self.progress_device_label.setText(
-                f"\u2705 {device_name}: Completed successfully. "
+                f"\u2705 {device_name}: Completed successfully{method_note}. "
                 f"Certificate: {os.path.basename(cert_path)}"
             )
         else:
@@ -983,14 +1158,22 @@ class MainWindow(QMainWindow):
             self.device_progress.setStyleSheet(
                 "QProgressBar::chunk { background-color: #e53e3e; }"
             )
-            self.progress_device_label.setText(
-                f"\u274c {device_name}: VERIFICATION FAILED"
-            )
+            if verify_method == "full" and verify_errors > 0:
+                self.progress_device_label.setText(
+                    f"\u274c {device_name}: FULL VERIFY FAILED \u2014 "
+                    f"{verify_errors} sector(s) mismatch. "
+                    "See certificate for details."
+                )
+            else:
+                self.progress_device_label.setText(
+                    f"\u274c {device_name}: VERIFICATION FAILED"
+                )
 
     @Slot()
     def _on_all_completed(self) -> None:
         self._set_controls_enabled(True)
         self.cancel_btn.setEnabled(False)
+        self._set_phase("done")
         self.worker = None
 
         completed = getattr(self, "_completed_count", 0)

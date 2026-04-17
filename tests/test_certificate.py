@@ -15,7 +15,17 @@ if not hasattr(ctypes, "windll"):
 ctypes.windll.kernel32 = MagicMock()
 sys.modules.setdefault("wmi", MagicMock())
 
-from cert.generator import format_capacity, format_duration, generate_certificate, CertificateData
+from cert.generator import (
+    CertificateData,
+    _build_styles,
+    _build_verification_elements,
+    _format_offsets_hex,
+    _format_seconds,
+    format_capacity,
+    format_duration,
+    generate_certificate,
+)
+from reportlab.platypus import Paragraph, Table
 
 
 # ── format_capacity ──────────────────────────────────────────────────
@@ -172,6 +182,194 @@ def test_generate_certificate_subdirectory_created(mock_log, tmp_path):
     data = _make_cert_data()
     result_path = generate_certificate(data, out)
     assert Path(result_path).exists()
+
+
+# ── _format_offsets_hex ──────────────────────────────────────────────
+
+def test_format_offsets_hex_basic():
+    assert _format_offsets_hex([0x400000, 0x10000200]) == "0x00400000, 0x10000200"
+
+
+def test_format_offsets_hex_caps_at_limit():
+    offsets = [i * 0x1000 for i in range(1, 16)]  # 15 offsets
+    result = _format_offsets_hex(offsets, limit=10)
+    parts = result.split(", ")
+    assert len(parts) == 10
+    assert parts[0] == "0x00001000"
+    assert parts[9] == "0x0000A000"
+
+
+def test_format_offsets_hex_empty():
+    assert _format_offsets_hex([]) == ""
+
+
+def test_format_offsets_hex_default_limit_10():
+    offsets = [i * 0x100 for i in range(1, 21)]  # 20 offsets
+    result = _format_offsets_hex(offsets)
+    assert len(result.split(", ")) == 10
+
+
+# ── _format_seconds ──────────────────────────────────────────────────
+
+def test_format_seconds_basic():
+    assert _format_seconds(1234.5) == "00:20:34"
+
+
+def test_format_seconds_zero():
+    assert _format_seconds(0.0) == "00:00:00"
+
+
+def test_format_seconds_large():
+    # 26h 3m 4s = 93784 seconds
+    assert _format_seconds(93784.0) == "26:03:04"
+
+
+def test_format_seconds_negative_clamped():
+    assert _format_seconds(-5.0) == "00:00:00"
+
+
+# ── _build_verification_elements — inspecting Paragraph text ─────────
+
+def _paragraph_texts(elements: list) -> str:
+    """Collect all Paragraph text content from a list of flowables (including
+    recursively from Table cells) into one big string for substring assertions."""
+    parts: list[str] = []
+
+    def _walk(flow):
+        if isinstance(flow, Paragraph):
+            # reportlab Paragraph keeps the original text in .text
+            parts.append(getattr(flow, "text", "") or "")
+        elif isinstance(flow, Table):
+            # Table._cellvalues holds the cell data (list of rows)
+            cells = getattr(flow, "_cellvalues", None) or []
+            for row in cells:
+                for cell in row:
+                    if isinstance(cell, list):
+                        for item in cell:
+                            _walk(item)
+                    else:
+                        _walk(cell)
+
+    for el in elements:
+        _walk(el)
+    return "\n".join(parts)
+
+
+def test_cert_renders_sample_verify_section():
+    data = _make_cert_data(
+        verify_method="sample",
+        sectors_checked=100,
+        verification_hash="deadbeef" * 8,
+        language="both",
+    )
+    styles = _build_styles()
+    elements = _build_verification_elements(data, styles, data.language)
+    text = _paragraph_texts(elements)
+    # sample mode label should appear in EN or DE
+    assert "Sample" in text or "Probe" in text
+    # sector count shown (formatted with . as thousands separator)
+    assert "100" in text
+    # hash shown
+    assert "deadbeef" in text
+
+
+def test_cert_renders_full_verify_section():
+    data = _make_cert_data(
+        verify_method="full",
+        verify_bytes=int(32e9),
+        verify_pattern="zeros",
+        verify_duration_seconds=1234.5,
+        verify_error_count=0,
+        language="en",
+    )
+    styles = _build_styles()
+    elements = _build_verification_elements(data, styles, data.language)
+    text = _paragraph_texts(elements)
+    assert "Full" in text or "Vollständig" in text
+    assert "Expected Pattern" in text
+    assert "zeros" in text
+    # bytes formatted via format_capacity -> GB range
+    assert "GB" in text
+    # duration formatted HH:MM:SS from 1234.5s -> 00:20:34
+    assert "00:20:34" in text
+
+
+def test_cert_shows_first_10_mismatch_offsets_on_failure():
+    offsets = [i * 0x1000 for i in range(1, 16)]  # 15 offsets
+    data = _make_cert_data(
+        verify_method="full",
+        verify_bytes=int(32e9),
+        verify_pattern="zeros",
+        verify_error_count=15,
+        verify_mismatch_offsets=offsets,
+        verification_passed=False,
+        language="en",
+    )
+    styles = _build_styles()
+    elements = _build_verification_elements(data, styles, data.language)
+    text = _paragraph_texts(elements)
+    # First 10 formatted offsets must appear
+    for i in range(1, 11):
+        assert f"0x{i * 0x1000:08X}" in text
+    # 11th-15th should NOT appear
+    assert "0x0000B000" not in text
+    assert "0x0000F000" not in text
+    # Error count shown
+    assert "15" in text
+
+
+def test_cert_verify_none_shows_skipped():
+    data = _make_cert_data(verify_method="none", language="both")
+    styles = _build_styles()
+    elements = _build_verification_elements(data, styles, data.language)
+    text = _paragraph_texts(elements)
+    assert "Skipped" in text or "Nicht durchgeführt" in text
+
+
+@patch("cert.generator.audit_log")
+def test_cert_backward_compat_no_verify_fields(mock_log, tmp_path):
+    """A pre-v1.1 caller doesn't pass any of the new verify_* fields."""
+    # Build CertificateData passing ONLY the pre-v1.1 fields (no verify_method, etc.)
+    data = CertificateData(
+        cert_number=7,
+        date=datetime(2026, 4, 15, 14, 30, 0),
+        operator="Legacy Caller",
+        client_reference="",
+        asset_tag="",
+        device_model="Kingston",
+        device_manufacturer="Kingston",
+        serial_number="LEGACY-001",
+        capacity_bytes=16 * 1024**3,
+        filesystem="exFAT",
+        connection_type="USB",
+        wipe_method="ZeroFill",
+        sicherheitsstufe="H-2",
+        schutzklasse=2,
+        passes=1,
+        start_time=datetime(2026, 4, 15, 14, 0, 0),
+        end_time=datetime(2026, 4, 15, 14, 25, 0),
+        verification_passed=True,
+        sectors_checked=50,
+        verification_hash="b" * 64,
+        company_name="Legacy GmbH",
+        company_address="Altstr. 1",
+        company_logo_path="",
+        language="de",
+    )
+    # Defaults should give sample-mode rendering and no crash
+    assert data.verify_method == "sample"
+    assert data.verify_bytes == 0
+    assert data.verify_pattern == ""
+    assert data.verify_error_count == 0
+    assert data.verify_mismatch_offsets == []
+    assert data.verify_duration_seconds == 0.0
+
+    out = str(tmp_path / "legacy.pdf")
+    result_path = generate_certificate(data, out)
+    p = Path(result_path)
+    assert p.exists()
+    assert p.stat().st_size > 0
+    assert p.read_bytes()[:5] == b"%PDF-"
 
 
 # ── Helper ────────────────────────────────────────────────────────────

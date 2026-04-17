@@ -130,14 +130,45 @@ stickshredder --drive E: --method vsitr --cert-output "C:\Certificates\wipe_2026
 
 ## Wipe Methods
 
-| Method | Passes | Pattern | DIN 66399 Level | Use Case |
-|---|---|---|---|---|
-| **Zero-Fill** | 1 | `0x00` | H-1 / H-2 | Quick wipe for non-sensitive data, device reuse within the organization |
-| **3-Pass Random** | 3 | Cryptographic random data | H-3 | Standard wipe for normal business data (Schutzklasse 1-2) |
-| **BSI VSITR** | 7 | Alternating `0x00` / `0xFF` + random final pass | H-4 | Enhanced wipe per BSI VSITR standard, recommended for confidential data |
-| **Custom** | User-defined | User-defined pattern and pass count | Varies | Flexible configuration for specific organizational requirements |
+| Method | Passes | Pattern | DIN 66399 Level | Verify Support | Use Case |
+|---|---|---|---|---|---|
+| **Zero-Fill** | 1 | `0x00` | H-1 / H-2 | sample, full | Quick wipe for non-sensitive data, device reuse within the organization |
+| **3-Pass Random** | 3 (+1) | Cryptographic random data | H-3 | sample, full | Standard wipe for normal business data (Schutzklasse 1-2) |
+| **BSI VSITR** | 7 (+1) | Alternating `0x00` / `0xFF` + random final pass | H-4 | sample, full | Enhanced wipe per BSI VSITR standard, recommended for confidential data |
+| **Custom** | User-defined | User-defined pattern and pass count | Varies | sample, full | Flexible configuration for specific organizational requirements |
+
+> **Note on `(+1)`:** When verification is enabled for random-data methods, StickShredder appends one zero-blanking pass after the final random pass so the result can be verified byte-by-byte. Without this extra pass, random data is indistinguishable from corrupted data without storing the PRNG seeds. See [Verification Modes](#verification-modes) below.
 
 > **Note:** For SSDs and flash-based USB drives, overwrite-based methods have inherent limitations due to wear leveling. See [SSD Limitations](#ssd-limitations) and [SECURITY.md](docs/SECURITY.md).
+
+---
+
+## Verification Modes
+
+After a wipe finishes, StickShredder can read the drive back to prove the overwrite actually took effect. There are three modes:
+
+| Mode | Runtime Cost | What It Does | When to Use |
+|---|---|---|---|
+| `none` | 0% | Skip verification entirely | You trust the drive and don't need a signed verification record |
+| `sample` (default) | ~1% | Reads 100 random sectors, hashes them, compares to the expected pattern | Standard use — fast, catches most large-scale failures |
+| `full` | ~100% (doubles runtime) | Reads **every** sector and compares against the expected pattern; reports the first 100 mismatching byte offsets | Regulatory audits, silent-sector-failure detection, high-value drives |
+
+**Why full verify matters.** Overwrite-based wipes assume each `WriteFile` that returns success actually committed data to the media. On aging flash or failing USB controllers, some sectors can "silently fail" — writes appear to succeed, but old content is still present when you read it back. Only full verify catches this.
+
+**CLI:**
+
+```bash
+# Sample verify (default — same as 1.0.x behavior)
+stickshredder wipe --device E: --method standard --operator "Robin"
+
+# Full verify — roughly doubles the total runtime
+stickshredder wipe --device E: --method standard --operator "Robin" --verify full
+
+# Skip verification entirely
+stickshredder wipe --device E: --method zero --operator "Robin" --verify none
+```
+
+**GUI:** tick the *"Full verification (doubles runtime)"* checkbox in the wipe configuration panel. Without the checkbox, the GUI still performs sample verification by default.
 
 ---
 
@@ -359,14 +390,45 @@ stickshredder --drive E: --method vsitr --cert-output "C:\Zertifikate\wipe_2026-
 
 ### Löschmethoden
 
-| Methode | Durchläufe | Muster | DIN 66399 Stufe | Einsatzzweck |
-|---|---|---|---|---|
-| **Zero-Fill** | 1 | `0x00` | H-1 / H-2 | Schnelles Löschen für nicht-sensible Daten, Geräteweitergabe innerhalb der Organisation |
-| **3-Pass Random** | 3 | Kryptographische Zufallsdaten | H-3 | Standardlöschung für normale Geschäftsdaten (Schutzklasse 1-2) |
-| **BSI VSITR** | 7 | Abwechselnd `0x00` / `0xFF` + zufälliger letzter Durchlauf | H-4 | Erweiterte Löschung nach BSI VSITR-Standard, empfohlen für vertrauliche Daten |
-| **Benutzerdefiniert** | Frei wählbar | Frei wählbares Muster und Durchlaufanzahl | Variiert | Flexible Konfiguration für spezifische Organisationsanforderungen |
+| Methode | Durchläufe | Muster | DIN 66399 Stufe | Verifikation | Einsatzzweck |
+|---|---|---|---|---|---|
+| **Zero-Fill** | 1 | `0x00` | H-1 / H-2 | Probe, Vollständig | Schnelles Löschen für nicht-sensible Daten, Geräteweitergabe innerhalb der Organisation |
+| **3-Pass Random** | 3 (+1) | Kryptographische Zufallsdaten | H-3 | Probe, Vollständig | Standardlöschung für normale Geschäftsdaten (Schutzklasse 1-2) |
+| **BSI VSITR** | 7 (+1) | Abwechselnd `0x00` / `0xFF` + zufälliger letzter Durchlauf | H-4 | Probe, Vollständig | Erweiterte Löschung nach BSI VSITR-Standard, empfohlen für vertrauliche Daten |
+| **Benutzerdefiniert** | Frei wählbar | Frei wählbares Muster und Durchlaufanzahl | Variiert | Probe, Vollständig | Flexible Konfiguration für spezifische Organisationsanforderungen |
+
+> **Hinweis zu `(+1)`:** Bei aktivierter Verifikation hängt StickShredder an Methoden mit zufälligem letzten Durchlauf einen zusätzlichen Null-Durchlauf an, damit das Ergebnis byte-genau überprüft werden kann. Ohne diesen zusätzlichen Durchlauf sind Zufallsdaten ohne gespeicherte PRNG-Seeds nicht von beschädigten Daten zu unterscheiden. Siehe [Verifikationsmodi](#verifikationsmodi) unten.
 
 > **Hinweis:** Für SSDs und Flash-basierte USB-Datenträger haben überschreibbasierte Methoden systembedingte Einschränkungen aufgrund von Wear Leveling. Siehe [SSD-Einschränkungen](#ssd-einschränkungen) und [SECURITY.md](docs/SECURITY.md).
+
+---
+
+### Verifikationsmodi
+
+Nach Abschluss des Löschvorgangs kann StickShredder den Datenträger erneut auslesen, um nachzuweisen, dass das Überschreiben tatsächlich wirksam war. Es gibt drei Modi:
+
+| Modus | Laufzeitkosten | Beschreibung | Einsatz |
+|---|---|---|---|
+| `none` | 0% | Keine Verifikation | Wenn dem Datenträger vertraut wird und kein signierter Nachweis erforderlich ist |
+| `sample` (Standard) | ca. 1% | Liest 100 zufällige Sektoren, hasht sie und vergleicht mit dem erwarteten Muster | Standardnutzung — schnell, erkennt großflächige Fehler |
+| `full` | ca. 100% (verdoppelt Laufzeit) | Liest **jeden** Sektor und vergleicht byte-genau mit dem erwarteten Muster; meldet die ersten 100 Fehler-Offsets | Regulatorische Audits, Erkennung still fehlschlagender Sektoren, hochwertige Datenträger |
+
+**Warum vollständige Verifikation zählt.** Überschreibbasierte Löschungen gehen davon aus, dass jeder erfolgreich zurückgekehrte `WriteFile`-Aufruf Daten tatsächlich auf das Medium geschrieben hat. Auf alternden Flash-Speichern oder ausfallenden USB-Controllern können einzelne Sektoren "still fehlschlagen" — das Schreiben scheint erfolgreich, aber beim erneuten Lesen sind die alten Daten noch vorhanden. Nur die vollständige Verifikation erkennt das.
+
+**CLI:**
+
+```bash
+# Probe-Verifikation (Standard — wie 1.0.x)
+stickshredder wipe --device E: --method standard --operator "Robin"
+
+# Vollständige Verifikation — verdoppelt ungefähr die Gesamtlaufzeit
+stickshredder wipe --device E: --method standard --operator "Robin" --verify full
+
+# Verifikation überspringen
+stickshredder wipe --device E: --method zero --operator "Robin" --verify none
+```
+
+**GUI:** Aktivieren Sie die Checkbox *"Vollständige Verifikation (verdoppelt Laufzeit)"* im Löschkonfigurationsbereich. Ohne Häkchen führt die GUI weiterhin standardmäßig eine Probe-Verifikation durch.
 
 ---
 

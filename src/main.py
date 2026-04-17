@@ -77,7 +77,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("StickShredder")
     app.setOrganizationName("StickShredder")
-    app.setApplicationVersion("1.0.0")
+    app.setApplicationVersion("1.1.0")
 
     # Apply stylesheet
     from gui.styles import APP_STYLESHEET

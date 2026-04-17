@@ -152,7 +152,13 @@ def verify_demo_file(
 
     if max_sector < 1:
         return VerificationResult(
-            passed=False,
+            success=False,
+            method="sample",
+            bytes_verified=file_size,
+            expected_pattern="zeros",
+            error_count=0,
+            mismatch_offsets=[],
+            duration_seconds=0.1,
             sectors_checked=0,
             sectors_matched=0,
             sample_hash="",
@@ -196,7 +202,13 @@ def verify_demo_file(
               f"checked={sectors_checked}, matched={sectors_matched}")
 
     return VerificationResult(
-        passed=passed,
+        success=passed,
+        method="sample",
+        bytes_verified=file_size,
+        expected_pattern="zeros",
+        error_count=sectors_checked - sectors_matched,
+        mismatch_offsets=[],
+        duration_seconds=0.1,
         sectors_checked=sectors_checked,
         sectors_matched=sectors_matched,
         sample_hash=hasher.hexdigest(),
