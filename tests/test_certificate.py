@@ -21,6 +21,7 @@ from cert.generator import (
     _build_verification_elements,
     _format_offsets_hex,
     _format_seconds,
+    _safe,
     format_capacity,
     format_duration,
     generate_certificate,
@@ -324,6 +325,89 @@ def test_cert_verify_none_shows_skipped():
     elements = _build_verification_elements(data, styles, data.language)
     text = _paragraph_texts(elements)
     assert "Skipped" in text or "Nicht durchgeführt" in text
+
+
+# ── Security: XML-escape user-supplied strings ──────────────────────
+
+def test_safe_helper_escapes_xml_special_chars():
+    """Sanity: _safe() escapes the five XML-reserved characters."""
+    assert _safe("</font>") == "&lt;/font&gt;"
+    assert _safe("AT&T") == "AT&amp;T"
+    assert _safe('say "hi"') == "say &quot;hi&quot;"
+    assert _safe("it's") == "it&apos;s"
+    assert _safe(None) == ""
+
+
+def _capture_paragraph_texts(monkeypatch) -> list[str]:
+    """Monkeypatch ``cert.generator.Paragraph`` to record the raw text of every
+    Paragraph constructed during certificate generation. Returns the list that
+    will be populated as the test exercises generate_certificate."""
+    import cert.generator as gen
+
+    captured: list[str] = []
+    real_paragraph = gen.Paragraph
+
+    def _spy(text, *args, **kwargs):
+        captured.append(text if isinstance(text, str) else str(text))
+        return real_paragraph(text, *args, **kwargs)
+
+    monkeypatch.setattr(gen, "Paragraph", _spy)
+    return captured
+
+
+@patch("cert.generator.audit_log")
+def test_cert_escapes_xml_in_operator_name(mock_log, tmp_path, monkeypatch):
+    """A forged operator name with XML tags must be escaped, not rendered as markup."""
+    captured = _capture_paragraph_texts(monkeypatch)
+    out = str(tmp_path / "cert_xml_op.pdf")
+    data = _make_cert_data(operator='</font><font color="red">HACK')
+    generate_certificate(data, out)
+
+    blob = "\n".join(captured)
+    # Escaped form must appear somewhere
+    assert "&lt;/font&gt;" in blob
+    # Raw tag must NOT leak through — it would otherwise be parsed as markup
+    assert "</font>" not in blob
+    assert '<font color="red">' not in blob
+
+
+@patch("cert.generator.audit_log")
+def test_cert_escapes_ampersand_in_company_name(mock_log, tmp_path, monkeypatch):
+    """Ampersands in the company name must be escaped to &amp; for valid XML."""
+    captured = _capture_paragraph_texts(monkeypatch)
+    out = str(tmp_path / "cert_amp.pdf")
+    data = _make_cert_data(company_name="AT&T GmbH")
+    generate_certificate(data, out)
+
+    blob = "\n".join(captured)
+    assert "AT&amp;T" in blob
+    # Bare ampersand must NOT appear in any Paragraph text — that would blow up
+    # reportlab's XML parser on strict versions and is the whole point of the fix.
+    for text in captured:
+        if "AT" in text and "T" in text.split("AT", 1)[1]:
+            assert "AT&T" not in text
+
+
+def test_cert_full_verify_shows_sectors_checked():
+    """Full verify mode must show both Verified Bytes and Sectors Checked."""
+    data = _make_cert_data(
+        verify_method="full",
+        verify_bytes=int(32e9),
+        verify_pattern="zeros",
+        verify_duration_seconds=60.0,
+        verify_error_count=0,
+        sectors_checked=62500,
+        language="en",
+    )
+    styles = _build_styles()
+    elements = _build_verification_elements(data, styles, data.language)
+    text = _paragraph_texts(elements)
+    # Label must appear in full mode too
+    assert "Sectors Checked" in text
+    # Formatted as 62.500 (German thousands style per this codebase)
+    assert "62.500" in text
+    # Verified Bytes still present
+    assert "GB" in text
 
 
 @patch("cert.generator.audit_log")

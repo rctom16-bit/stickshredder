@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from xml.sax.saxutils import escape as _xml_escape
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
@@ -36,6 +36,20 @@ FAIL_RED = colors.HexColor("#c53030")
 TEXT_GRAY = colors.HexColor("#4a5568")
 
 PAGE_WIDTH, PAGE_HEIGHT = A4
+
+
+# ---------------------------------------------------------------------------
+# XML-escape helper for user-supplied text
+# ---------------------------------------------------------------------------
+def _safe(text: str) -> str:
+    """Escape XML-reserved characters in user-supplied text before Paragraph rendering.
+
+    ReportLab parses Paragraph content as XML/HTML; without escaping, user input
+    can inject styling (color, font) or, in older reportlab versions, file:// URIs.
+    """
+    if text is None:
+        return ""
+    return _xml_escape(str(text), {"'": "&apos;", '"': "&quot;"})
 
 
 # ---------------------------------------------------------------------------
@@ -420,8 +434,14 @@ def _build_verification_elements(
         )
         verif_rows.append(
             (
+                _label("Geprüfte Sektoren", "Sectors Checked", lang),
+                f"{data.sectors_checked:,}".replace(",", "."),
+            )
+        )
+        verif_rows.append(
+            (
                 _label("Erwartetes Muster", "Expected Pattern", lang),
-                data.verify_pattern or "-",
+                _safe(data.verify_pattern) if data.verify_pattern else "-",
             )
         )
         verif_rows.append(
@@ -517,10 +537,10 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
 
     # Company name and address
     if data.company_name:
-        elements.append(Paragraph(data.company_name, styles["company"]))
+        elements.append(Paragraph(_safe(data.company_name), styles["company"]))
     if data.company_address:
-        # Replace newlines with <br/> for multi-line addresses
-        addr = data.company_address.replace("\n", "<br/>")
+        # Escape FIRST, then substitute newlines with <br/> so the tag survives
+        addr = _safe(data.company_address).replace("\n", "<br/>")
         elements.append(Paragraph(addr, styles["company_addr"]))
 
     elements.append(Spacer(1, 1 * mm))
@@ -560,21 +580,21 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
         ),
         (
             _label("Bediener", "Operator", lang),
-            data.operator,
+            _safe(data.operator),
         ),
     ]
     if data.client_reference:
         meta_rows.append(
             (
                 _label("Auftraggeber", "Client Reference", lang),
-                data.client_reference,
+                _safe(data.client_reference),
             )
         )
     if data.asset_tag:
         meta_rows.append(
             (
                 _label("Asset-Tag / Ticket-Nummer", "Asset Tag / Ticket Number", lang),
-                data.asset_tag,
+                _safe(data.asset_tag),
             )
         )
 
@@ -594,11 +614,11 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
     device_rows: list[tuple[str, str]] = [
         (
             _label("Hersteller / Modell", "Manufacturer / Model", lang),
-            f"{data.device_manufacturer}  {data.device_model}",
+            f"{_safe(data.device_manufacturer)}  {_safe(data.device_model)}",
         ),
         (
             _label("Seriennummer", "Serial Number", lang),
-            data.serial_number,
+            _safe(data.serial_number),
         ),
         (
             _label("Kapazität", "Capacity", lang),
@@ -606,11 +626,11 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
         ),
         (
             _label("Dateisystem vor Löschung", "Filesystem Before Wipe", lang),
-            data.filesystem,
+            _safe(data.filesystem),
         ),
         (
             _label("Verbindungstyp", "Connection Type", lang),
-            data.connection_type,
+            _safe(data.connection_type),
         ),
     ]
     elements.append(_kv_table(device_rows, styles))
@@ -630,11 +650,11 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
     wipe_rows: list[tuple[str, str]] = [
         (
             _label("Löschmethode", "Deletion Method", lang),
-            data.wipe_method,
+            _safe(data.wipe_method),
         ),
         (
             _label("DIN 66399 Sicherheitsstufe", "DIN 66399 Security Level", lang),
-            data.sicherheitsstufe,
+            _safe(data.sicherheitsstufe),
         ),
         (
             _label("Schutzklasse", "Protection Class", lang),

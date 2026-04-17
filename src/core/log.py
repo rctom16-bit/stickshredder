@@ -24,11 +24,30 @@ def setup_logging() -> None:
 
 
 def audit_log(message: str) -> None:
+    """Append a timestamped entry to the audit log file.
+
+    Control characters (``\\n``, ``\\r``) and the ``|`` field separator are
+    escaped to prevent log-injection attacks via crafted device strings
+    (serial numbers, models, etc.) that could otherwise forge additional
+    log entries. Pathologically long messages are truncated to 4000 chars.
+    """
+    if message is None:
+        message = "<none>"
+    # Replace control characters that could be used to forge log entries
+    safe_msg = (
+        str(message)
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("|", "\\|")
+    )
+    # Truncate pathologically long messages
+    if len(safe_msg) > 4000:
+        safe_msg = safe_msg[:4000] + "...[truncated]"
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().isoformat()
     with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"{timestamp} | {message}\n")
-    logger.info(message)
+        f.write(f"{timestamp} | {safe_msg}\n")
+    logger.info(safe_msg)
 
 
 CSV_HEADERS = [

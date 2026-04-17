@@ -206,7 +206,10 @@ def test_execute_success(mock_audit):
     assert result.passes == 1
     assert result.bytes_written == drive_size
     assert result.error_message is None
-    assert len(progress_calls) == drive_size // block_size
+    # Progress is batched to every 50 MB with a guaranteed fire at end-of-pass,
+    # so for a 4 KB drive we expect exactly one callback: the end-of-pass one.
+    assert len(progress_calls) == 1
+    assert progress_calls[0] == (1, drive_size)
     # WriteFile should have been called 4 times (4096 / 1024)
     assert mock_wb.call_count == drive_size // block_size
 

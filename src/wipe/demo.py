@@ -12,7 +12,7 @@ from datetime import datetime
 from core.log import audit_log
 from wipe.device import DeviceInfo
 from wipe.methods import WipeMethod, WipeResult, ProgressCallback
-from wipe.verify import VerificationResult, VerifyResult, VerifyProgressCallback
+from wipe.verify import VerifyResult, VerifyProgressCallback
 
 SECTOR_SIZE = 512
 DEFAULT_DEMO_SIZE = 10 * 1024 * 1024  # 10 MB
@@ -314,6 +314,11 @@ def _demo_full_verify(path: str, expected_pattern: bytes,
             return b""
         return (expected_pattern * ((size // len(expected_pattern)) + 1))[:size]
 
+    # Pre-allocate the full-size zero block for is_random_check comparison.
+    zero_full = b"\x00" * block_size if is_random_check else b""
+    # Pre-build the full-size expected block once for fixed-pattern verify.
+    _expected_full = _build_expected_block(block_size) if not is_random_check else b""
+
     with open(path, "rb") as f:
         offset = 0
         while offset < file_size:
@@ -330,16 +335,17 @@ def _demo_full_verify(path: str, expected_pattern: bytes,
                 continue
 
             if is_random_check:
-                if data == b"\x00" * chunk:
+                zero_block = zero_full if chunk == block_size else zero_full[:chunk]
+                if data == zero_block:
                     error_count += 1
                     if len(mismatch_offsets) < 100:
                         mismatch_offsets.append(offset)
             else:
-                expected_block = _build_expected_block(chunk)
+                expected_block = _expected_full if chunk == block_size else _build_expected_block(chunk)
                 if data != expected_block:
                     error_count += 1
-                    for i, (a, b) in enumerate(zip(data, expected_block)):
-                        if a != b:
+                    for i, (got, exp) in enumerate(zip(data, expected_block)):
+                        if got != exp:
                             if len(mismatch_offsets) < 100:
                                 mismatch_offsets.append(offset + i)
                             break
@@ -355,13 +361,14 @@ def _demo_full_verify(path: str, expected_pattern: bytes,
                     progress_callback(fraction, bytes_verified, file_size, speed)
                     last_progress_bytes = bytes_verified
 
-    if progress_callback is not None and file_size > 0:
+    if progress_callback is not None and file_size > 0 and last_progress_bytes < file_size:
         elapsed = time.monotonic() - start
         speed = (bytes_verified / (1024 * 1024)) / elapsed if elapsed > 0 else 0.0
         progress_callback(1.0, bytes_verified, file_size, speed)
 
     duration = time.monotonic() - start
     success = error_count == 0
+    sectors_checked = bytes_verified // SECTOR_SIZE
 
     audit_log(
         f"Demo full verification: success={success}, "
@@ -373,6 +380,7 @@ def _demo_full_verify(path: str, expected_pattern: bytes,
         success=success, method="full", bytes_verified=bytes_verified,
         expected_pattern=pattern_label, error_count=error_count,
         mismatch_offsets=mismatch_offsets, duration_seconds=duration,
+        sectors_checked=sectors_checked,
     )
 
 
@@ -380,6 +388,6 @@ def verify_demo_file(
     path: str,
     expected_pattern: bytes,
     sample_count: int = 100,
-) -> VerificationResult:
+) -> VerifyResult:
     """Legacy wrapper — always sample-verifies. Prefer wipe_demo_file(verify_mode=...) instead."""
     return _demo_sample_verify(path, expected_pattern, sample_count)

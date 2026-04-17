@@ -155,6 +155,8 @@ After a wipe finishes, StickShredder can read the drive back to prove the overwr
 
 **Why full verify matters.** Overwrite-based wipes assume each `WriteFile` that returns success actually committed data to the media. On aging flash or failing USB controllers, some sectors can "silently fail" — writes appear to succeed, but old content is still present when you read it back. Only full verify catches this.
 
+**Zero-blanking pass for random methods.** When verification is enabled (either `sample` or `full`) and the selected method ends on a random pass — **3-Pass Random** or **BSI-VSITR** — StickShredder automatically appends one final zero-blanking pass so the drive can be verified against a known pattern (`0x00`). This is why the methods table shows `3 (+1)` and `7 (+1)`: BSI-VSITR runs 7 nominal passes, plus one zero-pass, for **8 passes total** when verification is on. The appended pass is recorded on the certificate (actual pass count) and in the CSV history.
+
 **CLI:**
 
 ```bash

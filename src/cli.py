@@ -19,6 +19,15 @@ from wipe.methods import ZeroFill, RandomThreePass, BsiVsitr, CustomWipe, WipeRe
 from wipe.verify import VerifyResult
 
 
+def is_admin() -> bool:
+    """Check if the current process has administrator privileges."""
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return False
+
+
 # -- ANSI colour helpers ----------------------------------------------------
 
 class _Ansi:
@@ -253,19 +262,6 @@ def _resolve_wipe_method(args: argparse.Namespace) -> ZeroFill | RandomThreePass
     _die(f"Unknown wipe method: {method}")
 
 
-def _expected_pattern_for_verification(method_name: str) -> bytes:
-    """Return the expected byte pattern for post-wipe verification.
-
-    For random-data methods we return an empty bytes object, which tells
-    verify_wipe() to simply check that sectors are non-zero.
-    """
-    if method_name == "ZeroFill":
-        return b"\x00"
-    # RandomThreePass, BSI-VSITR (last pass is random), Custom(random)
-    # all end with random data -- use the "non-zero" check.
-    return b""
-
-
 # -- Helpers ----------------------------------------------------------------
 
 def _die(message: str) -> NoReturn:
@@ -315,6 +311,14 @@ def cmd_list(args: argparse.Namespace) -> None:
 
 def cmd_wipe(args: argparse.Namespace) -> None:
     """Handle the 'wipe' command."""
+    # Admin check — wipe requires raw disk access
+    if not is_admin():
+        _die(
+            "Administrator privileges required for wiping. "
+            "Please run StickShredder from an elevated (Administrator) terminal "
+            "and try again."
+        )
+
     config = AppConfig.load()
 
     # -- Resolve device -----------------------------------------------------
@@ -534,7 +538,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         wipe_method=wipe_method.name,
         sicherheitsstufe=wipe_method.sicherheitsstufe,
         schutzklasse=schutzklasse,
-        passes=wipe_method.passes,
+        passes=wipe_result.passes,  # actual total including zero-blank
         start_time=wipe_result.start_time,
         end_time=wipe_result.end_time,
         verification_passed=verify_result.success if verify_result else False,
@@ -571,7 +575,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         "serial_number": device.serial_number or "N/A",
         "capacity_bytes": str(device.capacity_bytes),
         "method": wipe_method.name,
-        "passes": str(wipe_method.passes),
+        "passes": str(wipe_result.passes),
         "operator": args.operator,
         "start_time": wipe_result.start_time.strftime("%Y-%m-%d %H:%M:%S"),
         "end_time": wipe_result.end_time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -589,7 +593,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     print(_c(_Ansi.BOLD + _Ansi.CYAN, "  === Wipe Summary ==="))
     print(f"    Device:          {device.drive_letter} ({device.model or 'Unknown'})")
     print(f"    Serial:          {device.serial_number or 'N/A'}")
-    print(f"    Method:          {wipe_method.name} ({wipe_method.passes} passes)")
+    print(f"    Method:          {wipe_method.name} ({wipe_result.passes} passes)")
     print(f"    Duration:        {_format_duration(wipe_result.start_time, wipe_result.end_time)}")
     print(f"    Result:          {_c(_Ansi.GREEN + _Ansi.BOLD, 'SUCCESS') if wipe_result.success else _c(_Ansi.RED + _Ansi.BOLD, 'FAILED')}")
 

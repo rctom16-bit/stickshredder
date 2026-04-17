@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wintypes
-import os
 import subprocess
 from dataclasses import dataclass, field
 from typing import Optional
@@ -27,7 +26,56 @@ FSCTL_LOCK_VOLUME = 0x00090018
 FSCTL_UNLOCK_VOLUME = 0x0009001C
 FSCTL_DISMOUNT_VOLUME = 0x00090020
 
-kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+# Load kernel32 with use_last_error=True so ctypes.get_last_error() returns the
+# real Win32 error code set by the last API call (rather than whatever errno
+# the Python interpreter happened to stash in the thread state).
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+# Explicit prototypes for every kernel32 function used in this module.
+# Without these, ctypes defaults to int-sized arguments and return values,
+# which silently truncates 64-bit HANDLEs on 64-bit Windows and leads to
+# "handle looks valid but all subsequent calls fail" bugs.
+kernel32.CreateFileW.argtypes = [
+    wintypes.LPCWSTR,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    wintypes.DWORD,
+    wintypes.HANDLE,
+]
+kernel32.CreateFileW.restype = wintypes.HANDLE
+
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.restype = wintypes.BOOL
+
+kernel32.DeviceIoControl.argtypes = [
+    wintypes.HANDLE,
+    wintypes.DWORD,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    ctypes.POINTER(wintypes.DWORD),
+    ctypes.c_void_p,
+]
+kernel32.DeviceIoControl.restype = wintypes.BOOL
+
+kernel32.GetWindowsDirectoryW.argtypes = [wintypes.LPWSTR, wintypes.UINT]
+kernel32.GetWindowsDirectoryW.restype = wintypes.UINT
+
+
+def _handle_is_invalid(h) -> bool:
+    """True if a Win32 HANDLE value represents failure.
+
+    CreateFileW returns INVALID_HANDLE_VALUE on failure. Depending on how
+    ctypes interprets the return type (signed vs unsigned, 32- vs 64-bit),
+    that value surfaces in Python as either -1 or 0xFFFFFFFFFFFFFFFF. A
+    None or 0 handle is also treated as invalid defensively.
+    """
+    if h is None:
+        return True
+    return h in (-1, 0xFFFFFFFFFFFFFFFF, 0)
 
 
 # ── Data model ─────────────────────────────────────────────────────────
@@ -65,9 +113,22 @@ def _get_wmi_connection() -> wmi.WMI:
 
 
 def _system_drive_letter() -> str:
-    """Return the drive letter (e.g. 'C:') that Windows booted from."""
-    sys_root = os.environ.get("SystemRoot", r"C:\Windows")
-    return sys_root[:2].upper()
+    """Return the boot volume drive letter (e.g. 'C:') via Win32 API.
+
+    Uses GetWindowsDirectoryW rather than trusting the %SystemRoot%
+    environment variable, which is user-controllable and therefore
+    unsafe as the authoritative source for "which drive must never
+    be wiped".
+    """
+    try:
+        buf = ctypes.create_unicode_buffer(260)
+        n = kernel32.GetWindowsDirectoryW(buf, 260)
+        if n > 0:
+            return buf.value[:2].upper()
+    except Exception:
+        pass
+    # Last-resort fallback if the API call ever fails on a weird system.
+    return "C:"
 
 
 def _physical_drive_index_for_letter(
@@ -260,7 +321,7 @@ def open_physical_drive(device_id: str) -> int:
         0,
         None,
     )
-    if handle == INVALID_HANDLE_VALUE:
+    if _handle_is_invalid(handle):
         err = ctypes.get_last_error()
         raise OSError(
             f"CreateFileW failed for {device_id} (error {err}). "
@@ -271,7 +332,7 @@ def open_physical_drive(device_id: str) -> int:
 
 
 def close_drive(handle: int) -> None:
-    if handle and handle != INVALID_HANDLE_VALUE:
+    if not _handle_is_invalid(handle):
         kernel32.CloseHandle(handle)
         audit_log(f"Closed drive handle {handle}")
 
@@ -344,7 +405,7 @@ def dismount_volume(drive_letter: str) -> None:
         0,
         None,
     )
-    if handle == INVALID_HANDLE_VALUE:
+    if _handle_is_invalid(handle):
         err = ctypes.get_last_error()
         raise OSError(
             f"Cannot open volume {volume_path} for dismount (error {err})"

@@ -48,14 +48,40 @@ def test_safe_to_wipe_false_system():
 
 # ── _system_drive_letter ─────────────────────────────────────────────
 
-def test_system_drive_letter_from_env(monkeypatch):
-    monkeypatch.setenv("SystemRoot", r"D:\Windows")
+def test_system_drive_letter_from_api(monkeypatch):
+    """_system_drive_letter reads the boot volume via GetWindowsDirectoryW."""
+    import wipe.device as device_mod
+
+    def fake_get_windows_dir(buf, size):
+        # Write "D:\Windows" into the caller-provided buffer and return
+        # the character count (mirroring the real Win32 API contract).
+        path = "D:\\Windows"
+        for i, ch in enumerate(path):
+            buf[i] = ch
+        buf[len(path)] = "\x00"
+        return len(path)
+
+    monkeypatch.setattr(
+        device_mod.kernel32, "GetWindowsDirectoryW", fake_get_windows_dir
+    )
     assert _system_drive_letter() == "D:"
 
 
-def test_system_drive_letter_default(monkeypatch):
-    monkeypatch.delenv("SystemRoot", raising=False)
-    # Falls back to C:\Windows -> "C:"
+def test_system_drive_letter_fallback_on_api_failure(monkeypatch):
+    """If GetWindowsDirectoryW raises, _system_drive_letter falls back to 'C:'."""
+    import wipe.device as device_mod
+
+    def raising(buf, size):
+        raise OSError("simulated API failure")
+
+    monkeypatch.setattr(
+        device_mod.kernel32, "GetWindowsDirectoryW", raising
+    )
+    assert _system_drive_letter() == "C:"
+
+
+def test_system_drive_letter_real_call():
+    """Sanity check against the real API: returns a two-char drive like 'C:'."""
     result = _system_drive_letter()
     assert len(result) == 2 and result[1] == ":"
 
@@ -83,9 +109,11 @@ def test_connection_none():
 @patch("wipe.device.audit_log")
 @patch("wipe.device._check_active_processes", return_value=False)
 @patch("wipe.device._check_bitlocker", return_value=False)
+@patch("wipe.device._system_drive_letter", return_value="C:")
 @patch("wipe.device._get_wmi_connection")
-def test_list_devices_returns_usb_device(mock_wmi_conn, mock_bl, mock_ap, mock_log, monkeypatch):
-    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+def test_list_devices_returns_usb_device(
+    mock_wmi_conn, mock_sysletter, mock_bl, mock_ap, mock_log
+):
 
     # Build a fake WMI graph
     mock_c = MagicMock()

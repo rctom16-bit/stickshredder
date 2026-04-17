@@ -376,10 +376,24 @@ def test_full_verify_progress_callback_fractions(mock_kernel32):
 
 @patch("wipe.verify.kernel32")
 def test_full_verify_large_drive_5gb(mock_kernel32):
-    """5 GB drive: assert SetFilePointerEx gets int64 offsets above 2**32."""
+    """5 GB drive: every byte is verified and error-recovery re-seeks above 2**32.
+
+    full_verify now only calls SetFilePointerEx once up front on the happy path
+    (Windows auto-advances the file pointer after each ReadFile), so we can no
+    longer assert "some seek > 2**32" on a clean run. Instead we:
+
+      1. Force a ReadFile failure on a block past the 2**32 boundary. That
+         triggers the error-recovery path, which re-seeks to block_start — so
+         we still exercise int64 offset handling with a real >2**32 argument.
+      2. Assert the run still covers all 5 GB otherwise.
+    """
     drive_size = 5 * 1024**3  # 5 GB
+    # First block past 2**32: block index ceil(2**32 / 1 MiB) = 4096.
+    fail_idx = 4096
 
     def reader(idx, size):
+        if idx == fail_idx:
+            return False, b""
         return True, b"\x00" * size
 
     _install_full_verify_mocks(mock_kernel32, reader)
@@ -389,19 +403,23 @@ def test_full_verify_large_drive_5gb(mock_kernel32):
         drive_size=drive_size,
         expected_pattern=b"\x00",
     )
-    assert result.success is True
+    # One forced ReadFile failure → one error, every other block verified.
     assert result.bytes_verified == drive_size
+    assert result.error_count == 1
+    assert result.success is False
 
+    # The ctypes prototype we installed in verify.py guarantees the offset
+    # argument is c_int64 on every call; assert that contract holds and that
+    # error recovery re-seeks past 2**32.
     saw_above_32bit = False
     for call in mock_kernel32.SetFilePointerEx.call_args_list:
         args = call.args
         assert len(args) >= 2
         pos_arg = args[1]
-        if hasattr(pos_arg, "value"):
-            assert isinstance(pos_arg, ctypes.c_int64)
-            if pos_arg.value > 2**32:
-                saw_above_32bit = True
-    assert saw_above_32bit, "expected at least one seek above 2**32"
+        assert isinstance(pos_arg, ctypes.c_int64)
+        if pos_arg.value > 2**32:
+            saw_above_32bit = True
+    assert saw_above_32bit, "expected error-recovery seek above 2**32"
 
 
 @patch("wipe.verify.kernel32")

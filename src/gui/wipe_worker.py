@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QThread, Signal
@@ -50,21 +52,11 @@ def _expected_pattern_for(method: WipeMethod) -> bytes:
         return b"\x00"
 
 
-def _verify_ok(verify_result: Any) -> bool | None:
-    """Normalize the success flag across VerifyResult and its legacy alias.
-
-    Returns True/False when verification ran, or None if no verification
-    result is available (verify_mode="none" or verify raised internally).
-    """
-    if verify_result is None:
+def _verify_ok(result: Any) -> bool | None:
+    """Return the verify success status, or None if no verify was performed."""
+    if result is None:
         return None
-    # New field name used by wipe.verify.VerifyResult.
-    if hasattr(verify_result, "success"):
-        return bool(verify_result.success)
-    # Legacy field name still used by some demo paths.
-    if hasattr(verify_result, "passed"):
-        return bool(verify_result.passed)
-    return None
+    return bool(result.success)
 
 
 class WipeWorker(QThread):
@@ -354,7 +346,7 @@ class WipeWorker(QThread):
                     wipe_method=self.wipe_method.name,
                     sicherheitsstufe=self.wipe_method.sicherheitsstufe,
                     schutzklasse=self.schutzklasse,
-                    passes=self.wipe_method.passes,
+                    passes=wipe_result.passes,
                     start_time=wipe_result.start_time,
                     end_time=wipe_result.end_time,
                     verification_passed=verification_passed_bool,
@@ -372,9 +364,7 @@ class WipeWorker(QThread):
                     f"{datetime.now().strftime('%Y%m%d')}.pdf"
                 )
                 cert_dir = self.config.cert_output_dir
-                cert_path = str(
-                    __import__("pathlib").Path(cert_dir) / cert_filename
-                )
+                cert_path = str(Path(cert_dir) / cert_filename)
                 cert_path = generate_certificate(cert_data, cert_path)
 
                 # 10. Log to CSV
@@ -393,7 +383,7 @@ class WipeWorker(QThread):
                     "serial_number": device.serial_number,
                     "capacity_bytes": device.capacity_bytes,
                     "method": self.wipe_method.name,
-                    "passes": self.wipe_method.passes,
+                    "passes": wipe_result.passes,
                     "operator": self.operator,
                     "start_time": wipe_result.start_time.isoformat(),
                     "end_time": wipe_result.end_time.isoformat(),
@@ -403,9 +393,11 @@ class WipeWorker(QThread):
                     "cert_number": cert_number,
                 })
 
-                # Treat "verify ran and failed" as an unsuccessful device.
-                # "Verify not run" or "verify passed" both count as success.
-                success = verify_ok is not False
+                # Overall device success: wipe must succeed, and if verify
+                # ran, it must succeed too. "Verify not run" is neutral.
+                wipe_ok = bool(wipe_result.success)
+                overall_ok = wipe_ok and verify_ok is not False
+                success = overall_ok
                 self.status_message.emit(
                     f"Device {device.friendly_name} completed "
                     f"{'successfully' if success else 'with verification errors'}."
@@ -435,8 +427,7 @@ class WipeWorker(QThread):
                 # Clean up demo temp file
                 if demo_file_path is not None:
                     try:
-                        import os as _os
-                        _os.remove(demo_file_path)
+                        os.remove(demo_file_path)
                         audit_log(f"Demo: cleaned up temp file {demo_file_path}")
                     except OSError:
                         pass

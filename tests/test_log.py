@@ -43,6 +43,83 @@ def test_audit_log_appends(tmp_path, monkeypatch):
     assert "Second" in lines[1]
 
 
+# ── audit_log injection hardening ────────────────────────────────────
+
+def test_audit_log_escapes_newlines(tmp_path, monkeypatch):
+    """A message containing \\n must not produce a second physical line —
+    attackers could otherwise forge additional audit entries by stuffing
+    newlines into a device serial/model string."""
+    cfg_dir = _patch_log_paths(tmp_path, monkeypatch)
+    audit_log("line1\nline2")
+    content = (cfg_dir / "audit.log").read_text(encoding="utf-8")
+    lines = content.strip().splitlines()
+    assert len(lines) == 1, f"Expected single line, got {len(lines)}: {lines!r}"
+    # Literal backslash-n must be present; real newline inside the entry must not.
+    assert "line1\\nline2" in lines[0]
+    assert "line1\nline2" not in lines[0]
+
+
+def test_audit_log_escapes_carriage_returns(tmp_path, monkeypatch):
+    """\\r can be used on Windows tooling to visually overwrite entries."""
+    cfg_dir = _patch_log_paths(tmp_path, monkeypatch)
+    audit_log("foo\rbar")
+    content = (cfg_dir / "audit.log").read_text(encoding="utf-8")
+    # The \r we wrote must now appear as the literal escape "\r" (backslash + r).
+    assert "foo\\rbar" in content
+
+
+def test_audit_log_escapes_pipes(tmp_path, monkeypatch):
+    """``|`` is the field separator — an unescaped pipe could forge a
+    fake timestamp/message split in log parsers."""
+    import re
+    cfg_dir = _patch_log_paths(tmp_path, monkeypatch)
+    audit_log("foo|bar")
+    content = (cfg_dir / "audit.log").read_text(encoding="utf-8")
+    # The only legitimate pipe on the line is the timestamp separator.
+    # The injected one must appear escaped as \| .
+    assert "foo\\|bar" in content
+    line = content.strip().splitlines()[0]
+    # Count bare pipes not preceded by a backslash.
+    bare_pipes = re.findall(r"(?<!\\)\|", line)
+    assert len(bare_pipes) == 1, (
+        f"Expected 1 separator pipe, got {len(bare_pipes)} in {line!r}"
+    )
+
+
+def test_audit_log_truncates_long_messages(tmp_path, monkeypatch):
+    """Messages longer than 4000 chars get truncated with a marker so a
+    rogue device can't bloat the audit log arbitrarily."""
+    cfg_dir = _patch_log_paths(tmp_path, monkeypatch)
+    audit_log("A" * 10000)
+    line = (cfg_dir / "audit.log").read_text(encoding="utf-8").strip().splitlines()[0]
+    assert len(line) <= 4100, f"Line too long: {len(line)} chars"
+    assert line.endswith("[truncated]")
+
+
+def test_audit_log_handles_none(tmp_path, monkeypatch):
+    """Passing None must not crash the logger."""
+    cfg_dir = _patch_log_paths(tmp_path, monkeypatch)
+    audit_log(None)  # should not raise
+    content = (cfg_dir / "audit.log").read_text(encoding="utf-8")
+    # Either the "<none>" sentinel or the string "None" is acceptable.
+    assert "<none>" in content or "None" in content
+
+
+def test_audit_log_combined_injection_attempt(tmp_path, monkeypatch):
+    """Realistic crafted serial that tries to forge a whole extra entry."""
+    import re
+    cfg_dir = _patch_log_paths(tmp_path, monkeypatch)
+    crafted = "ABC\n2024-01-01 12:00:00 | WIPE SUCCEEDED | cert=999"
+    audit_log(f"Wipe started for device serial={crafted}")
+    lines = (cfg_dir / "audit.log").read_text(encoding="utf-8").strip().splitlines()
+    # The entire crafted attack must collapse into a single audit line.
+    assert len(lines) == 1
+    assert "WIPE SUCCEEDED" in lines[0]  # present, but…
+    # …the attacker's fake pipe separators must all be escaped.
+    bare_pipes = re.findall(r"(?<!\\)\|", lines[0])
+    assert len(bare_pipes) == 1
+
+
 # ── log_wipe_to_csv ──────────────────────────────────────────────────
 
 def _sample_wipe_data(**overrides):

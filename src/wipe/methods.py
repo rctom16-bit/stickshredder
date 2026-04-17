@@ -3,30 +3,58 @@
 from __future__ import annotations
 
 import ctypes
-import ctypes.wintypes
+import ctypes.wintypes as wintypes
 import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Callable
 
 from core.log import audit_log
+from wipe.verify import (
+    VerifyProgressCallback,
+    full_verify,
+    sample_verify,
+)
 
-# Sibling import: wipe.verify exposes sample_verify / full_verify / VerifyResult.
-# A fallback shim keeps this module importable while verify.py is being
-# upgraded in parallel — tests override these names via unittest.mock.patch.
-try:
-    from wipe.verify import sample_verify, full_verify, VerifyResult  # type: ignore
-except ImportError:  # pragma: no cover — only hit during parallel dev
-    sample_verify = None  # type: ignore[assignment]
-    full_verify = None  # type: ignore[assignment]
-    VerifyResult = None  # type: ignore[assignment,misc]
+if TYPE_CHECKING:
+    # Imported for type hints only so the runtime import surface is minimal.
+    from wipe.verify import VerifyResult
 
-kernel32 = ctypes.windll.kernel32
+# Load kernel32 with last-error tracking enabled so `ctypes.get_last_error()`
+# reliably reports the Win32 error code after a failing API call.
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 LARGE_INTEGER = ctypes.c_int64
 FILE_BEGIN = 0
+
+# Fire progress callbacks at most every 50 MB of written data so we do not
+# drown Qt's signal bus on a 1 MB block size (which would otherwise yield
+# 64k callbacks per gigabyte).
+PROGRESS_INTERVAL = 50 * 1024 * 1024
+
+
+# ─────────────────────────────────────────────────────────────────────
+# ctypes prototypes
+# ─────────────────────────────────────────────────────────────────────
+
+kernel32.WriteFile.argtypes = [
+    wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+    ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+]
+kernel32.WriteFile.restype = wintypes.BOOL
+
+kernel32.SetFilePointerEx.argtypes = [
+    wintypes.HANDLE, ctypes.c_int64, ctypes.POINTER(ctypes.c_int64), wintypes.DWORD,
+]
+kernel32.SetFilePointerEx.restype = wintypes.BOOL
+
+kernel32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
+kernel32.FlushFileBuffers.restype = wintypes.BOOL
+
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.CloseHandle.restype = wintypes.BOOL
 
 
 @dataclass
@@ -38,18 +66,17 @@ class WipeResult:
     bytes_written: int
     success: bool
     error_message: str | None
-    verify_result: Any = None  # VerifyResult | None — populated when verify_mode != "none"
+    verify_result: "VerifyResult | None" = None  # populated when verify_mode != "none"
     zero_blank_appended: bool = False  # true if a zero-blanking pass was added for verifiability
 
 
 ProgressCallback = Callable[[int, int, int, int, float], None]
-VerifyProgressCallback = Callable[[int, int, float], None]
 
 
 def _set_file_pointer(handle: int, position: int) -> bool:
     new_pos = LARGE_INTEGER(0)
     return bool(kernel32.SetFilePointerEx(
-        ctypes.wintypes.HANDLE(handle),
+        wintypes.HANDLE(handle),
         LARGE_INTEGER(position),
         ctypes.byref(new_pos),
         FILE_BEGIN,
@@ -57,9 +84,9 @@ def _set_file_pointer(handle: int, position: int) -> bool:
 
 
 def _write_block(handle: int, data: bytes) -> int:
-    written = ctypes.wintypes.DWORD(0)
+    written = wintypes.DWORD(0)
     success = kernel32.WriteFile(
-        ctypes.wintypes.HANDLE(handle),
+        wintypes.HANDLE(handle),
         data,
         len(data),
         ctypes.byref(written),
@@ -115,6 +142,7 @@ class WipeMethod(ABC):
         bytes_this_pass = 0
         remaining = drive_size
         pass_start = time.monotonic()
+        last_progress_bytes = 0
 
         while remaining > 0:
             chunk = min(block_size, remaining)
@@ -124,9 +152,18 @@ class WipeMethod(ABC):
             remaining -= written
 
             if progress_callback is not None:
-                elapsed = time.monotonic() - pass_start
-                speed = (bytes_this_pass / (1024 * 1024)) / elapsed if elapsed > 0 else 0.0
-                progress_callback(pass_num, total_passes, bytes_this_pass, drive_size, speed)
+                # Fire every PROGRESS_INTERVAL bytes, and always at end-of-pass.
+                if (bytes_this_pass - last_progress_bytes >= PROGRESS_INTERVAL
+                        or bytes_this_pass == drive_size):
+                    elapsed = time.monotonic() - pass_start
+                    speed = (
+                        (bytes_this_pass / (1024 * 1024)) / elapsed
+                        if elapsed > 0 else 0.0
+                    )
+                    progress_callback(
+                        pass_num, total_passes, bytes_this_pass, drive_size, speed,
+                    )
+                    last_progress_bytes = bytes_this_pass
 
         return bytes_this_pass
 
@@ -184,24 +221,46 @@ class WipeMethod(ABC):
                     f"Pass {pass_num}/{total_passes} started "
                     f"({self.name}, zero-blanking)"
                 )
-                bytes_this_pass = self._run_single_pass(
-                    handle=handle,
-                    drive_size=drive_size,
-                    block_size=block_size,
-                    pass_num=pass_num,
-                    total_passes=total_passes,
-                    pattern_factory=lambda _pn, size: b"\x00" * size,
-                    progress_callback=progress_callback,
-                )
-                total_written += bytes_this_pass
-                audit_log(
-                    f"Pass {pass_num}/{total_passes} completed "
-                    f"({self.name}, zero-blanking), bytes_written={bytes_this_pass}"
-                )
+                try:
+                    bytes_this_pass = self._run_single_pass(
+                        handle=handle,
+                        drive_size=drive_size,
+                        block_size=block_size,
+                        pass_num=pass_num,
+                        total_passes=total_passes,
+                        pattern_factory=lambda _pn, size: b"\x00" * size,
+                        progress_callback=progress_callback,
+                    )
+                except OSError as exc:
+                    # Let cancel bubble up untouched; anything else is a real
+                    # zero-blank failure that should fail the wipe.
+                    if isinstance(exc, InterruptedError):
+                        raise
+                    success = False
+                    error_message = str(exc)
+                    audit_log(
+                        f"Wipe error (zero-blank pass): method={self.name}, "
+                        f"pass={pass_num}, error={exc}"
+                    )
+                else:
+                    total_written += bytes_this_pass
+                    audit_log(
+                        f"Pass {pass_num}/{total_passes} completed "
+                        f"({self.name}, zero-blanking), bytes_written={bytes_this_pass}"
+                    )
 
-            kernel32.FlushFileBuffers(ctypes.wintypes.HANDLE(handle))
+            if not kernel32.FlushFileBuffers(wintypes.HANDLE(handle)):
+                err = ctypes.get_last_error()
+                audit_log(f"FlushFileBuffers failed: error {err}")
+                # Don't raise — flush failure at end of wipe is informational,
+                # but we log it so certificate reviewers can see it.
 
         except OSError as exc:
+            # InterruptedError subclasses OSError on Python 3.3+; when the
+            # progress callback raises one for cancellation we must propagate
+            # it so the GUI worker can treat it as cancel, not wipe failure.
+            if isinstance(exc, InterruptedError):
+                raise
             success = False
             error_message = str(exc)
             audit_log(f"Wipe error: method={self.name}, pass={pass_num}, error={exc}")
