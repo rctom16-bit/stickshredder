@@ -179,8 +179,26 @@ class WipeWorker(QThread):
                     self.status_message.emit(
                         f"Demo: wiping virtual disk with {self.wipe_method.name}..."
                     )
+
+                    def _verify_progress_cb(
+                        fraction: float,
+                        bytes_done: int,
+                        total_bytes: int,
+                        speed: float,
+                        _idx: int = idx,
+                    ) -> None:
+                        if self.is_cancelled:
+                            raise InterruptedError("Cancelled during verify")
+                        self.phase_changed.emit(_idx, "verifying")
+                        self.verify_progress.emit(
+                            _idx, fraction, bytes_done, total_bytes, speed,
+                        )
+
                     wipe_result: WipeResult = wipe_demo_file(
-                        demo_file_path, self.wipe_method, progress_callback=_progress_cb,
+                        demo_file_path, self.wipe_method,
+                        progress_callback=_progress_cb,
+                        verify_mode=self.verify_mode,
+                        verify_progress_callback=_verify_progress_cb,
                     )
 
                     if not wipe_result.success:
@@ -191,21 +209,11 @@ class WipeWorker(QThread):
                     if self.is_cancelled:
                         raise InterruptedError("Cancelled after wipe")
 
-                    # Demo verification (out-of-band; the demo wipe path does
-                    # not yet accept verify_mode through the method). Tolerant
-                    # of either VerifyResult (success=) or legacy
-                    # VerificationResult (passed=) via _verify_ok.
+                    verify_result = wipe_result.verify_result
                     if self.verify_mode != "none":
                         self.phase_changed.emit(idx, "verifying")
-                        self.status_message.emit("Demo: verifying virtual disk...")
-                        expected_pattern = _expected_pattern_for(self.wipe_method)
-                        try:
-                            verify_result = verify_demo_file(
-                                demo_file_path, expected_pattern, sample_count=100,
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            audit_log(f"Demo verification failed to run: {exc}")
-                            verify_result = None
+                    if self.verify_mode != "none" and verify_result is None:
+                        audit_log("Demo verification was requested but returned None")
 
                 else:
                     # ── Real device mode ──
