@@ -934,6 +934,12 @@ class MainWindow(QMainWindow):
         sk_value = self.sk_combo.currentData() or 2
         verify_mode = "full" if self.full_verify_cb.isChecked() else "sample"
 
+        # Track the exact subset being wiped so progress signals can look
+        # up the correct DeviceInfo. self.devices contains ALL discovered
+        # devices, but the worker emits indices into its own (selected)
+        # list — indexing into self.devices would show the wrong name.
+        self._wiping_devices: list[DeviceInfo] = list(devices)
+
         self.worker = WipeWorker(
             devices=devices,
             wipe_method=method,
@@ -1000,9 +1006,12 @@ class MainWindow(QMainWindow):
         total_bytes: int,
         speed: float,
     ) -> None:
-        # Show device name next to progress bar
-        if device_index < len(self.devices):
-            dev = self.devices[device_index]
+        # Show device name next to progress bar. Use the wipe-specific
+        # list (the selected subset passed to the worker), NOT self.devices
+        # (the full discovered list) — the indices come from the worker.
+        wiping = getattr(self, "_wiping_devices", self.devices)
+        if device_index < len(wiping):
+            dev = wiping[device_index]
             device_label = f"{dev.model} ({dev.drive_letter})"
         else:
             device_label = f"Device {device_index}"
@@ -1126,9 +1135,10 @@ class MainWindow(QMainWindow):
     ) -> None:
         self._completed_count = getattr(self, "_completed_count", 0) + 1
 
+        wiping = getattr(self, "_wiping_devices", self.devices)
         device_name = (
-            self.devices[device_index].friendly_name
-            if device_index < len(self.devices)
+            wiping[device_index].friendly_name
+            if device_index < len(wiping)
             else f"Device {device_index}"
         )
 
@@ -1198,9 +1208,10 @@ class MainWindow(QMainWindow):
 
     @Slot(int, str)
     def _on_wipe_error(self, device_index: int, message: str) -> None:
+        wiping = getattr(self, "_wiping_devices", self.devices)
         device_name = (
-            self.devices[device_index].friendly_name
-            if device_index < len(self.devices)
+            wiping[device_index].friendly_name
+            if device_index < len(wiping)
             else f"Device {device_index}"
         )
         self.progress_device_label.setText(

@@ -162,7 +162,7 @@ def _connection_type_from_interface(interface_type: str | None) -> str:
 
 
 def _check_bitlocker(drive_letter: str) -> bool:
-    """Check if the volume is BitLocker-encrypted via manage-bde."""
+    """Check if the volume is BitLocker-encrypted via manage-bde. Best-effort."""
     try:
         result = subprocess.run(
             ["manage-bde", "-status", drive_letter],
@@ -171,18 +171,19 @@ def _check_bitlocker(drive_letter: str) -> bool:
             timeout=10,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        output = result.stdout.lower()
-        # If protection is on or encryption is in progress, flag it
+        output = (result.stdout or "").lower()
         if "protection on" in output or "percentage encrypted" in output:
             if "fully decrypted" not in output:
                 return True
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except Exception:  # noqa: BLE001 — this is a non-safety-critical probe
         pass
     return False
 
 
 def _check_active_processes(drive_letter: str) -> bool:
-    """Rough check: see if any handles are open on the volume via openfiles or handle count."""
+    """Check for open handles on a volume. Best-effort, never raises."""
+    if not drive_letter:
+        return False
     try:
         result = subprocess.run(
             ["handle.exe", "-accepteula", drive_letter + "\\"],
@@ -191,14 +192,13 @@ def _check_active_processes(drive_letter: str) -> bool:
             timeout=10,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        # If handle.exe finds results it returns lines with PIDs
+        stdout = result.stdout or ""
         lines = [
-            ln for ln in result.stdout.strip().splitlines()
+            ln for ln in stdout.strip().splitlines()
             if drive_letter.upper() in ln.upper() and "pid:" in ln.lower()
         ]
         return len(lines) > 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-        # handle.exe not available — fall back to silent
+    except Exception:  # noqa: BLE001 — probe must never break enumeration
         return False
 
 
@@ -298,7 +298,12 @@ def list_devices() -> list[DeviceInfo]:
             )
 
         except Exception as exc:
-            audit_log(f"Error processing drive {drive_letter}: {exc}")
+            import traceback as _tb
+            tb_line = _tb.format_exc().strip().splitlines()[-3:]
+            audit_log(
+                f"Error processing drive {drive_letter}: {type(exc).__name__}: {exc} "
+                f"| traceback_tail: {' | '.join(tb_line)}"
+            )
             continue
 
     return devices
