@@ -65,9 +65,17 @@ Existing alternatives fall short in this space: **nwipe** is Linux-only and requ
 
 ## Screenshots
 
-> Screenshots of the StickShredder GUI will be added here.
->
-> See the [`docs/screenshots/`](docs/screenshots/) folder for full-resolution images.
+The typical wipe flow, from confirmation through completion:
+
+| Step 1 — Confirm the wipe | Step 2 — Type DELETE |
+|---|---|
+| ![Confirm destructive action](docs/screenshots/01-confirm-wipe.png) | ![Type DELETE to confirm](docs/screenshots/02-type-delete.png) |
+
+| Step 3 — Wipe in progress | Step 4 — Success |
+|---|---|
+| ![Wipe in progress](docs/screenshots/03-wipe-progress.png) | ![Wipe completed successfully](docs/screenshots/04-wipe-success.png) |
+
+Full-resolution images live in [`docs/screenshots/`](docs/screenshots/).
 
 ---
 
@@ -352,9 +360,17 @@ Bestehende Alternativen decken diesen Bedarf nur unzureichend ab: **nwipe** ist 
 
 ### Screenshots
 
-> Screenshots der StickShredder-GUI werden hier ergänzt.
->
-> Siehe den Ordner [`docs/screenshots/`](docs/screenshots/) für Bilder in voller Auflösung.
+Der typische Löschvorgang von der Bestätigung bis zum Abschluss:
+
+| Schritt 1 — Löschvorgang bestätigen | Schritt 2 — DELETE eingeben |
+|---|---|
+| ![Zerstörerische Aktion bestätigen](docs/screenshots/01-confirm-wipe.png) | ![DELETE zum Bestätigen eingeben](docs/screenshots/02-type-delete.png) |
+
+| Schritt 3 — Löschvorgang läuft | Schritt 4 — Erfolgreich |
+|---|---|
+| ![Laufender Löschvorgang](docs/screenshots/03-wipe-progress.png) | ![Löschvorgang erfolgreich abgeschlossen](docs/screenshots/04-wipe-success.png) |
+
+Die Bilder in voller Auflösung liegen im Ordner [`docs/screenshots/`](docs/screenshots/).
 
 ---
 
