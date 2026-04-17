@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "stickshredder"
 version = "1.0.0"
 description = "Secure USB wipe tool with DIN 66399 / ISO 21964 deletion certificates"
-readme = "docs/README.md"
+readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [
