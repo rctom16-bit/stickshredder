@@ -9,7 +9,7 @@ on:
 jobs:
   test:
     name: Run test suite
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
