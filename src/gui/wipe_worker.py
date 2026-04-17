@@ -89,6 +89,7 @@ class WipeWorker(QThread):
     all_completed = Signal()
     error = Signal(int, str)
     status_message = Signal(str)
+    stall_detected = Signal(int, int, str)  # device_index, seconds_stalled, hint
 
     def __init__(
         self,
@@ -126,6 +127,15 @@ class WipeWorker(QThread):
         self.reformat_label = reformat_label
         self.reformat_partition = reformat_partition
         self._cancel_event = threading.Event()
+        # Stall-watchdog state. last_progress_time is updated on every
+        # progress or verify_progress emission. A background thread (spawned
+        # in run()) warns via stall_detected if no progress has been reported
+        # for STALL_THRESHOLD_SECONDS — typically a sign of a USB controller
+        # hang or an AV product silently blocking raw disk writes.
+        self._last_progress_time: float | None = None
+        self._stall_warned = False
+
+    STALL_THRESHOLD_SECONDS = 60
 
     def cancel(self) -> None:
         """Request cancellation. The worker checks this between operations."""
@@ -135,6 +145,42 @@ class WipeWorker(QThread):
     @property
     def is_cancelled(self) -> bool:
         return self._cancel_event.is_set()
+
+    def _note_progress(self) -> None:
+        """Record that progress just happened — resets the stall timer."""
+        import time as _time
+        self._last_progress_time = _time.monotonic()
+        self._stall_warned = False
+
+    def _start_stall_watchdog(self, device_index: int) -> None:
+        """Spawn a daemon thread that fires stall_detected if progress stops.
+
+        The watchdog exits on cancellation or when _last_progress_time is
+        cleared at the end of each device's work.
+        """
+        import time as _time
+
+        def _watch() -> None:
+            while not self.is_cancelled and self._last_progress_time is not None:
+                _time.sleep(5)
+                if self.is_cancelled or self._last_progress_time is None:
+                    return
+                elapsed = _time.monotonic() - self._last_progress_time
+                if elapsed >= self.STALL_THRESHOLD_SECONDS and not self._stall_warned:
+                    self._stall_warned = True
+                    hint = (
+                        f"No write progress for {int(elapsed)}s. The USB "
+                        "controller may have hung. Try: (1) cancel this "
+                        "wipe, (2) unplug and replug the drive, "
+                        "(3) restart the wipe. If it persists, try a "
+                        "different USB port or see the README troubleshooting."
+                    )
+                    audit_log(f"Stall detected on device {device_index}: {hint}")
+                    self.stall_detected.emit(device_index, int(elapsed), hint)
+                    # Keep watching in case it recovers; but don't re-warn.
+
+        t = threading.Thread(target=_watch, daemon=True, name="WipeStallWatchdog")
+        t.start()
 
     def run(self) -> None:  # noqa: C901
         """Main worker loop — processes each device sequentially."""
@@ -157,6 +203,13 @@ class WipeWorker(QThread):
 
             # Signal that this device is entering the wipe phase.
             self.phase_changed.emit(idx, "wiping")
+
+            # Start the stall watchdog for this device. _note_progress is
+            # called from the progress/verify callbacks below; if the clock
+            # rolls past STALL_THRESHOLD_SECONDS without one, the watchdog
+            # emits stall_detected.
+            self._note_progress()
+            self._start_stall_watchdog(idx)
 
             try:
                 if is_demo:
@@ -181,6 +234,7 @@ class WipeWorker(QThread):
                     ) -> None:
                         if self.is_cancelled:
                             raise InterruptedError("Cancelled during wipe")
+                        self._note_progress()
                         self.progress_updated.emit(
                             _idx, pass_num, total_passes,
                             bytes_written, total_bytes, speed,
@@ -199,6 +253,7 @@ class WipeWorker(QThread):
                     ) -> None:
                         if self.is_cancelled:
                             raise InterruptedError("Cancelled during verify")
+                        self._note_progress()
                         self.phase_changed.emit(_idx, "verifying")
                         self.verify_progress.emit(
                             _idx, fraction, bytes_done, total_bytes, speed,
@@ -287,6 +342,7 @@ class WipeWorker(QThread):
                     ) -> None:
                         if self.is_cancelled:
                             raise InterruptedError("Cancelled during wipe")
+                        self._note_progress()
                         self.progress_updated.emit(
                             _idx, pass_num, total_passes,
                             bytes_written, total_bytes, speed,
@@ -301,6 +357,7 @@ class WipeWorker(QThread):
                     ) -> None:
                         if self.is_cancelled:
                             raise InterruptedError("Cancelled during verify")
+                        self._note_progress()
                         if not verifying_announced["value"]:
                             verifying_announced["value"] = True
                             self.phase_changed.emit(_idx, "verifying")
@@ -533,6 +590,9 @@ class WipeWorker(QThread):
                         audit_log(f"Demo: cleaned up temp file {demo_file_path}")
                     except OSError:
                         pass
+
+            # Stop the stall watchdog for this device.
+            self._last_progress_time = None
 
             self.phase_changed.emit(idx, "done")
             self.device_completed.emit(idx, success, cert_path)

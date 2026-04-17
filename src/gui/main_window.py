@@ -1004,6 +1004,7 @@ class MainWindow(QMainWindow):
         self.worker.all_completed.connect(self._on_all_completed)
         self.worker.error.connect(self._on_wipe_error)
         self.worker.status_message.connect(self._on_status_message)
+        self.worker.stall_detected.connect(self._on_stall_detected)
 
         # Disable controls during wipe
         self._set_controls_enabled(False)
@@ -1298,6 +1299,28 @@ class MainWindow(QMainWindow):
     def _on_status_message(self, message: str) -> None:
         self.status_label.setText(message)
         self.progress_device_label.setText(message)
+
+    @Slot(int, int, str)
+    def _on_stall_detected(self, device_index: int, seconds_stalled: int, hint: str) -> None:
+        """The worker hasn't seen progress in >60s — surface a visible warning.
+
+        We don't auto-cancel the wipe; the user decides whether to keep
+        waiting or hit Cancel. The status bar and progress label carry the
+        hint so it's hard to miss.
+        """
+        wiping = getattr(self, "_wiping_devices", self.devices)
+        name = (
+            wiping[device_index].friendly_name
+            if device_index < len(wiping)
+            else f"Device {device_index}"
+        )
+        warning = f"⚠ {name} — stalled for {seconds_stalled}s. {hint}"
+        self.status_label.setText(warning)
+        self.progress_device_label.setText(warning)
+        # Tint progress bars amber so the stall is visible at a glance.
+        self.device_progress.setStyleSheet(
+            "QProgressBar::chunk { background-color: #d69e2e; }"
+        )
 
     def _on_cancel_clicked(self) -> None:
         if self.worker is not None:

@@ -213,6 +213,7 @@ def test_checkbox_changes_verify_mode(qtbot, main_window, demo_device, monkeypat
                 "all_completed",
                 "error",
                 "status_message",
+                "stall_detected",
             ):
                 setattr(self, name, MagicMock())
 
@@ -241,6 +242,77 @@ def test_checkbox_changes_verify_mode(qtbot, main_window, demo_device, monkeypat
     main_window.full_verify_cb.setChecked(True)
     main_window._start_wipe([demo_device])
     assert captured["verify_mode"] == "full"
+
+
+def test_stall_watchdog_fires_when_no_progress(qtbot, app_config, demo_device):
+    """If _note_progress is never called within STALL_THRESHOLD_SECONDS, the
+    watchdog thread emits stall_detected with a non-zero second count and a
+    human hint."""
+    from wipe.methods import ZeroFill
+    from gui.wipe_worker import WipeWorker
+
+    worker = WipeWorker(
+        devices=[demo_device],
+        wipe_method=ZeroFill(),
+        config=app_config,
+        verify_mode="none",
+    )
+    # Shrink the threshold to ~1s so the test finishes fast.
+    worker.STALL_THRESHOLD_SECONDS = 1
+    # Prime the timer as if a wipe just started, then don't fire _note_progress.
+    worker._note_progress()
+    received: list[tuple[int, int, str]] = []
+    worker.stall_detected.connect(
+        lambda idx, sec, hint: received.append((idx, sec, hint))
+    )
+    worker._start_stall_watchdog(device_index=42)
+    # The watchdog polls every 5s, so we need to wait a bit longer than that.
+    # To avoid slowing down the suite we shortcut with a direct call instead:
+    # manually advance _last_progress_time into the past so the next watchdog
+    # tick trips the threshold immediately.
+    import time as _time
+    worker._last_progress_time = _time.monotonic() - 10  # 10s "ago"
+    # Wait up to 8 seconds for the watchdog to emit.
+    def _fired():
+        return len(received) > 0
+    qtbot.waitUntil(_fired, timeout=8000)
+    assert len(received) >= 1
+    idx, secs, hint = received[0]
+    assert idx == 42
+    assert secs >= 1
+    assert "unplug" in hint.lower() or "replug" in hint.lower()
+    # Cleanup: stop the watchdog thread.
+    worker._last_progress_time = None
+
+
+def test_stall_watchdog_does_not_fire_when_progress_is_active(qtbot, app_config, demo_device):
+    """If _note_progress is called regularly, stall_detected must not fire."""
+    from wipe.methods import ZeroFill
+    from gui.wipe_worker import WipeWorker
+    import time as _time
+
+    worker = WipeWorker(
+        devices=[demo_device],
+        wipe_method=ZeroFill(),
+        config=app_config,
+        verify_mode="none",
+    )
+    worker.STALL_THRESHOLD_SECONDS = 2
+    worker._note_progress()
+    received: list[tuple[int, int, str]] = []
+    worker.stall_detected.connect(
+        lambda idx, sec, hint: received.append((idx, sec, hint))
+    )
+    worker._start_stall_watchdog(device_index=5)
+    # Call _note_progress several times over ~3 seconds (busier than the
+    # 5-second poll interval). We accept one-off stall signals as false
+    # positives if the test runner is heavily loaded — tolerance of 0.
+    for _ in range(6):
+        worker._note_progress()
+        _time.sleep(0.5)
+    # Cleanup.
+    worker._last_progress_time = None
+    assert received == [], f"Unexpected stall signal(s): {received}"
 
 
 def test_worker_emits_phase_changed_signals(qtbot, app_config, demo_device):
