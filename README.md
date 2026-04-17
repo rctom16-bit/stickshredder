@@ -1,11 +1,17 @@
-# StickShredder
+<h1 align="center">StickShredder</h1>
 
-**Secure USB wipe tool with DIN 66399 / ISO 21964 deletion certificates**
+<p align="center"><strong>Secure USB wipe tool with DIN 66399 / ISO 21964 deletion certificates</strong></p>
 
-<!-- Badges -->
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows)
-![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
+  <img alt="Platform: Windows" src="https://img.shields.io/badge/Platform-Windows-0078D6?logo=windows">
+  <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/03-wipe-progress.png" alt="StickShredder wiping a 128 GB USB drive" width="780">
+</p>
+<p align="center"><em>Wiping a 128 GB USB stick — phase badge, live progress, ETA, and an auto-generated DIN 66399 deletion certificate at the end.</em></p>
 
 ---
 
@@ -65,17 +71,36 @@ Existing alternatives fall short in this space: **nwipe** is Linux-only and requ
 
 ## Screenshots
 
-The typical wipe flow, from confirmation through completion:
+A full wipe walks the operator through **two confirmations, a live progress view, and a success dialog** — with a PDF certificate dropped in the output folder at the end.
 
-| Step 1 — Confirm the wipe | Step 2 — Type DELETE |
-|---|---|
-| ![Confirm destructive action](docs/screenshots/01-confirm-wipe.png) | ![Type DELETE to confirm](docs/screenshots/02-type-delete.png) |
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <p align="center"><strong>① Confirm destructive action</strong></p>
+      <img src="docs/screenshots/01-confirm-wipe.png" alt="Confirmation dialog with drive details">
+      <p align="center"><sub>Dialog restates the exact drive letter, model, serial, and capacity about to be destroyed.</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <p align="center"><strong>② Type DELETE to proceed</strong></p>
+      <img src="docs/screenshots/02-type-delete.png" alt="Type DELETE to confirm">
+      <p align="center"><sub>Second confirmation blocks accidental one-click wipes. No DELETE typed &rarr; no wipe.</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <p align="center"><strong>③ Wipe + verify in progress</strong></p>
+      <img src="docs/screenshots/03-wipe-progress.png" alt="Wipe in progress">
+      <p align="center"><sub>Phase badge, pass counter, throughput, ETA. A stall watchdog warns within 60 seconds if the controller hangs.</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <p align="center"><strong>④ Success + certificate</strong></p>
+      <img src="docs/screenshots/04-wipe-success.png" alt="Wipe completed successfully">
+      <p align="center"><sub>PDF certificate auto-saved to the configured output folder. Ready for audit.</sub></p>
+    </td>
+  </tr>
+</table>
 
-| Step 3 — Wipe in progress | Step 4 — Success |
-|---|---|
-| ![Wipe in progress](docs/screenshots/03-wipe-progress.png) | ![Wipe completed successfully](docs/screenshots/04-wipe-success.png) |
-
-Full-resolution images live in [`docs/screenshots/`](docs/screenshots/).
+Full-resolution images: [`docs/screenshots/`](docs/screenshots/). Example certificate: [`docs/examples/sample-certificate.pdf`](docs/examples/sample-certificate.pdf).
 
 ---
 
@@ -360,17 +385,36 @@ Bestehende Alternativen decken diesen Bedarf nur unzureichend ab: **nwipe** ist 
 
 ### Screenshots
 
-Der typische Löschvorgang von der Bestätigung bis zum Abschluss:
+Ein vollständiger Löschvorgang führt den Bediener durch **zwei Bestätigungen, eine Live-Fortschrittsanzeige und einen Erfolgsdialog** — und erzeugt am Ende ein PDF-Zertifikat im Ausgabeordner.
 
-| Schritt 1 — Löschvorgang bestätigen | Schritt 2 — DELETE eingeben |
-|---|---|
-| ![Zerstörerische Aktion bestätigen](docs/screenshots/01-confirm-wipe.png) | ![DELETE zum Bestätigen eingeben](docs/screenshots/02-type-delete.png) |
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <p align="center"><strong>① Zerstörerische Aktion bestätigen</strong></p>
+      <img src="docs/screenshots/01-confirm-wipe.png" alt="Bestätigungsdialog mit Laufwerksdetails">
+      <p align="center"><sub>Der Dialog nennt Laufwerksbuchstaben, Modell, Seriennummer und Kapazität des Ziels noch einmal ausdrücklich.</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <p align="center"><strong>② DELETE eingeben</strong></p>
+      <img src="docs/screenshots/02-type-delete.png" alt="DELETE zum Bestätigen eingeben">
+      <p align="center"><sub>Die zweite Bestätigung verhindert versehentliche Ein-Klick-Löschungen. Ohne „DELETE" kein Löschvorgang.</sub></p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <p align="center"><strong>③ Löschen + Verifikation</strong></p>
+      <img src="docs/screenshots/03-wipe-progress.png" alt="Löschvorgang läuft">
+      <p align="center"><sub>Phasen-Anzeige, Durchlaufzähler, Durchsatz, Restdauer. Ein Stall-Watchdog meldet innerhalb von 60 Sekunden, wenn der Controller hängt.</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <p align="center"><strong>④ Erfolg + Zertifikat</strong></p>
+      <img src="docs/screenshots/04-wipe-success.png" alt="Löschvorgang erfolgreich abgeschlossen">
+      <p align="center"><sub>Das PDF-Zertifikat wird automatisch im konfigurierten Ausgabeordner gespeichert. Bereit für die Prüfung.</sub></p>
+    </td>
+  </tr>
+</table>
 
-| Schritt 3 — Löschvorgang läuft | Schritt 4 — Erfolgreich |
-|---|---|
-| ![Laufender Löschvorgang](docs/screenshots/03-wipe-progress.png) | ![Löschvorgang erfolgreich abgeschlossen](docs/screenshots/04-wipe-success.png) |
-
-Die Bilder in voller Auflösung liegen im Ordner [`docs/screenshots/`](docs/screenshots/).
+Bilder in voller Auflösung: [`docs/screenshots/`](docs/screenshots/). Beispielzertifikat: [`docs/examples/sample-certificate.pdf`](docs/examples/sample-certificate.pdf).
 
 ---
 
