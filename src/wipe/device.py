@@ -180,6 +180,25 @@ def _check_bitlocker(drive_letter: str) -> bool:
     return False
 
 
+def _resolve_system_physical_drive_index() -> Optional[int]:
+    """Return the PhysicalDisk index that hosts the Windows boot volume.
+
+    Never raises — returns None on any failure so callers can fall back
+    to letter-only comparison.
+    """
+    try:
+        letter = _system_drive_letter()
+        c = _get_wmi_connection()
+        idx = _physical_drive_index_for_letter(c, letter)
+        if idx is not None:
+            audit_log(f"System physical drive resolved: PhysicalDrive{idx} ({letter})")
+            return idx
+        audit_log(f"Could not resolve physical drive index for system letter {letter}")
+    except Exception as exc:
+        audit_log(f"_resolve_system_physical_drive_index failed: {exc}")
+    return None
+
+
 def _check_active_processes(drive_letter: str) -> bool:
     """Check for open handles on a volume. Best-effort, never raises."""
     if not drive_letter:
@@ -208,6 +227,7 @@ def list_devices() -> list[DeviceInfo]:
     """Enumerate removable (and optionally internal non-system) storage devices."""
     devices: list[DeviceInfo] = []
     sys_letter = _system_drive_letter()
+    sys_phys_index = _resolve_system_physical_drive_index()
 
     try:
         c = _get_wmi_connection()
@@ -251,7 +271,10 @@ def list_devices() -> list[DeviceInfo]:
                 or getattr(ldisk, "DriveType", 0) == 2  # DriveType 2 = Removable
             )
 
-            is_system = drive_letter.upper() == sys_letter.upper()
+            is_system = (
+                (sys_phys_index is not None and phys_index == sys_phys_index)
+                or drive_letter.upper() == sys_letter.upper()
+            )
             is_internal = connection != "USB" and not is_removable
 
             serial = (getattr(phys_disk, "SerialNumber", "") or "").strip()
@@ -315,8 +338,29 @@ def open_physical_drive(device_id: str) -> int:
     """Open a physical drive for raw read/write. Requires admin privileges.
 
     Returns the Win32 HANDLE as an integer.
+    Raises PermissionError if device_id is the system physical drive.
     Raises OSError on failure.
     """
+    # Last-line-of-defence: refuse to open the physical disk that hosts Windows,
+    # even if the caller did not check is_system_drive first.
+    try:
+        # Extract trailing integer from e.g. r"\\.\PhysicalDrive3" -> 3
+        drive_index = int(device_id.rstrip().split("PhysicalDrive")[-1])
+        sys_phys_index = _resolve_system_physical_drive_index()
+        if sys_phys_index is not None and drive_index == sys_phys_index:
+            audit_log(
+                f"Refused to open system drive: {device_id} is PhysicalDrive{sys_phys_index}"
+            )
+            raise PermissionError(
+                f"Refused to open system drive {device_id}: "
+                f"this is the system physical drive (PhysicalDrive{sys_phys_index}). "
+                "Wiping it would destroy Windows."
+            )
+    except PermissionError:
+        raise
+    except Exception as exc:
+        audit_log(f"System-disk safeguard parse failed for {device_id!r}: {exc} — proceeding")
+
     handle = kernel32.CreateFileW(
         device_id,
         GENERIC_READ | GENERIC_WRITE,
