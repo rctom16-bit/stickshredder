@@ -4,6 +4,71 @@ All notable changes to StickShredder are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-06-07
+
+This release is driven by community feedback. It tackles the limits of pure
+overwrite wiping: bad sectors, internal disks, hidden disk areas, and
+firmware-level erase.
+
+### Added
+
+- **Bad-sector tolerance and reporting.** A failed `WriteFile` on a block no
+  longer aborts the whole wipe. The block offset is recorded, the pass seeks
+  past it and continues, and the defect count + first 100 offsets are reported
+  on the certificate (new "Bad Sectors / Defekte Sektoren" section), in the CLI
+  summary, and in a new `bad_sectors` CSV column. A bad-fraction ceiling
+  (default 10%) still fails the wipe outright when most of the drive is
+  unwritable, so a dying drive is never reported as "successfully wiped".
+- **Internal (non-removable) disk support.** Physical disks without a drive
+  letter (raw / unmounted internal data disks) are now enumerated and can be
+  wiped. Gated behind an explicit opt-in: CLI `--allow-internal` and a GUI
+  "Allow internal drives" checkbox (off by default). Internal wipes require an
+  extra model-name confirmation in the CLI. Letterless disks are selectable via
+  `--device PhysicalDriveN`.
+- **`is_safe_to_wipe()` central safety gate** used by both CLI and GUI. The
+  Windows system disk is always refused; internal drives are refused without
+  opt-in; and — fail-safe — internal drives are refused whenever the system
+  disk cannot be positively identified.
+- **ATA pass-through foundation** (`wipe/passthrough.py`): a defensive
+  `IOCTL_ATA_PASS_THROUGH_DIRECT` wrapper (`ata_identify`,
+  `read_native_max_address`, `device_configuration_identify_max`,
+  `send_ata_command`). Never raises; returns `None` when a device rejects ATA
+  pass-through (common on USB bridges).
+- **HPA/DCO detection** (`wipe/hidden_areas.py`, report-only). Before wiping, the
+  drive is probed for a Host Protected Area or Device Configuration Overlay —
+  regions hidden from the OS that an overwrite never reaches. Findings are
+  warned about and recorded on the certificate (new "Hidden Areas (HPA/DCO)"
+  section) and in a new `hidden_area` CSV column. The drive is never modified
+  (no SET MAX / DCO commands).
+- **Experimental ATA Secure Erase** (`wipe/secure_erase.py`). New CLI method
+  `--method secure-erase`, gated behind `--experimental` (plus `--enhanced`),
+  issues the drive's own firmware erase (SECURITY SET PASSWORD / ERASE PREPARE /
+  ERASE UNIT) instead of overwriting. Refuses on frozen / locked / unsupported
+  drives. Clearly marked experimental on the certificate. **Untested on real
+  hardware** — see SECURITY.md. (GUI exposure is a planned follow-up.)
+
+### Changed
+
+- **`APP_VERSION` corrected from `1.0.0` to `1.2.0`.** It had been left at
+  `1.0.0` through the 1.1 line, so certificates printed the wrong tool version
+  in their footer. All version strings (pyproject, installer, GUI title/about,
+  Qt application version, certificate footer) now read `1.2.0`.
+
+### Security
+
+- **System-drive guard hardened** to resolve the PhysicalDrive index that hosts
+  the Windows boot volume (not just the drive letter) and refuse to open it in
+  `open_physical_drive()`. With internal-disk wiping now possible, the guard
+  fails safe: if the Windows disk cannot be identified, internal wipes are
+  refused rather than risked.
+
+### Tests
+
+- 299 passing (up from 218). New: bad-sector tolerance/ceiling/dedup, letterless
+  enumeration, `is_safe_to_wipe` gate, ATA pass-through parsing, HPA/DCO
+  detection, secure-erase state machine, CLI secure-erase + HPA wiring, and the
+  GUI internal-drive safety gate.
+
 ## [1.1.0] - 2026-04-17
 
 ### Added

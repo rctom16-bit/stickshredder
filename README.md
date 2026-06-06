@@ -62,7 +62,11 @@ Existing alternatives fall short in this space: **nwipe** is Linux-only and requ
 - **Multiple wipe methods** with configurable pass counts
 - **Real-time progress tracking** with estimated time remaining
 - **Drive detection** via WMI -- automatically identifies connected USB devices
-- **Safety guard** -- refuses to wipe system drives by design
+- **Safety guard** -- refuses to wipe system drives by design, with a fail-safe that never touches the Windows disk
+- **Internal drive support** *(v1.2)* -- optionally wipe internal SATA disks (explicit opt-in), including disks without a drive letter
+- **Bad-sector tolerance** *(v1.2)* -- unwritable sectors are skipped, counted, and reported on the certificate instead of aborting the wipe
+- **Hidden-area detection** *(v1.2)* -- detects HPA/DCO regions an overwrite cannot reach and flags them on the certificate
+- **ATA Secure Erase** *(v1.2, experimental)* -- issues the drive's own firmware erase for SSD/flash media (CLI, opt-in, not yet hardware-verified)
 - **Portable** -- no installation required (standalone .exe via PyInstaller)
 - **100% offline** -- no network access, no telemetry, no cloud dependency
 - **Free and open source** under the MIT license
@@ -252,8 +256,13 @@ Modern USB drives and SSDs use **wear leveling**, **over-provisioning**, and **c
 
 **For high-sensitivity data on SSD/flash media**, consider:
 
-- **ATA Secure Erase** (planned for a future version of StickShredder)
-- **Physical destruction** (shredding per DIN 66399 media type E)
+- **ATA Secure Erase** *(v1.2, experimental)* — available via the CLI:
+  `stickshredder wipe --device E: --method secure-erase --experimental --operator "..."`.
+  It issues the drive's own firmware erase, which reaches wear-levelled cells a
+  host overwrite cannot. **Untested on real hardware** — treat results as
+  unverified until you can confirm on your own drive.
+- **Physical destruction** (shredding per DIN 66399 media type E) — still the
+  only guaranteed method for HPA/DCO regions and failed-but-unreported sectors.
 
 For a detailed discussion, see [docs/SECURITY.md](docs/SECURITY.md).
 
@@ -376,7 +385,11 @@ Bestehende Alternativen decken diesen Bedarf nur unzureichend ab: **nwipe** ist 
 - **Mehrere Löschmethoden** mit konfigurierbarer Durchlaufanzahl
 - **Echtzeit-Fortschrittsanzeige** mit geschätzter Restdauer
 - **Laufwerkserkennung** via WMI -- erkennt automatisch angeschlossene USB-Geräte
-- **Sicherheitssperre** -- verweigert das Löschen von Systemlaufwerken (by Design)
+- **Sicherheitssperre** -- verweigert das Löschen von Systemlaufwerken (by Design), mit Fail-safe, das die Windows-Platte niemals anfasst
+- **Interne Festplatten** *(v1.2)* -- optionales Löschen interner SATA-Platten (ausdrückliches Opt-in), auch ohne Laufwerksbuchstaben
+- **Defekt-Sektor-Toleranz** *(v1.2)* -- nicht beschreibbare Sektoren werden übersprungen, gezählt und im Zertifikat ausgewiesen, statt den Vorgang abzubrechen
+- **Erkennung versteckter Bereiche** *(v1.2)* -- erkennt HPA/DCO-Bereiche, die ein Überschreiben nicht erreicht, und vermerkt sie im Zertifikat
+- **ATA Secure Erase** *(v1.2, experimentell)* -- nutzt den Firmware-Löschbefehl der Platte für SSD/Flash (CLI, Opt-in, noch nicht auf Hardware verifiziert)
 - **Portabel** -- keine Installation erforderlich (eigenständige .exe via PyInstaller)
 - **100% offline** -- kein Netzwerkzugriff, keine Telemetrie, keine Cloud-Abhängigkeit
 - **Kostenlos und quelloffen** unter der MIT-Lizenz
@@ -564,8 +577,15 @@ Moderne USB-Datenträger und SSDs verwenden **Wear Leveling**, **Over-Provisioni
 
 **Für hochsensible Daten auf SSD-/Flash-Medien** empfehlen wir:
 
-- **ATA Secure Erase** (für eine zukünftige Version von StickShredder geplant)
-- **Physische Vernichtung** (Schreddern nach DIN 66399 Datenträgertyp E)
+- **ATA Secure Erase** *(v1.2, experimentell)* — über die CLI verfügbar:
+  `stickshredder wipe --device E: --method secure-erase --experimental --operator "..."`.
+  Nutzt den Firmware-Löschbefehl der Platte und erreicht damit auch
+  Wear-Leveling-Zellen, die ein Überschreiben nicht erreicht. **Auf echter
+  Hardware ungetestet** — Ergebnisse bis zur eigenen Prüfung als unbestätigt
+  behandeln.
+- **Physische Vernichtung** (Schreddern nach DIN 66399 Datenträgertyp E) —
+  weiterhin die einzige garantierte Methode für HPA/DCO-Bereiche und defekte,
+  aber nicht gemeldete Sektoren.
 
 Eine ausführliche Erläuterung finden Sie in [docs/SECURITY.md](docs/SECURITY.md).
 

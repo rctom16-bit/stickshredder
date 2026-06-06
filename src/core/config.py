@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover - non-Windows fallback
 _CERT_COUNTER_LOCK = threading.Lock()
 
 APP_NAME = "StickShredder"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.2.0"
 CONFIG_DIR = Path.home() / ".stickshredder"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 AUDIT_LOG_FILE = CONFIG_DIR / "audit.log"

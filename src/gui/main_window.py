@@ -82,7 +82,7 @@ class MainWindow(QMainWindow):
         self.worker: WipeWorker | None = None
         self._device_checkboxes: list[QCheckBox] = []
 
-        self.setWindowTitle("StickShredder v1.0.0 \u2014 Secure USB Wipe Tool")
+        self.setWindowTitle("StickShredder v1.2.0 \u2014 Secure USB Wipe Tool")
         self.setMinimumSize(1000, 700)
         self.resize(1200, 740)
 
@@ -1506,7 +1506,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About StickShredder",
-            "<h2>StickShredder v1.0.0</h2>"
+            "<h2>StickShredder v1.2.0</h2>"
             "<p><b>Secure USB Wipe Tool</b></p>"
             "<p>Generates deletion certificates structured according to "
             "DIN 66399 / ISO 21964 conventions for verifiable, "
@@ -1530,7 +1530,7 @@ class MainWindow(QMainWindow):
             "<tr><td><b>License:</b></td>"
             "<td>MIT License (Open Source)</td></tr>"
             "<tr><td><b>Version:</b></td>"
-            "<td>1.0.0</td></tr>"
+            "<td>1.2.0</td></tr>"
             "</table>"
             "<p style='margin-top:12px; color:#718096; font-size:11px;'>"
             "Copyright 2026 Robin Oertel</p>",
