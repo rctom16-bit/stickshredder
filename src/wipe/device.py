@@ -226,6 +226,7 @@ def _check_active_processes(drive_letter: str) -> bool:
 def list_devices() -> list[DeviceInfo]:
     """Enumerate removable (and optionally internal non-system) storage devices."""
     devices: list[DeviceInfo] = []
+    seen_phys_indices: set[int] = set()
     sys_letter = _system_drive_letter()
     sys_phys_index = _resolve_system_physical_drive_index()
 
@@ -314,6 +315,7 @@ def list_devices() -> list[DeviceInfo]:
                 friendly_name=friendly,
             )
             devices.append(info)
+            seen_phys_indices.add(phys_index)
             audit_log(
                 f"Detected device: {friendly} | {device_id} | "
                 f"{info.capacity_gb} GB | {connection} | "
@@ -329,7 +331,104 @@ def list_devices() -> list[DeviceInfo]:
             )
             continue
 
+    # Also surface physical disks that have NO drive letter (raw, unpartitioned,
+    # or unmounted internal data disks). Without this, an internal disk that
+    # Windows did not assign a letter — exactly the kind of disk wiped in a
+    # drive caddy — would be invisible to the tool.
+    for phys_index, phys_disk in disk_map.items():
+        if phys_index in seen_phys_indices:
+            continue
+        try:
+            interface_type = getattr(phys_disk, "InterfaceType", None)
+            connection = _connection_type_from_interface(interface_type)
+            media_type = (getattr(phys_disk, "MediaType", "") or "").lower()
+
+            is_removable = connection == "USB" or "removable" in media_type
+            is_system = (
+                sys_phys_index is not None and phys_index == sys_phys_index
+            )
+            is_internal = connection != "USB" and not is_removable
+
+            serial = (getattr(phys_disk, "SerialNumber", "") or "").strip()
+            model = (getattr(phys_disk, "Model", "") or "").strip()
+            capacity = int(getattr(phys_disk, "Size", 0) or 0)
+
+            part_count = 0
+            try:
+                for _assoc in c.Win32_DiskDriveToDiskPartition():
+                    if _assoc.Antecedent.Index == phys_index:
+                        part_count += 1
+            except Exception:
+                pass
+
+            device_id = f"\\\\.\\PhysicalDrive{phys_index}"
+            friendly = (
+                f"{model} (PhysicalDrive{phys_index}, no letter)"
+                if model else f"PhysicalDrive{phys_index} (no letter)"
+            )
+
+            info = DeviceInfo(
+                drive_letter="",
+                device_id=device_id,
+                model=model,
+                serial_number=serial,
+                capacity_bytes=capacity,
+                filesystem="RAW",
+                connection_type=connection,
+                is_removable=is_removable,
+                is_system_drive=is_system,
+                is_internal=is_internal,
+                has_bitlocker=False,  # no mounted volume to probe
+                has_active_processes=False,
+                partition_count=part_count,
+                friendly_name=friendly,
+            )
+            devices.append(info)
+            seen_phys_indices.add(phys_index)
+            audit_log(
+                f"Detected letterless device: {friendly} | {device_id} | "
+                f"{info.capacity_gb} GB | {connection} | "
+                f"removable={is_removable} | system={is_system} | internal={is_internal}"
+            )
+        except Exception as exc:
+            audit_log(
+                f"Error processing letterless disk {phys_index}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            continue
+
     return devices
+
+
+def is_safe_to_wipe(device: DeviceInfo, allow_internal: bool = False) -> tuple[bool, str]:
+    """Central safety gate: decide whether a device may be wiped.
+
+    Returns ``(safe, reason)``. ``reason`` is empty when safe, otherwise a
+    human-readable explanation of the refusal. The CLI and GUI must call this
+    before opening a device for writing.
+
+    Rules:
+      * The Windows system disk is never wipeable.
+      * Internal / non-removable disks are refused unless ``allow_internal``.
+      * Fail-safe: even with ``allow_internal``, an internal disk is refused
+        when StickShredder cannot determine which physical disk hosts Windows —
+        because that unknown disk *might* be the one we are about to wipe.
+    """
+    if device.is_system_drive:
+        return False, "This is the Windows system drive and can never be wiped."
+    if device.is_internal:
+        if not allow_internal:
+            return False, (
+                "This is an internal (non-removable) drive. Internal drives are "
+                "refused by default — enable 'allow internal drives' to wipe it."
+            )
+        if _resolve_system_physical_drive_index() is None:
+            return False, (
+                "Refusing to wipe an internal drive: StickShredder could not "
+                "reliably determine which physical disk hosts Windows, so it "
+                "cannot guarantee this is not the system disk (fail-safe)."
+            )
+    return True, ""
 
 
 # ── Raw disk access helpers ────────────────────────────────────────────

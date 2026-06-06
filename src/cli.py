@@ -14,7 +14,7 @@ from typing import NoReturn
 from cert.generator import CertificateData, format_capacity, generate_certificate
 from core.config import AppConfig, get_next_cert_number, DEFAULT_CERT_OUTPUT
 from core.log import audit_log, log_wipe_to_csv, read_wipe_history, setup_logging
-from wipe.device import DeviceInfo, list_devices, open_physical_drive, close_drive, get_drive_size, lock_volume, unlock_volume, dismount_volume
+from wipe.device import DeviceInfo, list_devices, open_physical_drive, close_drive, get_drive_size, lock_volume, unlock_volume, dismount_volume, is_safe_to_wipe
 from wipe.methods import ZeroFill, RandomThreePass, BsiVsitr, CustomWipe, WipeResult
 from wipe.verify import VerifyResult
 
@@ -206,7 +206,7 @@ def _print_device_table(devices: list[DeviceInfo]) -> None:
     for dev in devices:
         status_label, colour = _device_status(dev)
         rows.append((
-            dev.drive_letter,
+            dev.drive_letter or _physical_label(dev.device_id),
             _truncate(dev.model or "Unknown", 28),
             _truncate(dev.serial_number or "N/A", 20),
             _format_size_short(dev.capacity_bytes),
@@ -281,12 +281,30 @@ def _success(message: str) -> None:
     print(_c(_Ansi.GREEN, f"  {message}"))
 
 
-def _find_device(drive_letter: str, devices: list[DeviceInfo]) -> DeviceInfo | None:
-    """Find a DeviceInfo by drive letter (case-insensitive, with or without colon)."""
-    target = drive_letter.upper().rstrip(":")
+def _physical_label(device_id: str) -> str:
+    """Short label for a physical drive id, e.g. r'\\\\.\\PhysicalDrive2' -> 'PD2'."""
+    import re
+    m = re.search(r"PhysicalDrive(\d+)", device_id or "")
+    return f"PD{m.group(1)}" if m else "?"
+
+
+def _find_device(identifier: str, devices: list[DeviceInfo]) -> DeviceInfo | None:
+    """Find a DeviceInfo by drive letter, or by physical-drive id for letterless
+    disks (e.g. 'PhysicalDrive2', r'\\\\.\\PhysicalDrive2', or a bare '2')."""
+    target = identifier.strip()
+    target_letter = target.upper().rstrip(":")
+    # 1) Drive-letter match (lettered volumes).
     for dev in devices:
-        if dev.drive_letter.upper().rstrip(":") == target:
+        if dev.drive_letter and dev.drive_letter.upper().rstrip(":") == target_letter:
             return dev
+    # 2) Physical-drive match (letterless internal/raw disks).
+    import re
+    m = re.search(r"(?:physicaldrive)?(\d+)$", target.lower())
+    if m:
+        want = f"\\\\.\\physicaldrive{int(m.group(1))}"
+        for dev in devices:
+            if dev.device_id.lower() == want:
+                return dev
     return None
 
 
@@ -305,6 +323,14 @@ def cmd_list(args: argparse.Namespace) -> None:
         _info(f"Found {len(removable)} removable device(s) ready for wiping.")
     else:
         _warn("No safe removable devices found.")
+
+    internal = [d for d in devices if d.is_internal and not d.is_system_drive]
+    if internal:
+        _warn(
+            f"{len(internal)} internal drive(s) detected (shown as INTERNAL). "
+            "Wipe them with 'wipe --allow-internal --device PhysicalDriveN'. "
+            "The Windows system disk is always protected."
+        )
 
 
 # -- Command: wipe ----------------------------------------------------------
@@ -332,11 +358,14 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         _die(f"Device '{args.device}' not found. Run 'stickshredder list' to see available devices.")
 
     # -- Safety checks ------------------------------------------------------
-    if device.is_system_drive:
-        _die(
-            f"Device {device.drive_letter} is the SYSTEM drive. "
-            "Wiping the system drive is not allowed."
-        )
+    # Central gate: refuses the Windows disk always, internal drives without
+    # --allow-internal, and (fail-safe) internal drives when the system disk
+    # cannot be identified.
+    safe, reason = is_safe_to_wipe(
+        device, allow_internal=getattr(args, "allow_internal", False)
+    )
+    if not safe:
+        _die(reason)
 
     if device.has_bitlocker:
         _die(
@@ -406,12 +435,25 @@ def cmd_wipe(args: argparse.Namespace) -> None:
             sys.exit(0)
 
     # -- Confirmation 2 -----------------------------------------------------
+    # Internal drives demand extra friction: the operator must type the exact
+    # model name (not just DELETE), making an accidental internal-disk wipe far
+    # harder than fat-fingering a USB stick.
     if not auto_yes:
         print()
-        resp = input(_c(_Ansi.RED, "  Type DELETE to confirm: ")).strip()
-        if resp != "DELETE":
-            print("  Aborted.")
-            sys.exit(0)
+        if device.is_internal and device.model:
+            resp = input(_c(
+                _Ansi.RED + _Ansi.BOLD,
+                f"  INTERNAL DRIVE. Type the exact model name "
+                f"('{device.model}') to confirm: ",
+            )).strip()
+            if resp != device.model:
+                print("  Aborted.")
+                sys.exit(0)
+        else:
+            resp = input(_c(_Ansi.RED, "  Type DELETE to confirm: ")).strip()
+            if resp != "DELETE":
+                print("  Aborted.")
+                sys.exit(0)
         print()
 
     # -- Execute wipe -------------------------------------------------------
@@ -420,13 +462,17 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     verify_result: VerifyResult | None = None
 
     try:
-        # Dismount the volume first
-        _info("Dismounting volume...")
-        try:
-            dismount_volume(device.drive_letter)
-        except OSError as exc:
-            _warn(f"Dismount failed: {exc}")
-            _info("Attempting to continue...")
+        # Dismount the volume first. Letterless disks (raw / internal data
+        # disks) have no single mounted volume to dismount, so skip it.
+        if device.drive_letter:
+            _info("Dismounting volume...")
+            try:
+                dismount_volume(device.drive_letter)
+            except OSError as exc:
+                _warn(f"Dismount failed: {exc}")
+                _info("Attempting to continue...")
+        else:
+            _info("No drive letter (raw/internal disk) — skipping volume dismount.")
 
         # Open physical drive
         _info(f"Opening physical drive {device.device_id}...")
@@ -891,6 +937,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--yes", "-y",
         action="store_true",
         help="Skip all confirmation prompts (for scripting)",
+    )
+    sub_wipe.add_argument(
+        "--allow-internal",
+        action="store_true",
+        help="Allow wiping internal (non-removable) drives. Off by default. "
+             "The Windows system disk is ALWAYS refused regardless of this flag. "
+             "Internal drives are also refused if the system disk cannot be "
+             "identified (fail-safe).",
     )
     sub_wipe.add_argument(
         "--reformat",

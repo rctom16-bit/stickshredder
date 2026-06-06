@@ -14,7 +14,7 @@ ctypes.windll.kernel32 = MagicMock()
 # wmi is a Windows-only package; provide a stub for CI.
 sys.modules.setdefault("wmi", MagicMock())
 
-from wipe.device import DeviceInfo, list_devices, _system_drive_letter, _connection_type_from_interface
+from wipe.device import DeviceInfo, list_devices, is_safe_to_wipe, _system_drive_letter, _connection_type_from_interface
 
 
 # ── DeviceInfo.capacity_gb ────────────────────────────────────────────
@@ -606,3 +606,127 @@ def _make_device(**overrides) -> DeviceInfo:
     )
     defaults.update(overrides)
     return DeviceInfo(**defaults)
+
+
+# ── Letterless / internal disk enumeration (v1.2) ─────────────────────
+
+@patch("wipe.device.audit_log")
+@patch("wipe.device._check_active_processes", return_value=False)
+@patch("wipe.device._check_bitlocker", return_value=False)
+@patch("wipe.device._system_drive_letter", return_value="C:")
+@patch("wipe.device._get_wmi_connection")
+def test_letterless_internal_disk_is_enumerated(
+    mock_wmi_conn, mock_sysletter, mock_bl, mock_ap, mock_log
+):
+    """An internal SATA disk with no drive letter must still appear (as RAW)."""
+    mock_c = MagicMock()
+    mock_wmi_conn.return_value = mock_c
+
+    phys = MagicMock()
+    phys.Index = 2
+    phys.InterfaceType = "SATA"
+    phys.MediaType = "Fixed hard disk media"
+    phys.SerialNumber = "DATA-DISK-SN"
+    phys.Model = "Seagate Barracuda 2TB"
+    phys.Size = str(2 * 1024**4)
+    mock_c.Win32_DiskDrive.return_value = [phys]
+
+    # No lettered volumes at all.
+    mock_c.Win32_LogicalDisk.return_value = []
+    mock_c.Win32_LogicalDiskToPartition.return_value = []
+    mock_c.Win32_DiskDriveToDiskPartition.return_value = []
+
+    devices = list_devices()
+    assert len(devices) == 1
+    dev = devices[0]
+    assert dev.drive_letter == ""
+    assert dev.device_id == r"\\.\PhysicalDrive2"
+    assert dev.is_internal is True
+    assert dev.is_removable is False
+    assert dev.filesystem == "RAW"
+    assert dev.is_system_drive is False
+
+
+@patch("wipe.device.audit_log")
+@patch("wipe.device._check_active_processes", return_value=False)
+@patch("wipe.device._check_bitlocker", return_value=False)
+@patch("wipe.device._system_drive_letter", return_value="C:")
+@patch("wipe.device._get_wmi_connection")
+def test_lettered_disk_not_duplicated_as_letterless(
+    mock_wmi_conn, mock_sysletter, mock_bl, mock_ap, mock_log
+):
+    """A USB disk with a letter must appear once, not also as a letterless entry."""
+    mock_c = MagicMock()
+    mock_wmi_conn.return_value = mock_c
+
+    phys = MagicMock()
+    phys.Index = 1
+    phys.InterfaceType = "USB"
+    phys.MediaType = "Removable Media"
+    phys.SerialNumber = "USB-SN"
+    phys.Model = "Kingston 64GB"
+    phys.Size = str(64 * 1024**3)
+    mock_c.Win32_DiskDrive.return_value = [phys]
+
+    ldisk = MagicMock()
+    ldisk.DeviceID = "E:"
+    ldisk.DriveType = 2
+    ldisk.FileSystem = "exFAT"
+    mock_c.Win32_LogicalDisk.return_value = [ldisk]
+
+    assoc_ld = MagicMock()
+    assoc_ld.Dependent.DeviceID = "E:"
+    assoc_ld.Antecedent.DeviceID = "Disk #1, Partition #0"
+    mock_c.Win32_LogicalDiskToPartition.return_value = [assoc_ld]
+
+    assoc_dd = MagicMock()
+    assoc_dd.Dependent.DeviceID = "Disk #1, Partition #0"
+    assoc_dd.Antecedent.Index = 1
+    mock_c.Win32_DiskDriveToDiskPartition.return_value = [assoc_dd]
+
+    devices = list_devices()
+    assert len(devices) == 1
+    assert devices[0].drive_letter == "E:"
+
+
+# ── is_safe_to_wipe gate (v1.2) ───────────────────────────────────────
+
+def test_is_safe_to_wipe_refuses_system_drive():
+    dev = _make_device(is_system_drive=True)
+    safe, reason = is_safe_to_wipe(dev, allow_internal=True)
+    assert safe is False
+    assert "system" in reason.lower()
+
+
+def test_is_safe_to_wipe_allows_usb():
+    dev = _make_device(is_removable=True, is_internal=False)
+    safe, reason = is_safe_to_wipe(dev)
+    assert safe is True
+    assert reason == ""
+
+
+def test_is_safe_to_wipe_refuses_internal_without_flag():
+    dev = _make_device(is_removable=False, is_internal=True, is_system_drive=False)
+    safe, reason = is_safe_to_wipe(dev, allow_internal=False)
+    assert safe is False
+    assert "internal" in reason.lower()
+
+
+@patch("wipe.device._resolve_system_physical_drive_index", return_value=0)
+def test_is_safe_to_wipe_allows_internal_when_system_known(mock_idx):
+    dev = _make_device(
+        is_removable=False, is_internal=True, is_system_drive=False,
+        device_id=r"\\.\PhysicalDrive3",
+    )
+    safe, reason = is_safe_to_wipe(dev, allow_internal=True)
+    assert safe is True
+    assert reason == ""
+
+
+@patch("wipe.device._resolve_system_physical_drive_index", return_value=None)
+def test_is_safe_to_wipe_failsafe_refuses_internal_when_system_unknown(mock_idx):
+    """Fail-safe: refuse an internal wipe when the Windows disk can't be identified."""
+    dev = _make_device(is_removable=False, is_internal=True, is_system_drive=False)
+    safe, reason = is_safe_to_wipe(dev, allow_internal=True)
+    assert safe is False
+    assert "system" in reason.lower()
