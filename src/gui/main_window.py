@@ -39,7 +39,7 @@ from gui.history_dialog import HistoryDialog
 from gui.settings_dialog import SettingsDialog
 from gui.wipe_worker import WipeWorker
 from wipe.demo import create_demo_device
-from wipe.device import DeviceInfo, list_devices
+from wipe.device import DeviceInfo, list_devices, is_safe_to_wipe
 from wipe.methods import BsiVsitr, CustomWipe, RandomThreePass, ZeroFill, WipeMethod
 
 
@@ -425,6 +425,27 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(reformat_group)
 
+        # Internal-drive safety toggle (v1.2). Off by default; internal drives
+        # are refused unless this is ticked. The Windows disk is always refused.
+        safety_group = QGroupBox("Internal Drives / Interne Festplatten")
+        safety_layout = QVBoxLayout(safety_group)
+        safety_layout.setSpacing(4)
+        self.allow_internal_cb = QCheckBox(
+            "Interne Festplatten erlauben / Allow internal drives"
+        )
+        self.allow_internal_cb.setChecked(False)
+        self.allow_internal_cb.setToolTip(
+            "Standardmäßig sind nur USB-/Wechseldatenträger wählbar. Mit "
+            "diesem Häkchen werden auch interne SATA-Festplatten zum Löschen "
+            "freigegeben — die Windows-Systemplatte bleibt IMMER gesperrt.\n\n"
+            "By default only USB / removable media can be selected. Ticking this "
+            "also allows wiping internal SATA disks — the Windows system disk "
+            "is ALWAYS protected."
+        )
+        self.allow_internal_cb.toggled.connect(self._on_allow_internal_toggled)
+        safety_layout.addWidget(self.allow_internal_cb)
+        layout.addWidget(safety_group)
+
         layout.addStretch()
 
         # Wipe button
@@ -607,9 +628,18 @@ class MainWindow(QMainWindow):
 
             # Checkbox
             cb = QCheckBox()
+            allow_internal = (
+                hasattr(self, "allow_internal_cb")
+                and self.allow_internal_cb.isChecked()
+            )
             if device.is_system_drive:
                 cb.setEnabled(False)
                 cb.setToolTip("System drive \u2014 cannot be wiped")
+            elif device.is_internal and not allow_internal:
+                cb.setEnabled(False)
+                cb.setToolTip(
+                    "Internal drive \u2014 tick 'Allow internal drives' to enable"
+                )
             elif device.has_bitlocker:
                 cb.setToolTip(
                     "BitLocker encrypted \u2014 will need to unlock first"
@@ -790,6 +820,12 @@ class MainWindow(QMainWindow):
         self.reformat_fs_combo.setEnabled(checked)
         self.reformat_label_edit.setEnabled(checked)
 
+    def _on_allow_internal_toggled(self, checked: bool) -> None:
+        """Re-render the device table so internal-drive checkboxes enable or
+        disable to match the new opt-in state."""
+        self._populate_device_table()
+        self._on_selection_changed()
+
     def _get_wipe_method(self) -> WipeMethod:
         """Create the WipeMethod instance from the current UI selection."""
         method_key = self.method_combo.currentData()
@@ -854,6 +890,22 @@ class MainWindow(QMainWindow):
                 "Please select at least one device to wipe.",
             )
             return
+
+        # Safety gate (v1.2): refuse the system disk always; refuse internal
+        # drives unless opted in; fail-safe when the system disk is unknown.
+        allow_internal = (
+            self.allow_internal_cb.isChecked()
+            if hasattr(self, "allow_internal_cb") else False
+        )
+        for d in selected:
+            safe, reason = is_safe_to_wipe(d, allow_internal=allow_internal)
+            if not safe:
+                QMessageBox.critical(
+                    self,
+                    "Wipe Refused / Löschung verweigert",
+                    f"{d.friendly_name}:\n\n{reason}",
+                )
+                return
 
         # Safety check: SSD / internal drive warning
         non_removable = [d for d in selected if not d.is_removable]
@@ -1059,6 +1111,8 @@ class MainWindow(QMainWindow):
             else:
                 self.reformat_fs_combo.setEnabled(False)
                 self.reformat_label_edit.setEnabled(False)
+        if hasattr(self, "allow_internal_cb"):
+            self.allow_internal_cb.setEnabled(enabled)
         for cb in self._device_checkboxes:
             cb.setEnabled(enabled and not self.devices[
                 self._device_checkboxes.index(cb)

@@ -104,6 +104,57 @@ def test_checkbox_default_unchecked(main_window):
     assert main_window.full_verify_cb.isChecked() is False
 
 
+# -- v1.2: internal-drive safety gate ----------------------------------------
+
+
+def _internal_device():
+    from wipe.device import DeviceInfo
+    return DeviceInfo(
+        drive_letter="",
+        device_id=r"\\.\PhysicalDrive2",
+        model="Seagate Internal 2TB",
+        serial_number="INT-DISK-1",
+        capacity_bytes=2 * 1024 ** 4,
+        filesystem="RAW",
+        connection_type="SATA",
+        is_removable=False,
+        is_system_drive=False,
+        is_internal=True,
+    )
+
+
+def test_allow_internal_checkbox_default_unchecked(main_window):
+    """The 'allow internal drives' opt-in must exist and start off."""
+    assert hasattr(main_window, "allow_internal_cb")
+    assert main_window.allow_internal_cb.isChecked() is False
+
+
+def test_internal_device_checkbox_disabled_without_optin(main_window):
+    """An internal drive is unselectable until the opt-in is ticked."""
+    main_window.devices = [_internal_device()]
+    main_window._populate_device_table()
+    assert len(main_window._device_checkboxes) == 1
+    assert main_window._device_checkboxes[0].isEnabled() is False
+
+    # Opt in -> the table re-renders and the checkbox becomes enabled.
+    main_window.allow_internal_cb.setChecked(True)
+    assert main_window._device_checkboxes[0].isEnabled() is True
+
+
+def test_wipe_refused_for_internal_without_optin(main_window):
+    """The safety gate must refuse an internal wipe when not opted in."""
+    main_window.devices = [_internal_device()]
+    main_window._populate_device_table()
+    # Programmatically select the (disabled) internal device.
+    main_window._device_checkboxes[0].setChecked(True)
+
+    with patch("gui.main_window.QMessageBox") as mock_box:
+        main_window._on_wipe_clicked()
+
+    assert mock_box.critical.called
+    assert main_window.worker is None
+
+
 def test_checkbox_has_bilingual_label_and_tooltip(main_window):
     """Label and tooltip must cover both DE and EN."""
     cb = main_window.full_verify_cb
