@@ -105,6 +105,13 @@ class CertificateData:
     reformat_filesystem: str = ""  # "FAT32" | "exFAT" | "NTFS" or ""
     reformat_label: str = ""
 
+    # Bad sectors (new for v1.2) — optional, section only rendered when count > 0.
+    # count = number of unwritable regions (blocks); bytes = their total size;
+    # offsets = first 100 byte offsets.
+    bad_sector_count: int = 0
+    bad_sector_bytes: int = 0
+    bad_sector_offsets: list[int] = field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -494,6 +501,63 @@ def _build_verification_elements(
 
 
 # ---------------------------------------------------------------------------
+# Bad-sector section builder (v1.2)
+# ---------------------------------------------------------------------------
+def _build_bad_sector_elements(
+    data: CertificateData,
+    styles: dict[str, ParagraphStyle],
+    lang: str,
+) -> list:
+    """Build the flowables for the Bad Sectors section.
+
+    Only call this when ``data.bad_sector_count > 0``. Renders the number of
+    unwritable regions, the affected data volume, an approximate sector count,
+    the first 10 byte offsets, and a prominent warning that those sectors may
+    still hold old data.
+    """
+    elements: list = []
+    elements.append(
+        _section_header(_label("Defekte Sektoren", "Bad Sectors", lang), styles)
+    )
+
+    approx_sectors = data.bad_sector_bytes // 512
+    rows: list[tuple[str, str]] = [
+        (
+            _label("Nicht beschreibbare Bereiche", "Unwritable Regions", lang),
+            f"{data.bad_sector_count:,}".replace(",", "."),
+        ),
+        (
+            _label("Betroffene Datenmenge", "Affected Data", lang),
+            format_capacity(data.bad_sector_bytes),
+        ),
+        (
+            _label("Betroffene Sektoren (ca.)", "Affected Sectors (approx.)", lang),
+            f"{approx_sectors:,}".replace(",", "."),
+        ),
+    ]
+    if data.bad_sector_offsets:
+        rows.append(
+            (
+                _label("Erste Offsets", "First Offsets", lang),
+                _format_offsets_hex(data.bad_sector_offsets, limit=10),
+            )
+        )
+    elements.append(_kv_table(rows, styles))
+
+    warning = _label(
+        "Achtung: Diese Sektoren konnten nicht überschrieben werden und können "
+        "Altdaten enthalten. Für hochsensible Daten wird physische Vernichtung "
+        "empfohlen.",
+        "Warning: these sectors could not be overwritten and may still contain "
+        "old data. Physical destruction is recommended for high-sensitivity data.",
+        lang,
+    )
+    elements.append(Paragraph(warning, styles["result_fail"]))
+    elements.append(Spacer(1, 4 * mm))
+    return elements
+
+
+# ---------------------------------------------------------------------------
 # PDF generation
 # ---------------------------------------------------------------------------
 def generate_certificate(data: CertificateData, output_path: str) -> str:
@@ -689,6 +753,12 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
     # 5. Verification
     # ------------------------------------------------------------------
     elements.extend(_build_verification_elements(data, styles, lang))
+
+    # --------------------------------------------------------------------------
+    # 5c. Bad sectors (v1.2) — only when defects were recorded during the wipe.
+    # --------------------------------------------------------------------------
+    if data.bad_sector_count > 0:
+        elements.extend(_build_bad_sector_elements(data, styles, lang))
 
     # --------------------------------------------------------------------------
     # 5b. Reformat (v1.1)

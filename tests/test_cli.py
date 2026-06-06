@@ -110,6 +110,9 @@ def _fake_wipe_result():
         error_message=None,
         verify_result=verify,
         zero_blank_appended=False,
+        bad_sector_count=0,
+        bad_sector_bytes=0,
+        bad_sector_offsets=[],
     )
 
 
@@ -193,6 +196,9 @@ def _fake_wipe_result_vsitr_with_blank():
         error_message=None,
         verify_result=verify,
         zero_blank_appended=True,
+        bad_sector_count=0,
+        bad_sector_bytes=0,
+        bad_sector_offsets=[],
     )
 
 

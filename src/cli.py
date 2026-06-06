@@ -469,6 +469,13 @@ def cmd_wipe(args: argparse.Namespace) -> None:
             _die(f"Wipe failed: {wipe_result.error_message}")
 
         _success(f"Wipe completed successfully in {_format_duration(wipe_result.start_time, wipe_result.end_time)}.")
+        if wipe_result.bad_sector_count > 0:
+            _warn(
+                f"{wipe_result.bad_sector_count} unwritable region(s) "
+                f"({_format_size_short(wipe_result.bad_sector_bytes)}) were skipped "
+                f"and recorded on the certificate. These sectors may still hold old "
+                f"data — consider physical destruction for high-sensitivity media."
+            )
         print()
 
         # -- Verification --------------------------------------------------
@@ -586,13 +593,19 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         reformat_performed=bool(format_result and format_result.success),
         reformat_filesystem=(format_result.filesystem if format_result and format_result.success else ""),
         reformat_label=(format_result.label if format_result and format_result.success else ""),
+        bad_sector_count=wipe_result.bad_sector_count,
+        bad_sector_bytes=wipe_result.bad_sector_bytes,
+        bad_sector_offsets=list(wipe_result.bad_sector_offsets),
     )
     try:
         cert_data = CertificateData(**cert_kwargs)
     except TypeError:
-        # Reformat fields not yet present on CertificateData (agent F not landed).
-        # Drop them and retry so the certificate can still be generated.
-        for _key in ("reformat_performed", "reformat_filesystem", "reformat_label"):
+        # Optional fields not present on an older CertificateData. Drop them and
+        # retry so the certificate can still be generated.
+        for _key in (
+            "reformat_performed", "reformat_filesystem", "reformat_label",
+            "bad_sector_count", "bad_sector_bytes", "bad_sector_offsets",
+        ):
             cert_kwargs.pop(_key, None)
         cert_data = CertificateData(**cert_kwargs)
 
@@ -628,6 +641,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         "cert_number": str(cert_number),
         "reformat": format_result.filesystem if format_result and format_result.success else "NONE",
         "reformat_label": format_result.label if format_result and format_result.success else "",
+        "bad_sectors": str(wipe_result.bad_sector_count),
     })
 
     # -- Summary ------------------------------------------------------------
@@ -660,6 +674,13 @@ def cmd_wipe(args: argparse.Namespace) -> None:
                   f"(label: {format_result.label})")
         else:
             print(f"    Reformat:        {_c(_Ansi.RED, 'FAILED')}")
+
+    if wipe_result.bad_sector_count > 0:
+        print(
+            f"    Bad Sectors:     "
+            f"{_c(_Ansi.YELLOW + _Ansi.BOLD, str(wipe_result.bad_sector_count) + ' region(s)')} "
+            f"({_format_size_short(wipe_result.bad_sector_bytes)})"
+        )
 
     print(f"    Certificate:     SS-{cert_number:06d}")
     if abs_cert_path:

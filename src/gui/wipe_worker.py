@@ -481,6 +481,11 @@ class WipeWorker(QThread):
                         if format_result and format_result.success
                         else ""
                     ),
+                    # Bad-sector accounting (v1.2). Reported on the certificate
+                    # when > 0; harmless defaults otherwise.
+                    "bad_sector_count": wipe_result.bad_sector_count,
+                    "bad_sector_bytes": wipe_result.bad_sector_bytes,
+                    "bad_sector_offsets": list(wipe_result.bad_sector_offsets),
                 }
 
                 base_kwargs = dict(
@@ -550,6 +555,7 @@ class WipeWorker(QThread):
                     "result": "SUCCESS" if wipe_result.success else "FAILED",
                     "verification": verification_text,
                     "cert_number": cert_number,
+                    "bad_sectors": wipe_result.bad_sector_count,
                 })
 
                 # Overall device success: wipe must succeed, and if verify
