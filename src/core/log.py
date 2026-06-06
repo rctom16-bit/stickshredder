@@ -67,6 +67,7 @@ CSV_HEADERS = [
     "reformat_label",
     "cert_number",
     "bad_sectors",
+    "hidden_area",
 ]
 
 

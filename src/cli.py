@@ -17,6 +17,8 @@ from core.log import audit_log, log_wipe_to_csv, read_wipe_history, setup_loggin
 from wipe.device import DeviceInfo, list_devices, open_physical_drive, close_drive, get_drive_size, lock_volume, unlock_volume, dismount_volume, is_safe_to_wipe
 from wipe.methods import ZeroFill, RandomThreePass, BsiVsitr, CustomWipe, WipeResult
 from wipe.verify import VerifyResult
+from wipe.hidden_areas import detect_hidden_areas, hidden_bytes
+from wipe.secure_erase import secure_erase
 
 
 def is_admin() -> bool:
@@ -374,7 +376,15 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         )
 
     # -- Resolve method and parameters --------------------------------------
-    wipe_method = _resolve_wipe_method(args)
+    is_secure_erase = args.method == "secure-erase"
+    enhanced_erase = getattr(args, "enhanced", False)
+    if is_secure_erase and not getattr(args, "experimental", False):
+        _die(
+            "--method secure-erase is EXPERIMENTAL and untested on real "
+            "hardware; it may render a drive unusable. Re-run with "
+            "--experimental to acknowledge the risk."
+        )
+    wipe_method = None if is_secure_erase else _resolve_wipe_method(args)
     schutzklasse: int = getattr(args, "schutzklasse", 2) or 2
     client: str = getattr(args, "client", "") or ""
     asset_tag: str = getattr(args, "asset_tag", "") or ""
@@ -393,7 +403,17 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     print(f"    Connection:      {device.connection_type}")
     print(f"    Removable:       {'Yes' if device.is_removable else 'No'}")
     print()
-    print(f"    Wipe Method:     {wipe_method.name} ({wipe_method.passes} pass{'es' if wipe_method.passes != 1 else ''})")
+    if is_secure_erase:
+        method_display = (
+            "ATA Secure Erase" + (" — Enhanced" if enhanced_erase else "")
+            + " (EXPERIMENTAL)"
+        )
+    else:
+        method_display = (
+            f"{wipe_method.name} "
+            f"({wipe_method.passes} pass{'es' if wipe_method.passes != 1 else ''})"
+        )
+    print(f"    Wipe Method:     {method_display}")
     print(f"    Schutzklasse:    {schutzklasse}")
     print(f"    Operator:        {args.operator}")
     if client:
@@ -460,6 +480,8 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     handle: int | None = None
     wipe_result: WipeResult | None = None
     verify_result: VerifyResult | None = None
+    hidden = None
+    secure_erase_result = None
 
     try:
         # Dismount the volume first. Letterless disks (raw / internal data
@@ -490,22 +512,63 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         _info(f"Drive size: {_format_size_short(drive_size)}")
         print()
 
-        # Run the wipe
-        print(_c(_Ansi.BOLD, f"  Wiping {device.drive_letter} with {wipe_method.name}...\n"))
-        audit_log(
-            f"CLI wipe started: device={device.drive_letter} method={wipe_method.name} "
-            f"operator={args.operator}"
-        )
+        # Probe for hidden areas (HPA/DCO) — read-only. USB bridges report
+        # unsupported; we never modify the drive here.
+        hidden = detect_hidden_areas(handle)
+        if hidden.supported and (hidden.hpa_present or hidden.dco_present):
+            parts = []
+            if hidden.hpa_present:
+                parts.append(f"HPA {_format_size_short(hidden_bytes(hidden.hpa_hidden_sectors))}")
+            if hidden.dco_present:
+                parts.append(f"DCO {_format_size_short(hidden_bytes(hidden.dco_hidden_sectors))}")
+            _warn(
+                "Hidden area(s) detected (" + ", ".join(parts) + "). These are NOT "
+                "reached by an overwrite wipe and may retain old data — physical "
+                "destruction is recommended for high-sensitivity media. (Recorded "
+                "on the certificate.)"
+            )
+            print()
 
-        verify_cb = _verify_progress_bar if verify_mode == "full" else None
-        wipe_result = wipe_method.execute(
-            handle=handle,
-            drive_size=drive_size,
-            block_size=1_048_576,
-            progress_callback=_progress_bar,
-            verify_mode=verify_mode,
-            verify_progress_callback=verify_cb,
-        )
+        # Run the wipe — either an overwrite method or experimental Secure Erase.
+        if is_secure_erase:
+            se_name = "ATA Secure Erase" + (" (enhanced)" if enhanced_erase else "")
+            print(_c(_Ansi.BOLD,
+                     f"  {se_name} on {device.drive_letter} (EXPERIMENTAL)...\n"))
+            audit_log(
+                f"CLI secure-erase started: device={device.drive_letter} "
+                f"enhanced={enhanced_erase} operator={args.operator}"
+            )
+            _se_start = datetime.now()
+            se = secure_erase(handle, enhanced=enhanced_erase)
+            secure_erase_result = se
+            wipe_result = WipeResult(
+                method_name=se_name,
+                passes=0,
+                start_time=_se_start,
+                end_time=datetime.now(),
+                bytes_written=drive_size if se.success else 0,
+                success=se.success,
+                error_message=se.error or (
+                    None if se.success
+                    else f"Secure erase not performed (state: {se.method})"
+                ),
+            )
+        else:
+            print(_c(_Ansi.BOLD, f"  Wiping {device.drive_letter} with {wipe_method.name}...\n"))
+            audit_log(
+                f"CLI wipe started: device={device.drive_letter} method={wipe_method.name} "
+                f"operator={args.operator}"
+            )
+
+            verify_cb = _verify_progress_bar if verify_mode == "full" else None
+            wipe_result = wipe_method.execute(
+                handle=handle,
+                drive_size=drive_size,
+                block_size=1_048_576,
+                progress_callback=_progress_bar,
+                verify_mode=verify_mode,
+                verify_progress_callback=verify_cb,
+            )
 
         # Clear the progress bar line (covers both wipe and verify bars)
         sys.stdout.write("\r" + " " * shutil.get_terminal_size((80, 24)).columns + "\r")
@@ -605,6 +668,10 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     cert_number = get_next_cert_number()
     cert_date = datetime.now()
 
+    # Secure erase has no WipeMethod object; derive the cert fields safely.
+    cert_method_name = wipe_result.method_name
+    cert_sicherheitsstufe = "—" if is_secure_erase else wipe_method.sicherheitsstufe
+
     cert_kwargs = dict(
         cert_number=cert_number,
         date=cert_date,
@@ -617,8 +684,8 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         capacity_bytes=device.capacity_bytes,
         filesystem=device.filesystem,
         connection_type=device.connection_type,
-        wipe_method=wipe_method.name,
-        sicherheitsstufe=wipe_method.sicherheitsstufe,
+        wipe_method=cert_method_name,
+        sicherheitsstufe=cert_sicherheitsstufe,
         schutzklasse=schutzklasse,
         passes=wipe_result.passes,  # actual total including zero-blank
         start_time=wipe_result.start_time,
@@ -642,6 +709,21 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         bad_sector_count=wipe_result.bad_sector_count,
         bad_sector_bytes=wipe_result.bad_sector_bytes,
         bad_sector_offsets=list(wipe_result.bad_sector_offsets),
+        hidden_area_probed=bool(hidden is not None and hidden.supported),
+        hpa_present=bool(hidden and hidden.hpa_present),
+        hpa_hidden_bytes=(
+            hidden_bytes(hidden.hpa_hidden_sectors)
+            if hidden and hidden.hpa_present else 0
+        ),
+        dco_present=bool(hidden and hidden.dco_present),
+        dco_hidden_bytes=(
+            hidden_bytes(hidden.dco_hidden_sectors)
+            if hidden and hidden.dco_present else 0
+        ),
+        secure_erase_used=is_secure_erase,
+        secure_erase_method=(
+            secure_erase_result.method if secure_erase_result else ""
+        ),
     )
     try:
         cert_data = CertificateData(**cert_kwargs)
@@ -651,6 +733,9 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         for _key in (
             "reformat_performed", "reformat_filesystem", "reformat_label",
             "bad_sector_count", "bad_sector_bytes", "bad_sector_offsets",
+            "hidden_area_probed", "hpa_present", "hpa_hidden_bytes",
+            "dco_present", "dco_hidden_bytes",
+            "secure_erase_used", "secure_erase_method",
         ):
             cert_kwargs.pop(_key, None)
         cert_data = CertificateData(**cert_kwargs)
@@ -668,12 +753,21 @@ def cmd_wipe(args: argparse.Namespace) -> None:
 
     # -- Log to CSV ---------------------------------------------------------
     duration_seconds = int((wipe_result.end_time - wipe_result.start_time).total_seconds())
+    if hidden is not None and hidden.supported:
+        _ha_parts = []
+        if hidden.hpa_present:
+            _ha_parts.append(f"HPA:{_format_size_short(hidden_bytes(hidden.hpa_hidden_sectors))}")
+        if hidden.dco_present:
+            _ha_parts.append(f"DCO:{_format_size_short(hidden_bytes(hidden.dco_hidden_sectors))}")
+        hidden_area_str = "+".join(_ha_parts) if _ha_parts else "NONE"
+    else:
+        hidden_area_str = "n/a"
     log_wipe_to_csv({
         "date": cert_date.strftime("%Y-%m-%d %H:%M:%S"),
         "device_model": device.model or "Unknown",
         "serial_number": device.serial_number or "N/A",
         "capacity_bytes": str(device.capacity_bytes),
-        "method": wipe_method.name,
+        "method": cert_method_name,
         "passes": str(wipe_result.passes),
         "operator": args.operator,
         "start_time": wipe_result.start_time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -688,6 +782,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         "reformat": format_result.filesystem if format_result and format_result.success else "NONE",
         "reformat_label": format_result.label if format_result and format_result.success else "",
         "bad_sectors": str(wipe_result.bad_sector_count),
+        "hidden_area": hidden_area_str,
     })
 
     # -- Summary ------------------------------------------------------------
@@ -695,7 +790,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     print(_c(_Ansi.BOLD + _Ansi.CYAN, "  === Wipe Summary ==="))
     print(f"    Device:          {device.drive_letter} ({device.model or 'Unknown'})")
     print(f"    Serial:          {device.serial_number or 'N/A'}")
-    print(f"    Method:          {wipe_method.name} ({wipe_result.passes} passes)")
+    print(f"    Method:          {cert_method_name} ({wipe_result.passes} passes)")
     print(f"    Duration:        {_format_duration(wipe_result.start_time, wipe_result.end_time)}")
     print(f"    Result:          {_c(_Ansi.GREEN + _Ansi.BOLD, 'SUCCESS') if wipe_result.success else _c(_Ansi.RED + _Ansi.BOLD, 'FAILED')}")
 
@@ -864,8 +959,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub_wipe.add_argument(
         "--method",
         required=True,
-        choices=["zero", "standard", "bsi", "custom"],
-        help="Wipe method: zero (1-pass zeros), standard (3-pass random), bsi (7-pass BSI-VSITR), custom",
+        choices=["zero", "standard", "bsi", "custom", "secure-erase"],
+        help="Wipe method: zero (1-pass zeros), standard (3-pass random), "
+             "bsi (7-pass BSI-VSITR), custom, or secure-erase (EXPERIMENTAL "
+             "ATA firmware erase — requires --experimental)",
     )
     sub_wipe.add_argument(
         "--operator",
@@ -945,6 +1042,18 @@ def build_parser() -> argparse.ArgumentParser:
              "The Windows system disk is ALWAYS refused regardless of this flag. "
              "Internal drives are also refused if the system disk cannot be "
              "identified (fail-safe).",
+    )
+    sub_wipe.add_argument(
+        "--experimental",
+        action="store_true",
+        help="Acknowledge experimental, hardware-untested features "
+             "(required for --method secure-erase).",
+    )
+    sub_wipe.add_argument(
+        "--enhanced",
+        action="store_true",
+        help="For --method secure-erase: request ATA Enhanced Secure Erase "
+             "instead of the normal erase (if the drive supports it).",
     )
     sub_wipe.add_argument(
         "--reformat",
