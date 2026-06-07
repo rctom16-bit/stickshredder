@@ -712,8 +712,9 @@ def test_is_safe_to_wipe_refuses_internal_without_flag():
     assert "internal" in reason.lower()
 
 
+@patch("wipe.device._boot_system_partition_disk_indices", return_value=set())
 @patch("wipe.device._resolve_system_physical_drive_index", return_value=0)
-def test_is_safe_to_wipe_allows_internal_when_system_known(mock_idx):
+def test_is_safe_to_wipe_allows_internal_when_system_known(mock_idx, mock_boot):
     dev = _make_device(
         is_removable=False, is_internal=True, is_system_drive=False,
         device_id=r"\\.\PhysicalDrive3",
@@ -721,6 +722,59 @@ def test_is_safe_to_wipe_allows_internal_when_system_known(mock_idx):
     safe, reason = is_safe_to_wipe(dev, allow_internal=True)
     assert safe is True
     assert reason == ""
+
+
+@patch("wipe.device._boot_system_partition_disk_indices", return_value=None)
+@patch("wipe.device._resolve_system_physical_drive_index", return_value=0)
+def test_is_safe_to_wipe_failsafe_refuses_internal_when_boot_layout_unknown(
+    mock_idx, mock_boot
+):
+    """Even when the Windows disk is known, an unreadable boot/EFI layout must
+    block internal wipes (the boot partition could be on a separate disk)."""
+    dev = _make_device(is_removable=False, is_internal=True, is_system_drive=False)
+    safe, reason = is_safe_to_wipe(dev, allow_internal=True)
+    assert safe is False
+    assert "boot" in reason.lower()
+
+
+@patch("wipe.device._boot_system_partition_disk_indices", return_value={0})
+@patch("wipe.device._resolve_system_physical_drive_index", return_value=1)
+def test_system_indices_union_includes_boot_disk(mock_win, mock_boot):
+    """_system_physical_drive_indices unions the Windows disk and boot disks."""
+    from wipe.device import _system_physical_drive_indices
+    assert _system_physical_drive_indices() == {0, 1}
+
+
+@patch("wipe.device.audit_log")
+@patch("wipe.device._boot_system_partition_disk_indices", return_value={0})
+@patch("wipe.device._check_active_processes", return_value=False)
+@patch("wipe.device._check_bitlocker", return_value=False)
+@patch("wipe.device._system_drive_letter", return_value="C:")
+@patch("wipe.device._get_wmi_connection")
+def test_separate_boot_disk_is_flagged_system(
+    mock_wmi_conn, mock_sysletter, mock_bl, mock_ap, mock_boot, mock_log
+):
+    """A disk that only carries the boot/EFI partition (Windows files on another
+    disk) must still be flagged is_system_drive — wiping it would break booting."""
+    mock_c = MagicMock()
+    mock_wmi_conn.return_value = mock_c
+
+    phys = MagicMock()
+    phys.Index = 0
+    phys.InterfaceType = "SATA"
+    phys.MediaType = "Fixed hard disk media"
+    phys.SerialNumber = "BOOT-DISK"
+    phys.Model = "Boot SSD 256GB"
+    phys.Size = str(256 * 1024**3)
+    mock_c.Win32_DiskDrive.return_value = [phys]
+    mock_c.Win32_LogicalDisk.return_value = []
+    mock_c.Win32_LogicalDiskToPartition.return_value = []
+    mock_c.Win32_DiskDriveToDiskPartition.return_value = []
+
+    devices = list_devices()
+    assert len(devices) == 1
+    assert devices[0].is_system_drive is True
+    assert devices[0].safe_to_wipe is False
 
 
 @patch("wipe.device._resolve_system_physical_drive_index", return_value=None)

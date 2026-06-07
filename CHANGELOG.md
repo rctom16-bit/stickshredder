@@ -61,13 +61,22 @@ firmware-level erase.
   `open_physical_drive()`. With internal-disk wiping now possible, the guard
   fails safe: if the Windows disk cannot be identified, internal wipes are
   refused rather than risked.
+- **Boot / EFI / system-partition protection.** The guard no longer protects
+  only the disk holding the `\Windows` directory — it now flags *every* physical
+  disk that carries a boot, EFI System, or active partition (via the Storage
+  namespace `MSFT_Partition` `IsBoot`/`IsSystem`/`IsActive` flags). This closes
+  the dangerous case where the partition that *boots* Windows lives on a
+  different physical disk than the OS files (e.g. after cloning to a new SSD, or
+  on multi-disk builds): wiping that disk would leave the machine unbootable.
+  Internal wipes are additionally refused (fail-safe) whenever the boot-partition
+  layout cannot be read.
 
 ### Tests
 
-- 299 passing (up from 218). New: bad-sector tolerance/ceiling/dedup, letterless
-  enumeration, `is_safe_to_wipe` gate, ATA pass-through parsing, HPA/DCO
-  detection, secure-erase state machine, CLI secure-erase + HPA wiring, and the
-  GUI internal-drive safety gate.
+- 302 passing (up from 218). New: bad-sector tolerance/ceiling/dedup, letterless
+  enumeration, `is_safe_to_wipe` gate, boot/EFI/system-partition disk protection,
+  ATA pass-through parsing, HPA/DCO detection, secure-erase state machine, CLI
+  secure-erase + HPA wiring, and the GUI internal-drive safety gate.
 
 ## [1.1.0] - 2026-04-17
 

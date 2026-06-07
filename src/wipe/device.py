@@ -199,6 +199,62 @@ def _resolve_system_physical_drive_index() -> Optional[int]:
     return None
 
 
+def _boot_system_partition_disk_indices() -> "set[int] | None":
+    """Physical disk numbers carrying a boot, EFI-system, or active partition.
+
+    Queries ``MSFT_Partition`` in the Storage WMI namespace, where Windows
+    itself flags each partition's ``IsBoot`` / ``IsSystem`` (EFI System
+    Partition) / ``IsActive`` (MBR active) role and its ``DiskNumber``. This
+    catches the dangerous case where the partition that *boots* Windows lives
+    on a different physical disk than the ``\\Windows`` directory.
+
+    Returns ``None`` if the namespace cannot be queried at all (e.g. the Storage
+    provider is unavailable), so callers can treat an unknown boot layout as
+    unsafe for internal wipes. Returns a (possibly empty) set on success.
+    """
+    try:
+        storage = wmi.WMI(namespace="root/Microsoft/Windows/Storage")
+        partitions = list(storage.MSFT_Partition())
+    except Exception as exc:  # noqa: BLE001 — provider may be absent/unelevated
+        audit_log(f"Boot-disk probe unavailable (MSFT_Partition): {exc}")
+        return None
+
+    found: set[int] = set()
+    for part in partitions:
+        try:
+            if (
+                getattr(part, "IsBoot", False)
+                or getattr(part, "IsSystem", False)
+                or getattr(part, "IsActive", False)
+            ):
+                disk_number = getattr(part, "DiskNumber", None)
+                if disk_number is not None:
+                    found.add(int(disk_number))
+        except Exception:  # noqa: BLE001 — never let one odd partition break the probe
+            continue
+
+    audit_log(f"Boot/system/active partitions live on physical disks: {sorted(found)}")
+    return found
+
+
+def _system_physical_drive_indices() -> set[int]:
+    """All physical disk indices that must never be wiped.
+
+    The union of (a) the disk hosting the running ``\\Windows`` directory and
+    (b) every disk carrying a boot / EFI-system / active partition. Wiping any
+    of these would either destroy Windows or leave the machine unbootable.
+    Never raises.
+    """
+    indices: set[int] = set()
+    win_idx = _resolve_system_physical_drive_index()
+    if win_idx is not None:
+        indices.add(win_idx)
+    boot = _boot_system_partition_disk_indices()
+    if boot:
+        indices |= boot
+    return indices
+
+
 def _check_active_processes(drive_letter: str) -> bool:
     """Check for open handles on a volume. Best-effort, never raises."""
     if not drive_letter:
@@ -228,7 +284,9 @@ def list_devices() -> list[DeviceInfo]:
     devices: list[DeviceInfo] = []
     seen_phys_indices: set[int] = set()
     sys_letter = _system_drive_letter()
-    sys_phys_index = _resolve_system_physical_drive_index()
+    # All disks that must never be wiped: the Windows-directory disk plus any
+    # disk carrying a boot / EFI-system / active partition (separate boot disks).
+    sys_indices = _system_physical_drive_indices()
 
     try:
         c = _get_wmi_connection()
@@ -273,7 +331,7 @@ def list_devices() -> list[DeviceInfo]:
             )
 
             is_system = (
-                (sys_phys_index is not None and phys_index == sys_phys_index)
+                phys_index in sys_indices
                 or drive_letter.upper() == sys_letter.upper()
             )
             is_internal = connection != "USB" and not is_removable
@@ -344,9 +402,7 @@ def list_devices() -> list[DeviceInfo]:
             media_type = (getattr(phys_disk, "MediaType", "") or "").lower()
 
             is_removable = connection == "USB" or "removable" in media_type
-            is_system = (
-                sys_phys_index is not None and phys_index == sys_phys_index
-            )
+            is_system = phys_index in sys_indices
             is_internal = connection != "USB" and not is_removable
 
             serial = (getattr(phys_disk, "SerialNumber", "") or "").strip()
@@ -427,6 +483,12 @@ def is_safe_to_wipe(device: DeviceInfo, allow_internal: bool = False) -> tuple[b
                 "Refusing to wipe an internal drive: StickShredder could not "
                 "reliably determine which physical disk hosts Windows, so it "
                 "cannot guarantee this is not the system disk (fail-safe)."
+            )
+        if _boot_system_partition_disk_indices() is None:
+            return False, (
+                "Refusing to wipe an internal drive: StickShredder could not "
+                "read the boot / EFI partition layout, so it cannot guarantee "
+                "this disk is not required to start Windows (fail-safe)."
             )
     return True, ""
 
