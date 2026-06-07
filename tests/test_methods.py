@@ -215,8 +215,14 @@ def test_execute_success(mock_audit):
 
 
 @patch("wipe.methods.audit_log")
-def test_execute_write_error(mock_audit):
-    """Verify graceful handling when _write_block raises OSError."""
+def test_execute_all_writes_fail_exceeds_ceiling(mock_audit):
+    """When every block is unwritable, the bad-sector ceiling fails the wipe.
+
+    v1.2: a single bad block no longer aborts the wipe; instead bad blocks are
+    skipped and counted. But if essentially the whole drive is unwritable, the
+    bad-fraction ceiling flips the result to failure so we never report a dead
+    drive as 'successfully wiped'.
+    """
     zf = ZeroFill()
 
     with patch("wipe.methods._write_block", side_effect=OSError("disk error")):
@@ -224,7 +230,76 @@ def test_execute_write_error(mock_audit):
             result = zf.execute(handle=999, drive_size=4096, block_size=1024)
 
     assert result.success is False
-    assert "disk error" in result.error_message
+    assert result.bad_sector_count == 4          # 4096 / 1024
+    assert result.bad_sector_bytes == 4096
+    assert "unwritable" in (result.error_message or "").lower()
+
+
+@patch("wipe.methods.audit_log")
+def test_execute_tolerates_few_bad_sectors(mock_audit):
+    """A few unwritable blocks are skipped, counted, and the wipe still succeeds."""
+    zf = ZeroFill()
+    drive_size = 100 * 1024  # 100 blocks
+    block_size = 1024
+
+    # Fail blocks 5 and 42 (2 of 100 = 2%, well under the 10% ceiling).
+    state = {"idx": 0}
+
+    def fake_write(handle, data):
+        i = state["idx"]
+        state["idx"] += 1
+        if i in (5, 42):
+            raise OSError("simulated bad sector")
+        return len(data)
+
+    with patch("wipe.methods._write_block", side_effect=fake_write), \
+         patch("wipe.methods._set_file_pointer", return_value=True):
+        result = zf.execute(
+            handle=1, drive_size=drive_size, block_size=block_size,
+            verify_mode="none",
+        )
+
+    assert result.success is True
+    assert result.bad_sector_count == 2
+    assert result.bad_sector_bytes == 2 * block_size
+    assert set(result.bad_sector_offsets) == {5 * 1024, 42 * 1024}
+    # Successfully-written bytes exclude the two skipped blocks.
+    assert result.bytes_written == drive_size - 2 * block_size
+
+
+@patch("wipe.methods.audit_log")
+def test_execute_bad_sectors_deduped_across_passes(mock_audit):
+    """The same bad block failing on every pass is counted once, not per-pass."""
+    bsi = BsiVsitr()  # 7 passes
+    drive_size = 10 * 1024
+    block_size = 1024
+
+    def fake_write(handle, data):
+        # Block index 3 within each pass is always bad. The pass writes blocks
+        # 0..9 sequentially, so every 10th call (offset 3) maps to the bad block.
+        # Simpler: fail whenever the data would land at block 3 — but we only
+        # have the data here, so use a position counter modulo blocks-per-pass.
+        n = fake_write.calls
+        fake_write.calls += 1
+        if n % 10 == 3:
+            raise OSError("bad block 3")
+        return len(data)
+
+    fake_write.calls = 0
+
+    with patch("wipe.methods._write_block", side_effect=fake_write), \
+         patch("wipe.methods._set_file_pointer", return_value=True), \
+         patch("wipe.methods.sample_verify",
+               return_value=_make_fake_verify_result(success=True)):
+        result = bsi.execute(
+            handle=1, drive_size=drive_size, block_size=block_size,
+            verify_mode="none",
+        )
+
+    # Block 3 (offset 3072) is bad on all passes but must be counted once.
+    assert result.bad_sector_count == 1
+    assert result.bad_sector_offsets == [3 * 1024]
+    assert result.success is True  # 1 block of 10 = 10%, not OVER the ceiling
 
 
 @patch("wipe.methods.audit_log")
