@@ -164,6 +164,86 @@ def test_list_devices_wmi_failure(mock_wmi_conn, mock_log):
     assert devices == []
 
 
+# ── System guard per physical disk (1.1.1) ───────────────────────────
+
+def _fake_wmi(layout: dict) -> MagicMock:
+    """Build a fake WMI graph from {disk_index: (interface, [letters])}."""
+    c = MagicMock()
+    disks, ldisks, l2p, d2p = [], [], [], []
+    for idx, (iface, letters) in layout.items():
+        d = MagicMock()
+        d.Index = idx
+        d.InterfaceType = iface
+        d.MediaType = "Removable Media" if iface == "USB" else "Fixed hard disk media"
+        d.SerialNumber = f"SN{idx}"
+        d.Model = f"Disk{idx}"
+        d.Size = str(64 * 1024**3)
+        disks.append(d)
+        for p, letter in enumerate(letters):
+            part = f"Disk #{idx}, Partition #{p}"
+            ld = MagicMock()
+            ld.DeviceID = letter
+            ld.DriveType = 2 if iface == "USB" else 3
+            ld.FileSystem = "NTFS"
+            ldisks.append(ld)
+            a = MagicMock()
+            a.Dependent.DeviceID = letter
+            a.Antecedent.DeviceID = part
+            l2p.append(a)
+            b = MagicMock()
+            b.Dependent.DeviceID = part
+            b.Antecedent.Index = idx
+            d2p.append(b)
+    c.Win32_DiskDrive.return_value = disks
+    c.Win32_LogicalDisk.return_value = ldisks
+    c.Win32_LogicalDiskToPartition.return_value = l2p
+    c.Win32_DiskDriveToDiskPartition.return_value = d2p
+    return c
+
+
+@pytest.fixture
+def fake_env(monkeypatch):
+    """Patch WMI + probes; returns a function(layout, sys_letter) -> {letter: DeviceInfo}."""
+    import wipe.device as device_mod
+
+    monkeypatch.setattr(device_mod, "audit_log", lambda *a, **k: None)
+    monkeypatch.setattr(device_mod, "_check_bitlocker", lambda _l: False)
+    monkeypatch.setattr(device_mod, "_check_active_processes", lambda _l: False)
+
+    def run(layout: dict, sys_letter: str = "C:") -> dict:
+        c = _fake_wmi(layout)
+        monkeypatch.setattr(device_mod, "_get_wmi_connection", lambda: c)
+        monkeypatch.setattr(device_mod, "_system_drive_letter", lambda: sys_letter)
+        return {d.drive_letter: d for d in list_devices()}
+
+    return run
+
+
+def test_second_partition_on_system_disk_is_blocked(fake_env):
+    devs = fake_env({0: ("SCSI", ["C:", "D:"]), 1: ("USB", ["E:"])})
+    assert devs["C:"].is_system_drive is True
+    assert devs["D:"].is_system_drive is True
+    assert devs["E:"].is_system_drive is False
+
+
+def test_unknown_system_disk_blocks_all_non_usb(fake_env):
+    devs = fake_env({0: ("IDE", ["D:"]), 1: ("USB", ["E:"])}, sys_letter="Z:")
+    assert devs["D:"].is_system_drive is True
+    assert devs["E:"].is_system_drive is False
+
+
+def test_internal_disk_off_the_system_disk_stays_wipeable(fake_env):
+    devs = fake_env({0: ("SCSI", ["C:"]), 2: ("IDE", ["H:"])})
+    assert devs["H:"].is_system_drive is False
+
+
+def test_disk_letters_lists_all_letters_of_the_disk(fake_env):
+    devs = fake_env({0: ("SCSI", ["C:"]), 1: ("USB", ["G:", "E:"])})
+    assert devs["E:"].disk_letters == ["E:", "G:"]
+    assert devs["G:"].disk_letters == ["E:", "G:"]
+    assert devs["C:"].disk_letters == ["C:"]
+
+
 # ── Helper ────────────────────────────────────────────────────────────
 
 def _make_device(**overrides) -> DeviceInfo:

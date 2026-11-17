@@ -96,6 +96,8 @@ class DeviceInfo:
     has_active_processes: bool = False
     partition_count: int = 0
     friendly_name: str = ""
+    # Every drive letter on the same physical disk (sorted, includes own).
+    disk_letters: list[str] = field(default_factory=list)
 
     @property
     def capacity_gb(self) -> float:
@@ -146,6 +148,32 @@ def _physical_drive_index_for_letter(
     except Exception as exc:
         audit_log(f"Failed to resolve physical drive for {drive_letter}: {exc}")
     return None
+
+
+def _system_disk_indices(c: wmi.WMI) -> set[int] | None:
+    """Return the physical disk indices hosting the Windows volume.
+
+    Every partition on these disks must be treated as system: wiping any
+    of them writes to the whole physical disk, i.e. destroys the Windows
+    installation. Returns None when the mapping cannot be determined, so
+    callers can fail closed.
+    """
+    sys_letter = _system_drive_letter().upper()
+    try:
+        partition_ids = {
+            assoc.Antecedent.DeviceID
+            for assoc in c.Win32_LogicalDiskToPartition()
+            if assoc.Dependent.DeviceID.upper() == sys_letter
+        }
+        indices = {
+            int(assoc.Antecedent.Index)
+            for assoc in c.Win32_DiskDriveToDiskPartition()
+            if assoc.Dependent.DeviceID in partition_ids
+        }
+    except Exception as exc:  # noqa: BLE001 — fail closed below
+        audit_log(f"System disk lookup failed: {exc}")
+        return None
+    return indices or None
 
 
 def _connection_type_from_interface(interface_type: str | None) -> str:
@@ -224,6 +252,12 @@ def list_devices() -> list[DeviceInfo]:
         audit_log(f"Failed to enumerate physical disks: {exc}")
         return devices
 
+    sys_indices = _system_disk_indices(c)
+    audit_log(
+        f"System disk indices: {sorted(sys_indices)}" if sys_indices
+        else "System disk could not be determined — all non-USB disks blocked"
+    )
+
     # Walk logical disks (the ones with drive letters)
     try:
         logical_disks = c.Win32_LogicalDisk()
@@ -251,7 +285,13 @@ def list_devices() -> list[DeviceInfo]:
                 or getattr(ldisk, "DriveType", 0) == 2  # DriveType 2 = Removable
             )
 
-            is_system = drive_letter.upper() == sys_letter.upper()
+            # Block every partition of the Windows disk, not just C:.
+            # If the Windows disk is unknown, block every non-USB disk.
+            is_system = (
+                drive_letter.upper() == sys_letter.upper()
+                or (phys_index in sys_indices if sys_indices
+                    else connection != "USB")
+            )
             is_internal = connection != "USB" and not is_removable
 
             serial = (getattr(phys_disk, "SerialNumber", "") or "").strip()
@@ -305,6 +345,12 @@ def list_devices() -> list[DeviceInfo]:
                 f"| traceback_tail: {' | '.join(tb_line)}"
             )
             continue
+
+    letters_by_disk: dict[str, list[str]] = {}
+    for d in devices:
+        letters_by_disk.setdefault(d.device_id, []).append(d.drive_letter.upper())
+    for d in devices:
+        d.disk_letters = sorted(letters_by_disk[d.device_id])
 
     return devices
 
