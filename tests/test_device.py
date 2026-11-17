@@ -244,6 +244,122 @@ def test_disk_letters_lists_all_letters_of_the_disk(fake_env):
     assert devs["C:"].disk_letters == ["C:"]
 
 
+# ── prepare_target: identity re-check + dismount every volume (1.1.1) ─
+
+USB_LAYOUT = {0: ("SCSI", ["C:"]), 1: ("USB", ["E:", "G:"])}
+
+
+@pytest.fixture
+def gate(monkeypatch):
+    """Patch WMI/system letter/dismount for prepare_target; returns the dismount mock."""
+    import wipe.device as device_mod
+
+    monkeypatch.setattr(device_mod, "audit_log", lambda *a, **k: None)
+    monkeypatch.setattr(device_mod, "_system_drive_letter", lambda: "C:")
+    c = _fake_wmi(USB_LAYOUT)
+    monkeypatch.setattr(device_mod, "_get_wmi_connection", lambda: c)
+    dismount = MagicMock()
+    monkeypatch.setattr(device_mod, "dismount_volume", dismount)
+    dismount.wmi = c
+    return dismount
+
+
+def _usb_target(**overrides) -> DeviceInfo:
+    base = dict(
+        device_id=r"\\.\PhysicalDrive1", model="Disk1", serial_number="SN1",
+        capacity_bytes=64 * 1024**3, disk_letters=["E:", "G:"],
+    )
+    base.update(overrides)
+    return _make_device(**base)
+
+
+def test_prepare_target_dismounts_every_letter(gate):
+    from wipe.device import prepare_target
+    prepare_target(_usb_target())
+    assert [c.args[0] for c in gate.call_args_list] == ["E:", "G:"]
+
+
+def test_prepare_target_rejects_changed_serial(gate):
+    from wipe.device import prepare_target, UnsafeTargetError
+    with pytest.raises(UnsafeTargetError):
+        prepare_target(_usb_target(serial_number="OTHER"))
+    gate.assert_not_called()
+
+
+def test_prepare_target_rejects_changed_size(gate):
+    from wipe.device import prepare_target, UnsafeTargetError
+    with pytest.raises(UnsafeTargetError):
+        prepare_target(_usb_target(capacity_bytes=32 * 1024**3))
+    gate.assert_not_called()
+
+
+def test_prepare_target_rejects_system_disk(gate):
+    from wipe.device import prepare_target, UnsafeTargetError
+    with pytest.raises(UnsafeTargetError):
+        prepare_target(_usb_target(
+            device_id=r"\\.\PhysicalDrive0", model="Disk0", serial_number="SN0",
+            disk_letters=["C:"],
+        ))
+    gate.assert_not_called()
+
+
+def test_prepare_target_fails_closed_on_wmi_error(gate, monkeypatch):
+    import wipe.device as device_mod
+    from wipe.device import prepare_target, UnsafeTargetError
+
+    def boom():
+        raise Exception("WMI down")
+
+    monkeypatch.setattr(device_mod, "_get_wmi_connection", boom)
+    with pytest.raises(UnsafeTargetError):
+        prepare_target(_usb_target())
+    gate.assert_not_called()
+
+
+def test_prepare_target_fails_when_a_volume_stays_mounted(gate):
+    from wipe.device import prepare_target, UnsafeTargetError
+    gate.side_effect = lambda letter: (_ for _ in ()).throw(OSError("busy")) if letter == "G:" else None
+    with pytest.raises(UnsafeTargetError, match="G:"):
+        prepare_target(_usb_target())
+
+
+def _fake_volume_ioctls(monkeypatch, lock_ok: bool, dismount_ok: bool):
+    import wipe.device as device_mod
+    monkeypatch.setattr(device_mod, "audit_log", lambda *a, **k: None)
+    monkeypatch.setattr(device_mod.kernel32, "CreateFileW", lambda *a: 42)
+    monkeypatch.setattr(device_mod.kernel32, "CloseHandle", lambda h: True)
+
+    def ioctl(handle, code, *rest):
+        if code == device_mod.FSCTL_LOCK_VOLUME:
+            return lock_ok
+        if code == device_mod.FSCTL_DISMOUNT_VOLUME:
+            return dismount_ok
+        return True
+
+    monkeypatch.setattr(device_mod.kernel32, "DeviceIoControl", ioctl)
+
+
+def test_dismount_continues_when_lock_fails(monkeypatch):
+    from wipe.device import dismount_volume
+    _fake_volume_ioctls(monkeypatch, lock_ok=False, dismount_ok=True)
+    dismount_volume("E:")  # must not raise
+
+
+def test_dismount_raises_when_dismount_fails(monkeypatch):
+    from wipe.device import dismount_volume
+    _fake_volume_ioctls(monkeypatch, lock_ok=True, dismount_ok=False)
+    with pytest.raises(OSError):
+        dismount_volume("E:")
+
+
+def test_unique_disks_keeps_first_per_device_id():
+    from wipe.device import unique_disks
+    e = _make_device(drive_letter="E:", device_id=r"\\.\PhysicalDrive1")
+    g = _make_device(drive_letter="G:", device_id=r"\\.\PhysicalDrive1")
+    h = _make_device(drive_letter="H:", device_id=r"\\.\PhysicalDrive2")
+    assert unique_disks([e, g, h]) == [e, h]
+
+
 # ── Helper ────────────────────────────────────────────────────────────
 
 def _make_device(**overrides) -> DeviceInfo:

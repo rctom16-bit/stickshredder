@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import os
 from datetime import datetime
 from typing import Optional
@@ -39,7 +40,7 @@ from gui.history_dialog import HistoryDialog
 from gui.settings_dialog import SettingsDialog
 from gui.wipe_worker import WipeWorker
 from wipe.demo import create_demo_device
-from wipe.device import DeviceInfo, list_devices
+from wipe.device import DeviceInfo, list_devices, unique_disks
 from wipe.methods import BsiVsitr, CustomWipe, RandomThreePass, ZeroFill, WipeMethod
 
 
@@ -730,7 +731,8 @@ class MainWindow(QMainWindow):
         for i, cb in enumerate(self._device_checkboxes):
             if cb.isChecked() and i < len(self.devices):
                 selected.append(self.devices[i])
-        return selected
+        # Two rows of the same physical disk must not wipe it twice.
+        return unique_disks(selected)
 
     def _on_selection_changed(self) -> None:
         """Update time estimate and wipe button state when selection changes."""
@@ -890,8 +892,9 @@ class MainWindow(QMainWindow):
 
         # Confirmation dialog 1 -- bold device names, Warning icon
         device_list_html = "".join(
-            f"<li><b>{d.drive_letter} &mdash; {d.model}</b> "
-            f"(SN: {d.serial_number}, {d.capacity_gb} GB)</li>"
+            f"<li><b>{html.escape(', '.join(d.disk_letters or [d.drive_letter]))}"
+            f" &mdash; {html.escape(d.model)}</b> "
+            f"(SN: {html.escape(d.serial_number)}, {d.capacity_gb} GB)</li>"
             for d in selected
         )
         confirm_box = QMessageBox(self)

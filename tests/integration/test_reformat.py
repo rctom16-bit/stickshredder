@@ -487,7 +487,7 @@ def test_cli_passes_reformat_args_to_worker(monkeypatch):
             patch.object(cli, "is_admin", return_value=True),
             patch.object(cli, "list_devices", return_value=[_fake_device()]),
             patch.object(cli, "_resolve_wipe_method", return_value=fake_method),
-            patch.object(cli, "dismount_volume"),
+            patch.object(cli, "prepare_target"),
             patch.object(cli, "open_physical_drive", return_value=99999),
             patch.object(cli, "close_drive"),
             patch.object(cli, "lock_volume"),

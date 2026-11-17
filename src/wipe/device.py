@@ -462,8 +462,96 @@ def dismount_volume(drive_letter: str) -> None:
             f"Cannot open volume {volume_path} for dismount (error {err})"
         )
     try:
-        _ioctl_no_data(handle, FSCTL_LOCK_VOLUME, "Lock before dismount")
+        try:
+            _ioctl_no_data(handle, FSCTL_LOCK_VOLUME, "Lock before dismount")
+        except OSError as exc:
+            # Open handles (e.g. an Explorer window) block the lock. A forced
+            # dismount still invalidates them, so carry on; only a failed
+            # dismount is fatal.
+            audit_log(f"Lock failed for {drive_letter}, forcing dismount: {exc}")
         _ioctl_no_data(handle, FSCTL_DISMOUNT_VOLUME, "FSCTL_DISMOUNT_VOLUME")
         audit_log(f"Dismounted volume {drive_letter}")
     finally:
         kernel32.CloseHandle(handle)
+
+
+# ── Safety gate before writing ─────────────────────────────────────────
+
+class UnsafeTargetError(Exception):
+    """The selected disk must not be written to (changed, system, or busy)."""
+
+
+def unique_disks(devices: list[DeviceInfo]) -> list[DeviceInfo]:
+    """Keep the first entry per physical disk, preserving order.
+
+    Two rows (E:, G:) of the same disk would otherwise wipe it twice.
+    """
+    seen: set[str] = set()
+    result: list[DeviceInfo] = []
+    for d in devices:
+        if d.device_id not in seen:
+            seen.add(d.device_id)
+            result.append(d)
+    return result
+
+
+def _physical_index(device_id: str) -> int:
+    prefix = "\\\\.\\PhysicalDrive"
+    if not device_id.startswith(prefix) or not device_id[len(prefix):].isdigit():
+        raise UnsafeTargetError(f"Unexpected device path: {device_id}")
+    return int(device_id[len(prefix):])
+
+
+def prepare_target(device: DeviceInfo) -> None:
+    """Last check right before the disk is opened for writing.
+
+    Re-reads the disk behind ``device.device_id`` and refuses if it is no
+    longer the disk the user selected (serial, size or model changed — e.g.
+    stick swapped), if it is (or might be) the Windows disk, or if any of
+    its volumes cannot be dismounted. Raises UnsafeTargetError.
+    """
+    index = _physical_index(device.device_id)
+    try:
+        c = _get_wmi_connection()
+        disk = next(
+            (d for d in c.Win32_DiskDrive() if int(d.Index) == index), None
+        )
+        sys_indices = _system_disk_indices(c)
+    except UnsafeTargetError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        raise UnsafeTargetError(
+            f"Laufwerk konnte nicht erneut geprüft werden / "
+            f"could not re-check the drive: {exc}"
+        ) from exc
+
+    if disk is None:
+        raise UnsafeTargetError(
+            f"{device.device_id} ist nicht mehr vorhanden / is no longer present"
+        )
+    serial = (getattr(disk, "SerialNumber", "") or "").strip()
+    model = (getattr(disk, "Model", "") or "").strip()
+    size = int(getattr(disk, "Size", 0) or 0)
+    if (serial, model, size) != (
+        device.serial_number.strip(), device.model.strip(), device.capacity_bytes
+    ):
+        raise UnsafeTargetError(
+            f"{device.device_id} ist nicht mehr das ausgewählte Gerät / "
+            f"is no longer the selected device (now: {model} {serial})"
+        )
+    if (index in sys_indices) if sys_indices else device.connection_type != "USB":
+        raise UnsafeTargetError(
+            f"{device.device_id} ist die Systemplatte / is the system disk"
+        )
+
+    for letter in device.disk_letters or [device.drive_letter]:
+        if not letter:
+            continue
+        try:
+            dismount_volume(letter)
+        except OSError as exc:
+            raise UnsafeTargetError(
+                f"{letter} konnte nicht ausgehängt werden / "
+                f"could not be dismounted: {exc}"
+            ) from exc
+    audit_log(f"Target verified and dismounted: {device.device_id}")

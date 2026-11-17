@@ -687,3 +687,34 @@ def test_reformat_checkbox_has_bilingual_label_and_tooltip(main_window):
     tooltip = cb.toolTip()
     assert "fresh partition" in tooltip
     assert "Windows Explorer" in tooltip
+
+
+def test_worker_refuses_real_device_when_target_unsafe(qtbot, app_config):
+    """1.1.1: a real (non-demo) device that fails prepare_target is reported
+    as failed and the physical disk is never opened."""
+    from gui.wipe_worker import WipeWorker
+    from wipe.device import DeviceInfo, UnsafeTargetError
+    from wipe.methods import ZeroFill
+
+    device = DeviceInfo(
+        drive_letter="E:", device_id=r"\.\PhysicalDrive7", model="Stick",
+        serial_number="SN7", capacity_bytes=1024**3, filesystem="FAT32",
+        connection_type="USB", is_removable=True, is_system_drive=False,
+        disk_letters=["E:"],
+    )
+    opener = MagicMock(return_value=1)
+    with patch("gui.wipe_worker.prepare_target",
+               side_effect=UnsafeTargetError("swapped")), \
+         patch("gui.wipe_worker.open_physical_drive", opener), \
+         patch("gui.wipe_worker.close_drive"), \
+         patch("gui.wipe_worker.log_wipe_to_csv"), \
+         patch("gui.wipe_worker.audit_log"):
+        worker = WipeWorker(devices=[device], wipe_method=ZeroFill(),
+                            config=app_config, verify_mode="none")
+        results: list[tuple[int, bool]] = []
+        worker.device_completed.connect(lambda i, ok, _p: results.append((i, ok)))
+        with qtbot.waitSignal(worker.all_completed, timeout=5000):
+            worker.start()
+
+    assert results == [(0, False)]
+    opener.assert_not_called()

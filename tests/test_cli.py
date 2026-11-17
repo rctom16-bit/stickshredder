@@ -128,7 +128,7 @@ def test_cmd_wipe_passes_verify_mode_to_execute():
         patch.object(cli, "is_admin", return_value=True),
         patch.object(cli, "list_devices", return_value=[_fake_device()]),
         patch.object(cli, "_resolve_wipe_method", return_value=fake_method),
-        patch.object(cli, "dismount_volume"),
+        patch.object(cli, "prepare_target"),
         patch.object(cli, "open_physical_drive", return_value=12345),
         patch.object(cli, "close_drive"),
         patch.object(cli, "lock_volume"),
@@ -229,7 +229,7 @@ def test_cert_uses_wipe_result_passes_not_method_passes():
         patch.object(cli, "is_admin", return_value=True),
         patch.object(cli, "list_devices", return_value=[_fake_device()]),
         patch.object(cli, "_resolve_wipe_method", return_value=fake_method),
-        patch.object(cli, "dismount_volume"),
+        patch.object(cli, "prepare_target"),
         patch.object(cli, "open_physical_drive", return_value=12345),
         patch.object(cli, "close_drive"),
         patch.object(cli, "lock_volume"),
@@ -335,7 +335,7 @@ def test_cmd_wipe_calls_reformat_when_requested():
             patch.object(cli, "is_admin", return_value=True),
             patch.object(cli, "list_devices", return_value=[_fake_device()]),
             patch.object(cli, "_resolve_wipe_method", return_value=fake_method),
-            patch.object(cli, "dismount_volume"),
+            patch.object(cli, "prepare_target"),
             patch.object(cli, "open_physical_drive", return_value=12345),
             patch.object(cli, "close_drive"),
             patch.object(cli, "lock_volume"),
@@ -357,3 +357,31 @@ def test_cmd_wipe_calls_reformat_when_requested():
     assert kwargs.get("disk_number") == 99
     assert kwargs.get("label") == "USB"
     assert kwargs.get("partition_style") == "MBR"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 1.1.1: the safety gate runs before the disk is opened
+# ─────────────────────────────────────────────────────────────────────
+
+def test_cmd_wipe_aborts_before_opening_disk_when_target_unsafe():
+    """If prepare_target refuses, the CLI exits and never opens the disk."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_REQUIRED_WIPE_ARGS + ["--yes"])
+    opener = MagicMock(return_value=12345)
+
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[_fake_device()]),
+        patch.object(
+            cli, "prepare_target",
+            side_effect=cli.UnsafeTargetError("is no longer the selected device"),
+        ),
+        patch.object(cli, "open_physical_drive", opener),
+        patch.object(cli, "close_drive"),
+        patch.object(cli, "audit_log"),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            cli.cmd_wipe(args)
+
+    assert exc_info.value.code != 0
+    opener.assert_not_called()

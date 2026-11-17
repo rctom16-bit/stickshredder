@@ -15,7 +15,7 @@ from core.log import audit_log, log_wipe_to_csv
 from cert.generator import CertificateData, generate_certificate, format_capacity
 from wipe.device import (
     DeviceInfo,
-    dismount_volume,
+    prepare_target,
     open_physical_drive,
     close_drive,
     get_drive_size,
@@ -295,12 +295,11 @@ class WipeWorker(QThread):
 
                 else:
                     # ── Real device mode ──
-                    # 1. Dismount volume
-                    self.status_message.emit(f"Dismounting {device.drive_letter}...")
-                    try:
-                        dismount_volume(device.drive_letter)
-                    except OSError as exc:
-                        audit_log(f"Dismount warning for {device.drive_letter}: {exc}")
+                    # 1. Re-check identity and dismount every volume of
+                    #    the disk. Raises UnsafeTargetError -> device fails.
+                    letters = ", ".join(device.disk_letters or [device.drive_letter])
+                    self.status_message.emit(f"Checking and dismounting {letters}...")
+                    prepare_target(device)
 
                     # 2. Open physical drive
                     self.status_message.emit(f"Opening {device.device_id}...")
@@ -310,7 +309,7 @@ class WipeWorker(QThread):
                     # FSCTL_LOCK_VOLUME is documented for volume handles
                     # (\\.\E:), not physical-drive handles (\\.\PhysicalDrive1).
                     # On some USB controllers this deadlocks WriteFile, and
-                    # the prior dismount_volume() already gave us exclusive
+                    # prepare_target() already dismounted every volume, giving us exclusive
                     # access to the media.
                     audit_log(
                         f"Physical-drive lock skipped for {device.drive_letter} "

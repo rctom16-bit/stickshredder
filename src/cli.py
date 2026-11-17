@@ -14,7 +14,10 @@ from typing import NoReturn
 from cert.generator import CertificateData, format_capacity, generate_certificate
 from core.config import AppConfig, get_next_cert_number, DEFAULT_CERT_OUTPUT
 from core.log import audit_log, log_wipe_to_csv, read_wipe_history, setup_logging
-from wipe.device import DeviceInfo, list_devices, open_physical_drive, close_drive, get_drive_size, lock_volume, unlock_volume, dismount_volume
+from wipe.device import (
+    DeviceInfo, UnsafeTargetError, list_devices, open_physical_drive, close_drive,
+    get_drive_size, lock_volume, unlock_volume, prepare_target,
+)
 from wipe.methods import ZeroFill, RandomThreePass, BsiVsitr, CustomWipe, WipeResult
 from wipe.verify import VerifyResult
 
@@ -420,13 +423,12 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     verify_result: VerifyResult | None = None
 
     try:
-        # Dismount the volume first
-        _info("Dismounting volume...")
+        # Re-check the disk and dismount every volume on it
+        _info("Checking drive and dismounting volumes...")
         try:
-            dismount_volume(device.drive_letter)
-        except OSError as exc:
-            _warn(f"Dismount failed: {exc}")
-            _info("Attempting to continue...")
+            prepare_target(device)
+        except UnsafeTargetError as exc:
+            _die(str(exc))
 
         # Open physical drive
         _info(f"Opening physical drive {device.device_id}...")
