@@ -26,6 +26,7 @@ except Exception:  # pragma: no cover - stub path
     _stub.send_ata_command = lambda handle, **kwargs: None
     sys.modules["wipe.passthrough"] = _stub
 
+import wipe.transport as tr
 from wipe.secure_erase import (
     SecureEraseResult,
     secure_erase,
@@ -35,6 +36,20 @@ from wipe.secure_erase import (
     ATA_SECURITY_ERASE_PREPARE,
     ATA_SECURITY_ERASE_UNIT,
 )
+
+
+@pytest.fixture(autouse=True)
+def _sata_disk(monkeypatch):
+    """By default the handle is a non-system SATA disk on storahci."""
+    monkeypatch.setattr(
+        tr, "inspect_handle",
+        lambda handle, **kw: tr.StorageInfo("ata", "SATA disk on storahci", disk_number=2),
+    )
+
+
+def _transport_is(monkeypatch, transport: str, reason: str):
+    monkeypatch.setattr(tr, "inspect_handle",
+                        lambda handle, **kw: tr.StorageInfo(transport, reason))
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -314,3 +329,58 @@ def test_build_block_truncates_long_password_to_32_bytes():
     # Password occupies bytes 2..33; byte 34 onward must be zero.
     assert block[2:34] == b"x" * 32
     assert block[34] == 0x00
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Only a non-system SATA disk on storahci ever gets an ATA command
+# ─────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("transport", ["sat", "nvme", "none"])
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_supported_sends_nothing_unless_the_transport_is_ata(
+        mock_identify, mock_send, monkeypatch, transport):
+    _transport_is(monkeypatch, transport, "disk 0 is a system disk")
+    mock_identify.return_value = make_identify()
+
+    result = secure_erase_supported(HANDLE)
+
+    assert result.method == "unsupported"
+    assert result.supported is False
+    assert "system disk" in result.error
+    mock_identify.assert_not_called()
+    mock_send.assert_not_called()
+
+
+@pytest.mark.parametrize("transport", ["sat", "nvme", "none"])
+@patch("wipe.passthrough.send_ata_command", side_effect=ok_command)
+@patch("wipe.passthrough.ata_identify")
+def test_erase_issues_no_command_unless_the_transport_is_ata(
+        mock_identify, mock_send, monkeypatch, transport):
+    _transport_is(monkeypatch, transport, "USB device is not an ATA drive")
+    mock_identify.return_value = make_identify()
+
+    result = secure_erase(HANDLE)
+
+    assert result.success is False
+    assert result.method == "unsupported"
+    assert "not an ATA drive" in result.error
+    mock_identify.assert_not_called()
+    mock_send.assert_not_called()
+
+
+@patch("wipe.passthrough.send_ata_command", side_effect=ok_command)
+@patch("wipe.passthrough.ata_identify")
+def test_erase_issues_no_command_when_the_transport_check_raises(
+        mock_identify, mock_send, monkeypatch):
+    def boom(handle, **kw):
+        raise RuntimeError("storage stack exploded")
+
+    monkeypatch.setattr(tr, "inspect_handle", boom)
+    mock_identify.return_value = make_identify()
+
+    result = secure_erase(HANDLE)
+
+    assert result.success is False
+    mock_identify.assert_not_called()
+    mock_send.assert_not_called()

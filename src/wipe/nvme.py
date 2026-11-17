@@ -1,17 +1,23 @@
 """NVMe queries: Identify Controller and the SMART / health log. READ-ONLY.
 
 Windows exposes NVMe admin data through ``IOCTL_STORAGE_QUERY_PROPERTY`` with
-the protocol-specific properties (Windows 10+, inbox ``stornvme``):
+the protocol-specific properties (Windows 10+, inbox ``stornvme``), each
+request built exactly like Microsoft's "Working with NVMe drives" samples:
 
-  * Identify Controller (CNS 1)   → model, serial, firmware, SANICAP, FNA
-  * Get Log Page, LID 2           → percentage used, media errors
+  * Identify Controller (CNS 1)  StorageAdapterProtocolSpecificProperty
+                                 → model, serial, firmware, SANICAP, FNA
+  * Get Log Page, LID 2          StorageDeviceProtocolSpecificProperty
+                                 → percentage used, media errors
+
+There is no fallback to the other property: a refusal is final. Only call
+these readers for a disk ``wipe.transport`` chose ``"nvme"`` for (NVMe bus on
+Microsoft's stornvme driver, not a system disk) — on 17.11.2026 the same
+queries sent by trial and error to a USB stick and to a system NVMe behind
+Intel RST VMD crashed Windows twice.
 
 That IOCTL is defined with FILE_ANY_ACCESS, so it works on a handle opened
 with desired access 0 (query-only). It is a query: nothing here can change
 the drive. Sanitize / Format commands are not part of this module.
-
-NVMe drives behind USB bridges are not reachable this way (the bridge shows
-up as a SCSI device); those calls simply return ``None``.
 
 The public readers never raise.
 """
@@ -20,21 +26,20 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wintypes
-import struct
 from dataclasses import dataclass
 
 from core.log import audit_log
 from wipe.smart import SmartSummary, smart_unavailable
+from wipe.transport import (
+    IOCTL_STORAGE_QUERY_PROPERTY,
+    STORAGE_PROPERTY_QUERY,
+    PropertyStandardQuery,
+    StorageAdapterProtocolSpecificProperty,
+    StorageDeviceProtocolSpecificProperty,
+)
 
-# ── Constants ────────────────────────────────────────────────────────────
+# ── Constants (Windows SDK; pinned by tests/test_struct_layout.py) ────────
 
-IOCTL_STORAGE_QUERY_PROPERTY = 0x002D1400
-
-# STORAGE_PROPERTY_ID
-StorageAdapterProtocolSpecificProperty = 49
-StorageDeviceProtocolSpecificProperty = 50
-# STORAGE_QUERY_TYPE
-PropertyStandardQuery = 0
 # STORAGE_PROTOCOL_TYPE
 ProtocolTypeNvme = 3
 # STORAGE_PROTOCOL_NVME_DATA_TYPE
@@ -47,11 +52,45 @@ NVME_LOG_PAGE_HEALTH_INFO = 2
 NVME_IDENTIFY_SIZE = 4096
 NVME_HEALTH_LOG_SIZE = 512
 
-_QUERY_HEADER = struct.Struct("<II")        # PropertyId, QueryType
-_PROTOCOL_DATA = struct.Struct("<10I")      # STORAGE_PROTOCOL_SPECIFIC_DATA (40 bytes)
-_DESCRIPTOR_SIZE = 8 + _PROTOCOL_DATA.size  # STORAGE_PROTOCOL_DATA_DESCRIPTOR (48 bytes)
 
-# Identify Controller offsets (NVMe base spec)
+class STORAGE_PROTOCOL_SPECIFIC_DATA(ctypes.Structure):
+    _fields_ = [
+        ("ProtocolType", ctypes.c_uint32),
+        ("DataType", ctypes.c_uint32),
+        ("ProtocolDataRequestValue", ctypes.c_uint32),
+        ("ProtocolDataRequestSubValue", ctypes.c_uint32),
+        ("ProtocolDataOffset", ctypes.c_uint32),
+        ("ProtocolDataLength", ctypes.c_uint32),
+        ("FixedProtocolReturnData", ctypes.c_uint32),
+        ("ProtocolDataRequestSubValue2", ctypes.c_uint32),
+        ("ProtocolDataRequestSubValue3", ctypes.c_uint32),
+        ("ProtocolDataRequestSubValue4", ctypes.c_uint32),
+    ]
+
+
+class STORAGE_PROTOCOL_DATA_DESCRIPTOR(ctypes.Structure):
+    _fields_ = [
+        ("Version", ctypes.c_uint32),
+        ("Size", ctypes.c_uint32),
+        ("ProtocolSpecificData", STORAGE_PROTOCOL_SPECIFIC_DATA),
+    ]
+
+
+# The request is STORAGE_PROPERTY_QUERY with STORAGE_PROTOCOL_SPECIFIC_DATA in
+# its AdditionalParameters, followed by room for the data. The driver answers
+# in the same buffer with STORAGE_PROTOCOL_DATA_DESCRIPTOR (an equally long
+# 8-byte header) and the data at ProtocolDataOffset, counted from the start
+# of the protocol-specific data.
+_PROTOCOL_DATA_AT = STORAGE_PROPERTY_QUERY.AdditionalParameters.offset
+_ANSWER_DATA_BASE = STORAGE_PROTOCOL_DATA_DESCRIPTOR.ProtocolSpecificData.offset
+
+
+def request_size(data_len: int) -> int:
+    """Bytes of the in/out buffer for a query returning ``data_len`` bytes."""
+    return _PROTOCOL_DATA_AT + ctypes.sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA) + data_len
+
+
+# Identify Controller offsets (NVMe base spec; pinned by test_struct_layout)
 _IDC_SN = slice(4, 24)
 _IDC_MN = slice(24, 64)
 _IDC_FR = slice(64, 72)
@@ -101,25 +140,27 @@ def _query_protocol_data(
 ) -> bytes | None:
     """One protocol-specific property query. Returns the data or ``None``."""
     try:
-        request = _QUERY_HEADER.pack(property_id, PropertyStandardQuery) + _PROTOCOL_DATA.pack(
-            ProtocolTypeNvme,
-            data_type,
-            request_value,
-            0,                    # ProtocolDataRequestSubValue
-            _PROTOCOL_DATA.size,  # ProtocolDataOffset (from this struct's start)
-            data_len,             # ProtocolDataLength
-            0, 0, 0, 0,
-        )
-        size = _QUERY_HEADER.size + _PROTOCOL_DATA.size + data_len
-        buf = ctypes.create_string_buffer(request, size)
+        size = request_size(data_len)
+        buf = (ctypes.c_ubyte * size)()
+        query = STORAGE_PROPERTY_QUERY.from_buffer(buf)
+        query.PropertyId = property_id
+        query.QueryType = PropertyStandardQuery
+        proto = STORAGE_PROTOCOL_SPECIFIC_DATA.from_buffer(buf, _PROTOCOL_DATA_AT)
+        proto.ProtocolType = ProtocolTypeNvme
+        proto.DataType = data_type
+        proto.ProtocolDataRequestValue = request_value
+        proto.ProtocolDataRequestSubValue = 0
+        proto.ProtocolDataOffset = ctypes.sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA)
+        proto.ProtocolDataLength = data_len
+
         bytes_returned = wintypes.DWORD(0)
         ok = kernel32.DeviceIoControl(
             handle,
             IOCTL_STORAGE_QUERY_PROPERTY,
             ctypes.addressof(buf),
-            size,
+            ctypes.sizeof(buf),
             ctypes.addressof(buf),
-            size,
+            ctypes.sizeof(buf),
             ctypes.byref(bytes_returned),
             None,
         )
@@ -131,29 +172,21 @@ def _query_protocol_data(
             )
             return None
 
-        raw = buf.raw
-        version, desc_size = _QUERY_HEADER.unpack_from(raw, 0)
-        if version != _DESCRIPTOR_SIZE or desc_size != _DESCRIPTOR_SIZE:
+        answer = STORAGE_PROTOCOL_DATA_DESCRIPTOR.from_buffer_copy(buf)
+        expected = ctypes.sizeof(STORAGE_PROTOCOL_DATA_DESCRIPTOR)
+        if answer.Version != expected or answer.Size != expected:
             return None
-        fields = _PROTOCOL_DATA.unpack_from(raw, 8)
-        data_offset, returned_len = fields[4], fields[5]
-        if data_offset < _PROTOCOL_DATA.size or returned_len < data_len:
+        data = answer.ProtocolSpecificData
+        if (data.ProtocolDataOffset < ctypes.sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA)
+                or data.ProtocolDataLength < data_len):
             return None
-        start = 8 + data_offset
-        if start + data_len > len(raw):
+        start = _ANSWER_DATA_BASE + data.ProtocolDataOffset
+        if start + data_len > min(bytes_returned.value, size):
             return None
-        return raw[start:start + data_len]
+        return ctypes.string_at(ctypes.addressof(buf) + start, data_len)
     except Exception as exc:  # noqa: BLE001 — never raise
         audit_log(f"NVMe query raised: {exc}")
         return None
-
-
-def _query_either(handle, first: int, second: int, data_type: int,
-                  request_value: int, data_len: int) -> bytes | None:
-    data = _query_protocol_data(handle, first, data_type, request_value, data_len)
-    if data is None:
-        data = _query_protocol_data(handle, second, data_type, request_value, data_len)
-    return data
 
 
 # ── Parsers ──────────────────────────────────────────────────────────────
@@ -198,12 +231,11 @@ def parse_nvme_health(data: bytes) -> SmartSummary:
 # ── Public readers ───────────────────────────────────────────────────────
 
 def read_nvme_identify(handle) -> NvmeInfo | None:
-    """Identify Controller via the adapter property (device property as fallback)."""
+    """Identify Controller via the adapter property (no other property is tried)."""
     try:
-        data = _query_either(
+        data = _query_protocol_data(
             handle,
             StorageAdapterProtocolSpecificProperty,
-            StorageDeviceProtocolSpecificProperty,
             NVMeDataTypeIdentify,
             NVME_IDENTIFY_CNS_CONTROLLER,
             NVME_IDENTIFY_SIZE,
@@ -226,12 +258,11 @@ def read_nvme_identify(handle) -> NvmeInfo | None:
 
 
 def read_nvme_health(handle) -> SmartSummary:
-    """SMART / health log via the device property (adapter property as fallback)."""
+    """SMART / health log via the device property (no other property is tried)."""
     try:
-        data = _query_either(
+        data = _query_protocol_data(
             handle,
             StorageDeviceProtocolSpecificProperty,
-            StorageAdapterProtocolSpecificProperty,
             NVMeDataTypeLogPage,
             NVME_LOG_PAGE_HEALTH_INFO,
             NVME_HEALTH_LOG_SIZE,

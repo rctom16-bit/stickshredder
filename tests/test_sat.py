@@ -199,6 +199,24 @@ def test_request_is_data_in_with_sense_buffer(monkeypatch):
     assert c["sense_len"] > 0
     # The sense area must sit inside the buffer handed to the driver.
     assert c["sense_off"] + c["sense_len"] <= c["in_size"] == c["out_size"]
+    assert c["in_size"] == ctypes.sizeof(sat.SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER)
+    assert c["sense_off"] == sat.SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER.ucSenseBuf.offset
+
+
+def test_data_buffer_is_page_aligned(monkeypatch):
+    seen = []
+
+    def fake(handle, ioctl, in_addr, in_size, out_addr, out_size, bytesret, overlapped):
+        sptd = sat.SCSI_PASS_THROUGH_DIRECT.from_address(in_addr)
+        seen.append(sptd.DataBuffer)
+        sptd.ScsiStatus = 0
+        return 1
+
+    monkeypatch.setattr(sat.kernel32, "DeviceIoControl", fake)
+
+    sat.sat_ata_command(FAKE_HANDLE, 0xEC)
+
+    assert seen and seen[0] % 4096 == 0
 
 
 # ── Success / failure handling ───────────────────────────────────────────

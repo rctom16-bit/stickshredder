@@ -55,8 +55,13 @@ def make_health_log(*, percentage_used: int = 3, media_errors: int = 0) -> bytes
 # ── Fake IOCTL_STORAGE_QUERY_PROPERTY ────────────────────────────────────
 
 def make_fake_query(responses: dict, *, calls: list | None = None,
-                    descriptor_version: int | None = None):
-    """``responses`` maps (property_id, data_type, request_value) → bytes."""
+                    descriptor_version: int | None = None,
+                    returned: int | None = None, data_offset: int = 40):
+    """``responses`` maps (property_id, data_type, request_value) → bytes.
+
+    ``returned`` overrides the byte count reported back; ``data_offset`` the
+    ProtocolDataOffset the "driver" writes into its answer.
+    """
 
     def fake(handle, ioctl, in_addr, in_size, out_addr, out_size, bytesret, overlapped):
         prop_id, query_type = struct.unpack("<II", ctypes.string_at(in_addr, 8))
@@ -83,11 +88,11 @@ def make_fake_query(responses: dict, *, calls: list | None = None,
             return 0
         version = 48 if descriptor_version is None else descriptor_version
         header = struct.pack("<II", version, 48)
-        protocol = struct.pack("<10I", ptype, dtype, req_value, req_sub, 40,
+        protocol = struct.pack("<10I", ptype, dtype, req_value, req_sub, data_offset,
                                len(payload), 0, 0, 0, 0)
         out = header + protocol + payload
         ctypes.memmove(out_addr, out, min(len(out), out_size))
-        bytesret._obj.value = min(len(out), out_size)
+        bytesret._obj.value = min(len(out), out_size) if returned is None else returned
         return 1
 
     return fake
@@ -163,18 +168,35 @@ def test_read_nvme_identify_builds_adapter_protocol_query(monkeypatch):
     assert c["request_sub_value"] == 0
     assert c["data_offset"] == 40         # sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA)
     assert c["data_length"] == 4096
-    assert c["out_size"] >= 48 + 4096
+    # Microsoft's sample size exactly: query header + protocol data + data.
+    assert c["in_size"] == c["out_size"] == 8 + 40 + 4096
+    assert len(calls) == 1
 
 
-def test_read_nvme_identify_falls_back_to_device_property(monkeypatch):
+def test_read_nvme_identify_never_retries_with_another_property(monkeypatch):
+    # No trial and error: Identify Controller goes to the adapter property
+    # only; a refusal is final.
     calls = []
     monkeypatch.setattr(nvme.kernel32, "DeviceIoControl", make_fake_query(
         {(DEVICE, IDENTIFY, 1): make_identify_controller()}, calls=calls))
 
-    info = nvme.read_nvme_identify(FAKE_HANDLE)
+    assert nvme.read_nvme_identify(FAKE_HANDLE) is None
+    assert [c["property_id"] for c in calls] == [ADAPTER]
 
-    assert info is not None
-    assert [c["property_id"] for c in calls] == [ADAPTER, DEVICE]
+
+def test_read_nvme_identify_none_when_fewer_bytes_than_the_data_arrive(monkeypatch):
+    monkeypatch.setattr(nvme.kernel32, "DeviceIoControl", make_fake_query(
+        {(ADAPTER, IDENTIFY, 1): make_identify_controller()}, returned=48 + 100))
+
+    assert nvme.read_nvme_identify(FAKE_HANDLE) is None
+
+
+@pytest.mark.parametrize("offset", [0, 39, 41, 0xFFFF_FFF0])
+def test_read_nvme_identify_none_when_answer_puts_data_elsewhere(monkeypatch, offset):
+    monkeypatch.setattr(nvme.kernel32, "DeviceIoControl", make_fake_query(
+        {(ADAPTER, IDENTIFY, 1): make_identify_controller()}, data_offset=offset))
+
+    assert nvme.read_nvme_identify(FAKE_HANDLE) is None
 
 
 def test_read_nvme_identify_none_when_not_nvme(monkeypatch):
@@ -242,11 +264,24 @@ def test_read_nvme_health_builds_device_log_page_query(monkeypatch):
     assert c["data_length"] == 512
 
 
-def test_read_nvme_health_falls_back_to_adapter_property(monkeypatch):
+def test_read_nvme_health_never_retries_with_another_property(monkeypatch):
+    calls = []
     monkeypatch.setattr(nvme.kernel32, "DeviceIoControl", make_fake_query(
-        {(ADAPTER, LOG_PAGE, 2): make_health_log()}))
+        {(ADAPTER, LOG_PAGE, 2): make_health_log()}, calls=calls))
 
-    assert nvme.read_nvme_health(FAKE_HANDLE).available is True
+    assert nvme.read_nvme_health(FAKE_HANDLE).available is False
+    assert [c["property_id"] for c in calls] == [DEVICE]
+
+
+def test_read_nvme_health_request_has_exact_size(monkeypatch):
+    calls = []
+    monkeypatch.setattr(nvme.kernel32, "DeviceIoControl", make_fake_query(
+        {(DEVICE, LOG_PAGE, 2): make_health_log()}, calls=calls))
+
+    nvme.read_nvme_health(FAKE_HANDLE)
+
+    assert calls[0]["in_size"] == calls[0]["out_size"] == 8 + 40 + 512
+    assert calls[0]["data_offset"] == 40
 
 
 def test_read_nvme_health_unavailable_when_not_supported(monkeypatch):

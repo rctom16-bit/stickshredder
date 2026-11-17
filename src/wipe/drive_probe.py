@@ -1,28 +1,30 @@
-"""Probe what a disk's firmware can tell us — and over which path. READ-ONLY.
+"""Probe what a disk's firmware can tell us — over exactly one path. READ-ONLY.
 
-``probe_drive`` tries, in order:
+The path is chosen up front by ``wipe.transport`` from the bus type and port
+driver Windows reports for the disk — never by trying one command after the
+other (sending NVMe and ATA queries by trial and error crashed Windows twice
+on 17.11.2026, see ``docs/hardware-safety.md``):
 
-  1. ATA direct      — ``IOCTL_ATA_PASS_THROUGH_DIRECT`` (SATA on AHCI)
-  2. SAT             — ATA PASS-THROUGH (16) via SCSI pass-through (SATA in a
-                       USB enclosure whose bridge supports SAT)
-  3. NVMe            — protocol-specific ``IOCTL_STORAGE_QUERY_PROPERTY``
-  4. none            — e.g. USB flash sticks, bridges that block commands
+  "ata"   SATA disk on storahci     IDENTIFY, READ NATIVE MAX ADDRESS EXT,
+                                    DEVICE CONFIGURATION IDENTIFY, SMART READ DATA
+  "sat"   ATA drive behind a USB    IDENTIFY, DEVICE CONFIGURATION IDENTIFY,
+          SAT bridge                SMART READ DATA (ATA PASS-THROUGH(16))
+  "nvme"  NVMe disk on stornvme     Identify Controller, SMART / health log
+  "none"  everything else           nothing
 
-and reports IDENTIFY-level facts (security / sanitize support, frozen state),
-hidden areas (HPA/DCO) and a SMART summary. Every command it can send is a
-read: IDENTIFY, READ NATIVE MAX ADDRESS EXT, DEVICE CONFIGURATION IDENTIFY,
-SMART READ DATA, NVMe Identify / Get Log Page.
+A system disk (or any disk while the system disks are unknown) is never
+probed: ``probe_drive`` does not even open it. StickShredder never wipes a
+system disk, so it never needs a drive command there either.
 
-Access rights — why there is no GENERIC_READ fallback:
-  ``probe_drive`` opens the disk with desired access 0 (query-only). The
-  NVMe queries work on such a handle (FILE_ANY_ACCESS). The ATA and SCSI
+Access rights:
+  ``probe_drive`` opens the disk with desired access 0 (query-only). The NVMe
+  queries work on such a handle (FILE_ANY_ACCESS). The ATA and SCSI
   pass-through IOCTLs are defined with FILE_READ_ACCESS | FILE_WRITE_ACCESS,
-  so Windows refuses them (error 5) unless the handle has GENERIC_READ *and*
-  GENERIC_WRITE. A GENERIC_READ-only handle would not make any query succeed,
-  so the probe never reopens the disk. Callers that already hold a handle
-  with both rights (an elevated wipe session) can call ``probe_handle``.
+  so on a query-only handle they could only be refused — ``probe_drive``
+  does not send them and says so in ``note``. A caller holding a read/write
+  handle (an elevated wipe session) uses ``probe_handle``.
 
-Never raises: on any failure the result is ``transport="none"``.
+Never raises: on any failure the result carries no facts.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from core.log import audit_log
-from wipe import nvme, passthrough, sat, smart
+from wipe import device, nvme, passthrough, sat, smart, transport
 from wipe.smart import SmartSummary, smart_unavailable
 
 # ── Win32 ────────────────────────────────────────────────────────────────
@@ -103,7 +105,7 @@ def describe_hpa(status: str, language: str = "de") -> str:
 
 @dataclass
 class DriveCapabilities:
-    transport: Literal["ata", "sat", "nvme", "none"]
+    transport: Literal["ata", "sat", "nvme", "none"]   # the one path chosen for the disk
     identify_model: str | None
     security_supported: bool
     security_frozen: bool
@@ -112,19 +114,21 @@ class DriveCapabilities:
     sanitize_block: bool
     hpa_status: str
     smart: SmartSummary
+    note: str = ""                                     # why facts are missing (English)
 
 
-def _no_capabilities() -> DriveCapabilities:
+def _no_capabilities(path: str = "none", note: str = "") -> DriveCapabilities:
     return DriveCapabilities(
-        transport="none",
+        transport=path,
         identify_model=None,
         security_supported=False,
         security_frozen=False,
         enhanced_erase=False,
         sanitize_crypto=False,
         sanitize_block=False,
-        hpa_status=HPA_UNKNOWN,
-        smart=smart_unavailable("none"),
+        hpa_status=HPA_NOT_APPLICABLE if path == "nvme" else HPA_UNKNOWN,
+        smart=smart_unavailable(path),
+        note=note,
     )
 
 
@@ -165,10 +169,10 @@ def _hpa_status(accessible: int, native_sectors: int | None, dco_max_lba: int | 
     return f"{HPA_FOUND_PREFIX}{hidden * ATA_SECTOR_SIZE}" if hidden > 0 else HPA_NONE
 
 
-def _from_identify(transport, info, hpa_status, smart_summary) -> DriveCapabilities:
+def _from_identify(path, info, hpa_status, smart_summary) -> DriveCapabilities:
     crypto, block = _ata_sanitize(info.raw_words)
     return DriveCapabilities(
-        transport=transport,
+        transport=path,
         identify_model=info.model or None,
         security_supported=info.security_supported,
         security_frozen=info.security_frozen,
@@ -180,12 +184,12 @@ def _from_identify(transport, info, hpa_status, smart_summary) -> DriveCapabilit
     )
 
 
-# ── Transport probes ─────────────────────────────────────────────────────
+# ── One probe per transport ──────────────────────────────────────────────
 
-def _probe_ata(handle) -> DriveCapabilities | None:
+def _probe_ata(handle) -> DriveCapabilities:
     info = passthrough.ata_identify(handle)
     if info is None or not sat.identify_words_plausible(info.raw_words):
-        return None
+        return _no_capabilities("ata", "ATA IDENTIFY failed or returned implausible data")
     hpa = _hpa_status(
         _identify_sectors(info),
         passthrough.read_native_max_address(handle),
@@ -195,20 +199,20 @@ def _probe_ata(handle) -> DriveCapabilities | None:
     return _from_identify("ata", info, hpa, smart.read_ata_smart(handle, "ata"))
 
 
-def _probe_sat(handle) -> DriveCapabilities | None:
+def _probe_sat(handle) -> DriveCapabilities:
     info = sat.sat_identify(handle)
     if info is None:
-        return None
+        return _no_capabilities("sat", "SAT IDENTIFY failed or returned implausible data")
     # SAT here is data-in only, so READ NATIVE MAX (non-data) is not sent;
     # the DCO maximum is the only upper bound available.
     hpa = _hpa_status(_identify_sectors(info), None, sat.sat_dco_max_lba(handle))
     return _from_identify("sat", info, hpa, smart.read_ata_smart(handle, "sat"))
 
 
-def _probe_nvme(handle) -> DriveCapabilities | None:
+def _probe_nvme(handle) -> DriveCapabilities:
     info = nvme.read_nvme_identify(handle)
     if info is None:
-        return None
+        return _no_capabilities("nvme", "NVMe Identify Controller failed")
     return DriveCapabilities(
         transport="nvme",
         identify_model=info.model or None,
@@ -222,23 +226,56 @@ def _probe_nvme(handle) -> DriveCapabilities | None:
     )
 
 
+def _run(handle, info: transport.StorageInfo, *, read_write: bool) -> DriveCapabilities:
+    """Send the chosen transport's read commands — and nothing else."""
+    if info.transport == "nvme":
+        return _probe_nvme(handle)
+    if info.transport in ("ata", "sat"):
+        if not read_write:
+            return _no_capabilities(info.transport, (
+                f"{info.reason}; ATA pass-through needs a read/write handle "
+                f"(administrator) — not sent on the query-only handle"
+            ))
+        return _probe_ata(handle) if info.transport == "ata" else _probe_sat(handle)
+    return _no_capabilities("none", info.reason)
+
+
 # ── Public API ───────────────────────────────────────────────────────────
 
 def probe_handle(handle) -> DriveCapabilities:
-    """Probe an already-open disk handle (ATA → SAT → NVMe → none)."""
-    for step in (_probe_ata, _probe_sat, _probe_nvme):
-        try:
-            caps = step(handle)
-        except Exception as exc:  # noqa: BLE001 — never raise
-            audit_log(f"drive probe step {step.__name__} raised: {exc}")
-            caps = None
-        if caps is not None:
-            return caps
-    return _no_capabilities()
+    """Probe an already-open disk handle over its one transport. Never raises.
+
+    The handle should carry GENERIC_READ | GENERIC_WRITE (an elevated wipe
+    session); pass-through commands are refused on anything less.
+    """
+    try:
+        return _run(handle, transport.inspect_handle(handle), read_write=True)
+    except Exception as exc:  # noqa: BLE001 — never raise
+        audit_log(f"drive probe raised: {exc}")
+        return _no_capabilities("none", f"probe failed: {exc}")
 
 
 def probe_drive(device_id: str) -> DriveCapabilities:
-    """Open ``device_id`` query-only, probe it, close it. Never raises."""
+    """Open ``device_id`` query-only, probe it, close it. Never raises.
+
+    A system disk — or any disk while the system disks are unknown — is
+    refused before it is opened.
+    """
+    try:
+        index = device._physical_index(device_id)
+    except Exception:  # noqa: BLE001 — not \\.\PhysicalDriveN
+        return _no_capabilities("none", f"not a physical drive path: {device_id!r}")
+
+    try:
+        system_disks = transport.current_system_disks()
+    except Exception as exc:  # noqa: BLE001
+        audit_log(f"drive probe: system disk lookup raised: {exc}")
+        system_disks = None
+    refusal = transport.system_disk_refusal(index, system_disks)
+    if refusal:
+        audit_log(f"drive probe {device_id}: not probed — {refusal}")
+        return _no_capabilities("none", refusal)
+
     try:
         handle = kernel32.CreateFileW(
             device_id,
@@ -251,16 +288,21 @@ def probe_drive(device_id: str) -> DriveCapabilities:
         )
     except Exception as exc:  # noqa: BLE001
         audit_log(f"drive probe: opening {device_id} raised: {exc}")
-        return _no_capabilities()
+        return _no_capabilities("none", f"cannot open {device_id}")
     if _handle_is_invalid(handle):
         audit_log(
             f"drive probe: cannot open {device_id} query-only "
             f"(error {ctypes.get_last_error()})"
         )
-        return _no_capabilities()
+        return _no_capabilities("none", f"cannot open {device_id}")
 
     try:
-        caps = probe_handle(handle)
+        info = transport.inspect_handle(handle, expected_disk=index,
+                                        system_disks=system_disks)
+        caps = _run(handle, info, read_write=False)
+    except Exception as exc:  # noqa: BLE001 — never raise
+        audit_log(f"drive probe {device_id} raised: {exc}")
+        caps = _no_capabilities("none", f"probe failed: {exc}")
     finally:
         try:
             kernel32.CloseHandle(handle)
@@ -271,5 +313,6 @@ def probe_drive(device_id: str) -> DriveCapabilities:
         f"drive probe {device_id}: transport={caps.transport} "
         f"model={caps.identify_model!r} hpa={caps.hpa_status} "
         f"smart={'yes' if caps.smart.available else 'no'}"
+        + (f" ({caps.note})" if caps.note else "")
     )
     return caps

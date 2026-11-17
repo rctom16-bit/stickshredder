@@ -19,6 +19,10 @@ READ-ONLY BY CONSTRUCTION:
 ATA PASS-THROUGH (16) (opcode 0x85) is used instead of the 12-byte variant
 because opcode 0xA1 collides with the MMC BLANK command on optical drives.
 
+Callers send these only to a disk ``wipe.transport`` chose "sat" for (a USB
+device identifying as vendor "ATA", not a system disk) — never to USB flash
+drives or NVMe bridges.
+
 Access rights: ``IOCTL_SCSI_PASS_THROUGH_DIRECT`` is defined with
 FILE_READ_ACCESS | FILE_WRITE_ACCESS, so Windows rejects it (error 5) on a
 handle opened without both GENERIC_READ and GENERIC_WRITE. On a query-only
@@ -40,6 +44,7 @@ from wipe.passthrough import (
     _ata_string,
     _erase_unit_minutes,
     _words_from_identify,
+    aligned_buffer,
 )
 
 # ── Constants ────────────────────────────────────────────────────────────
@@ -88,7 +93,7 @@ class SCSI_PASS_THROUGH_DIRECT(ctypes.Structure):
     """Mirror of the Win32 ``SCSI_PASS_THROUGH_DIRECT`` structure.
 
     Natural alignment (no ``_pack_``): 56 bytes on 64-bit Windows, with the
-    ``DataBuffer`` pointer at offset 24.
+    ``DataBuffer`` pointer at offset 24 (pinned by tests/test_struct_layout.py).
     """
 
     _fields_ = [
@@ -108,13 +113,16 @@ class SCSI_PASS_THROUGH_DIRECT(ctypes.Structure):
     ]
 
 
-class _SptdWithSense(ctypes.Structure):
-    """The request block plus room for the sense data the driver may return."""
+class SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER(ctypes.Structure):
+    """The request block plus room for the sense data the driver may return.
+
+    Same layout as Microsoft's SPTI sample: 96 bytes, sense area at 60..92.
+    """
 
     _fields_ = [
         ("sptd", SCSI_PASS_THROUGH_DIRECT),
         ("Filler", ctypes.c_ulong),
-        ("Sense", ctypes.c_ubyte * SENSE_BUFFER_LEN),
+        ("ucSenseBuf", ctypes.c_ubyte * SENSE_BUFFER_LEN),
     ]
 
 
@@ -192,24 +200,24 @@ def sat_ata_command(
         return None
 
     try:
-        req = _SptdWithSense()
+        req = SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER()
         sptd = req.sptd
-        data_buf = (ctypes.c_ubyte * data_in_len)()
+        data_buf = aligned_buffer(data_in_len)
 
         sptd.Length = ctypes.sizeof(SCSI_PASS_THROUGH_DIRECT)
         sptd.CdbLength = 16
         sptd.SenseInfoLength = SENSE_BUFFER_LEN
-        sptd.SenseInfoOffset = _SptdWithSense.Sense.offset
+        sptd.SenseInfoOffset = SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER.ucSenseBuf.offset
         sptd.DataIn = SCSI_IOCTL_DATA_IN
-        sptd.DataTransferLength = data_in_len
+        sptd.DataTransferLength = ctypes.sizeof(data_buf)
         sptd.TimeOutValue = timeout_s
-        sptd.DataBuffer = ctypes.cast(data_buf, ctypes.c_void_p)
+        sptd.DataBuffer = ctypes.addressof(data_buf)
         cdb = _build_cdb(command, features, sector_count, lba)
         for i, b in enumerate(cdb):
             sptd.Cdb[i] = b
 
         bytes_returned = wintypes.DWORD(0)
-        size = ctypes.sizeof(_SptdWithSense)
+        size = ctypes.sizeof(SCSI_PASS_THROUGH_DIRECT_WITH_BUFFER)
         ok = kernel32.DeviceIoControl(
             handle,
             IOCTL_SCSI_PASS_THROUGH_DIRECT,
@@ -227,7 +235,7 @@ def sat_ata_command(
         if sptd.ScsiStatus != SCSI_STATUS_GOOD:
             audit_log(
                 f"SAT {name} rejected by bridge (SCSI status 0x{sptd.ScsiStatus:02X}, "
-                f"{_sense_summary(bytes(req.Sense))})"
+                f"{_sense_summary(bytes(req.ucSenseBuf))})"
             )
             return None
         if sptd.DataTransferLength < data_in_len:

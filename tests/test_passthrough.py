@@ -378,6 +378,57 @@ def test_dco_identify_max_none_on_ioctl_failure(monkeypatch):
 
 # ── struct layout sanity (64-bit pointer alignment) ──────────────────────
 
+def test_aligned_buffer_is_page_aligned_zeroed_and_exact():
+    buf = pt.aligned_buffer(512)
+
+    assert ctypes.sizeof(buf) == 512
+    assert ctypes.addressof(buf) % 4096 == 0
+    assert bytes(buf) == bytes(512)
+
+
+def _capture_buffer_address(seen: list):
+    def fake(handle, ioctl, in_addr, in_size, out_addr, out_size, bytesret, overlapped):
+        aptd = pt.ATA_PASS_THROUGH_DIRECT.from_address(in_addr)
+        seen.append((aptd.DataBuffer, aptd.DataTransferLength))
+        aptd.CurrentTaskFile[6] = 0x50
+        return 1
+
+    return fake
+
+
+def test_data_in_buffer_is_page_aligned(monkeypatch):
+    # Adapters reject (or worse, mishandle) buffers that violate their
+    # AlignmentMask; a page-aligned buffer satisfies every mask below 4 KiB.
+    seen = []
+    monkeypatch.setattr(pt.kernel32, "DeviceIoControl", _capture_buffer_address(seen))
+
+    pt.send_ata_command(FAKE_HANDLE, command=0xEC, data_in_len=512)
+
+    (address, length), = seen
+    assert address % 4096 == 0
+    assert length == 512
+
+
+def test_data_out_buffer_is_page_aligned(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pt.kernel32, "DeviceIoControl", _capture_buffer_address(seen))
+
+    pt.send_ata_command(FAKE_HANDLE, command=0xF1, data_out=b"\x01" * 512)
+
+    (address, length), = seen
+    assert address % 4096 == 0
+    assert length == 512
+
+
+def test_non_data_command_passes_no_buffer(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pt.kernel32, "DeviceIoControl", _capture_buffer_address(seen))
+
+    pt.send_ata_command(FAKE_HANDLE, command=0x27, use_lba48=True)
+
+    assert seen == [(None, 0)]
+
+
 def test_ata_pass_through_direct_is_64bit_safe():
     size = ctypes.sizeof(pt.ATA_PASS_THROUGH_DIRECT)
     # On 64-bit Windows the PVOID forces 8-byte alignment → 48-byte struct.
