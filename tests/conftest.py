@@ -54,7 +54,17 @@ def _no_real_wmi_queries(monkeypatch):
     monkeypatch.setattr(wmi, "WMI", router, raising=False)
 
 
-_KERNEL32_MODULES = ("wipe.device", "wipe.methods", "wipe.passthrough", "wipe.verify")
+@pytest.fixture(autouse=True)
+def _signing_key_in_tmp(tmp_path, monkeypatch):
+    """Keep the signing key and trust list out of the real user profile."""
+    import core.config
+
+    keys = tmp_path / "_signing"
+    monkeypatch.setattr(core.config, "KEY_DIR", keys, raising=False)
+    monkeypatch.setattr(core.config, "TRUST_FILE", keys / "trusted_keys.json", raising=False)
+
+
+_KERNEL32_MODULES =("wipe.device", "wipe.methods", "wipe.passthrough", "wipe.verify")
 _ERROR_ACCESS_DENIED = 5
 
 

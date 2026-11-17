@@ -8,6 +8,10 @@ from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape
 
+from typing import TYPE_CHECKING
+
+from reportlab.graphics.barcode.qr import QrCodeWidget
+from reportlab.graphics.shapes import Drawing
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
@@ -22,8 +26,15 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+from cert.payload import RESULT_LABELS, build_payload, result_status
 from core.config import APP_VERSION
 from core.log import audit_log
+
+if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
+    from cert.signing import SigningKey
+
+# PDF Keywords marker the verify page and ``cert.verify_cert`` look for.
+TOKEN_MARKER = "stickshredder-token:"
 
 # ---------------------------------------------------------------------------
 # Colours
@@ -33,6 +44,7 @@ LIGHT_BLUE_BG = colors.HexColor("#e2e8f0")
 TABLE_BORDER = colors.HexColor("#cbd5e0")
 PASS_GREEN = colors.HexColor("#276749")
 FAIL_RED = colors.HexColor("#c53030")
+LIMITED_AMBER = colors.HexColor("#975a16")
 TEXT_GRAY = colors.HexColor("#4a5568")
 
 PAGE_WIDTH, PAGE_HEIGHT = A4
@@ -124,6 +136,12 @@ class CertificateData:
     # experimental ATA Secure Erase path instead of an overwrite.
     secure_erase_used: bool = False
     secure_erase_method: str = ""  # "ata-secure-erase" | "ata-enhanced"
+
+    # Three-level result (v2.0). ``wipe_success`` is False when the overwrite
+    # or erase itself failed; ``hidden_area_removed`` is True once a found
+    # HPA/DCO has been removed and wiped as well.
+    wipe_success: bool = True
+    hidden_area_removed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +296,30 @@ def _build_styles() -> dict[str, ParagraphStyle]:
             leading=12,
             textColor=TEXT_GRAY,
         ),
+        "result_limited": ParagraphStyle(
+            "ResultLimited",
+            parent=base["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=10,
+            leading=12,
+            textColor=LIMITED_AMBER,
+        ),
+        "auth_text": ParagraphStyle(
+            "AuthText",
+            parent=base["Normal"],
+            fontName="Helvetica",
+            fontSize=7.5,
+            leading=9.5,
+            textColor=TEXT_GRAY,
+        ),
+        "auth_fingerprint": ParagraphStyle(
+            "AuthFingerprint",
+            parent=base["Normal"],
+            fontName="Courier-Bold",
+            fontSize=9,
+            leading=11,
+            textColor=colors.black,
+        ),
         "footer": ParagraphStyle(
             "Footer",
             parent=base["Normal"],
@@ -318,8 +360,8 @@ _COMMON_TABLE_STYLE = [
     ("FONTSIZE", (0, 0), (-1, -1), 8.5),
     ("VALIGN", (0, 0), (-1, -1), "TOP"),
     ("GRID", (0, 0), (-1, -1), 0.4, TABLE_BORDER),
-    ("TOPPADDING", (0, 0), (-1, -1), 3),
-    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ("TOPPADDING", (0, 0), (-1, -1), 2),
+    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
     ("LEFTPADDING", (0, 0), (-1, -1), 5),
     ("RIGHTPADDING", (0, 0), (-1, -1), 5),
 ]
@@ -335,8 +377,8 @@ def _section_header(text: str, styles: dict[str, ParagraphStyle]) -> Table:
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, -1), LIGHT_BLUE_BG),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("TOPPADDING", (0, 0), (-1, -1), 2.5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5),
                 ("LEFTPADDING", (0, 0), (-1, -1), 6),
             ]
         )
@@ -631,9 +673,105 @@ def _build_hidden_area_elements(
 
 
 # ---------------------------------------------------------------------------
+# Overall result row and authenticity section (v2.0)
+# ---------------------------------------------------------------------------
+_RESULT_STYLE = {"ok": "result_pass", "limited": "result_limited", "failed": "result_fail"}
+
+_QR_SIZE = 3.4 * cm
+
+
+def _build_result_row(
+    data: CertificateData,
+    styles: dict[str, ParagraphStyle],
+    lang: str,
+) -> Table:
+    """One-row table with the three-level overall result, coloured."""
+    status = result_status(data)
+    de, en = RESULT_LABELS[status]
+    tbl = Table(
+        [
+            [
+                Paragraph(_label("Gesamtergebnis", "Overall Result", lang), styles["cell_label"]),
+                Paragraph(_label(de, en, lang), styles[_RESULT_STYLE[status]]),
+            ]
+        ],
+        colWidths=[_TABLE_WIDTH * 0.42, _TABLE_WIDTH * 0.58],
+    )
+    tbl.setStyle(TableStyle(_COMMON_TABLE_STYLE))
+    return tbl
+
+
+def _qr_drawing(value: str, size: float = _QR_SIZE) -> Drawing:
+    # Level L keeps the long verify link (~800 characters) as coarse as
+    # possible so phone cameras can still read the printed code.
+    widget = QrCodeWidget(value, barLevel="L")
+    x1, y1, x2, y2 = widget.getBounds()
+    drawing = Drawing(size, size, transform=[size / (x2 - x1), 0, 0, size / (y2 - y1), 0, 0])
+    drawing.add(widget)
+    return drawing
+
+
+def _build_authenticity_elements(
+    token: str,
+    fingerprint: str,
+    styles: dict[str, ParagraphStyle],
+    lang: str,
+) -> list:
+    """Section „Echtheit / Authenticity“: QR code of the verify link + fingerprint."""
+    from cert.signing import verify_url
+
+    text = _label(
+        "Echtheit prüfen: QR-Code scannen oder PDF in StickShredder öffnen. "
+        "Fingerabdruck mit der Schlüsselkarte Ihrer IT vergleichen.",
+        "Check authenticity: scan the QR code or open the PDF in StickShredder. "
+        "Compare the fingerprint with your IT department's key card.",
+        lang,
+    )
+    if lang == "both":
+        # One sentence per language reads better than "de / en" run together.
+        text = text.replace(" / Check authenticity", "<br/>Check authenticity")
+    right = [
+        Paragraph(
+            _label("Fingerabdruck des Schlüssels", "Key fingerprint", lang),
+            styles["cell_label"],
+        ),
+        Paragraph(fingerprint, styles["auth_fingerprint"]),
+        Spacer(1, 2 * mm),
+        Paragraph(text, styles["auth_text"]),
+    ]
+    tbl = Table(
+        [[_qr_drawing(verify_url(token)), right]],
+        colWidths=[_QR_SIZE + 4 * mm, _TABLE_WIDTH - _QR_SIZE - 4 * mm],
+    )
+    tbl.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("BOX", (0, 0), (-1, -1), 0.4, TABLE_BORDER),
+                ("LEFTPADDING", (0, 0), (0, 0), 2 * mm),
+                ("RIGHTPADDING", (0, 0), (0, 0), 2 * mm),
+                ("TOPPADDING", (0, 0), (-1, -1), 1.5 * mm),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5 * mm),
+                ("LEFTPADDING", (1, 0), (1, 0), 4 * mm),
+            ]
+        )
+    )
+    return [
+        _section_header(_label("Echtheit", "Authenticity", lang), styles),
+        tbl,
+        Spacer(1, 2 * mm),
+    ]
+
+
+# ---------------------------------------------------------------------------
 # PDF generation
 # ---------------------------------------------------------------------------
-def generate_certificate(data: CertificateData, output_path: str) -> str:
+def generate_certificate(
+    data: CertificateData,
+    output_path: str,
+    signing_key: SigningKey | None = None,
+    history_hash: str = "",
+) -> str:
     """Generate a DIN 66399 / ISO 21964 deletion certificate PDF.
 
     Parameters
@@ -642,6 +780,12 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
         All certificate fields.
     output_path:
         Destination file path for the generated PDF.
+    signing_key:
+        When given, the certificate data is signed: the token is stored in the
+        PDF Keywords as ``stickshredder-token:<token>`` and an „Echtheit /
+        Authenticity“ section shows the verify QR code and the key fingerprint.
+    history_hash:
+        Hash of this wipe's history entry; becomes payload field ``h``.
 
     Returns
     -------
@@ -651,6 +795,10 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
     lang = data.language
     styles = _build_styles()
     elements: list = []
+
+    token = ""
+    if signing_key is not None:
+        token = signing_key.sign_payload(build_payload(data, history_hash))
 
     # Ensure output directory exists
     out = Path(output_path)
@@ -741,6 +889,7 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
         )
 
     elements.append(_kv_table(meta_rows, styles))
+    elements.append(_build_result_row(data, styles, lang))
     elements.append(Spacer(1, 2 * mm))
 
     # ------------------------------------------------------------------
@@ -881,6 +1030,14 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
         elements.append(_kv_table(reformat_rows, styles))
         elements.append(Spacer(1, 2 * mm))
 
+    # --------------------------------------------------------------------------
+    # 5e. Authenticity (v2.0) — only on signed certificates.
+    # --------------------------------------------------------------------------
+    if token:
+        elements.extend(
+            _build_authenticity_elements(token, signing_key.fingerprint(), styles, lang)
+        )
+
     # ------------------------------------------------------------------
     # 6. Signature area
     # ------------------------------------------------------------------
@@ -975,6 +1132,11 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
     # ------------------------------------------------------------------
     # Build the PDF
     # ------------------------------------------------------------------
+    doc_kwargs = {}
+    if token:
+        # The token alphabet ([A-Za-z0-9_-.]) needs no escaping in a PDF
+        # string, so the raw file bytes contain it verbatim for the verifiers.
+        doc_kwargs["keywords"] = f"{TOKEN_MARKER}{token}"
     doc = SimpleDocTemplate(
         str(out),
         pagesize=A4,
@@ -985,14 +1147,17 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
         title=title_text,
         author=data.company_name or "StickShredder",
         subject="DIN 66399 / ISO 21964 Deletion Certificate",
+        **doc_kwargs,
     )
     doc.build(elements)
 
     abs_path = str(out.resolve())
+    signed = f" signed={signing_key.fingerprint()}" if token else " unsigned"
     audit_log(
         f"Certificate generated: #{data.cert_number:06d} "
         f"serial={data.serial_number} "
         f"result={'PASSED' if data.verification_passed else 'FAILED'} "
+        f"status={result_status(data)}{signed} "
         f"path={abs_path}"
     )
 

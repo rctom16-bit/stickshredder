@@ -27,6 +27,13 @@ CERT_COUNTER_FILE = CONFIG_DIR / "cert_counter.txt"
 WIPE_HISTORY_FILE = CONFIG_DIR / "wipe_history.csv"
 DEFAULT_CERT_OUTPUT = CONFIG_DIR / "certificates"
 
+# Certificate signing (v2.0): the DPAPI-protected key file ``signing_key.bin``
+# lives in KEY_DIR; TRUST_FILE lists the public keys whose certificates count
+# as genuine. Read through this module at call time (tests redirect them).
+KEY_DIR = CONFIG_DIR
+TRUST_FILE = CONFIG_DIR / "trusted_keys.json"
+OWN_KEY_NAME = "Eigener Schlüssel / Own key"
+
 # Cert counter is stored as a decimal integer. Anything beyond 10 digits is
 # treated as corruption (10 digits covers values up to ~9.9 billion, which is
 # far beyond any legitimate wipe volume) and will be reset to 0.
@@ -67,6 +74,38 @@ class AppConfig:
             return cls(company=company, **data)
         except (json.JSONDecodeError, TypeError):
             return cls()
+
+
+def trust_own_key(key) -> bool:
+    """Add ``key`` (this installation's signing key) to the trust list.
+
+    Returns ``False`` without touching anything if the trust list exists but
+    is damaged — it is left for the user to repair, never overwritten.
+    """
+    from cert.verify_cert import TrustStore
+
+    try:
+        store = TrustStore.load(TRUST_FILE)
+    except ValueError:
+        return False
+    store.add(key.public_key_bytes(), OWN_KEY_NAME)
+    return True
+
+
+def load_signing_key():
+    """Return this installation's signing key, creating it on first use.
+
+    A newly created key is added to the trust list, so the installation's own
+    certificates verify as genuine. Raises ``cert.signing.SigningKeyError`` if
+    an existing key file cannot be read (it is never replaced silently).
+    """
+    from cert.signing import KEY_FILE_NAME, SigningKey
+
+    created = not (KEY_DIR / KEY_FILE_NAME).exists()
+    key = SigningKey.load_or_create(KEY_DIR)
+    if created:
+        trust_own_key(key)
+    return key
 
 
 def _audit_counter_reset(reason: str) -> None:
