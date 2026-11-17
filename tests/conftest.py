@@ -64,8 +64,34 @@ def _signing_key_in_tmp(tmp_path, monkeypatch):
     monkeypatch.setattr(core.config, "TRUST_FILE", keys / "trusted_keys.json", raising=False)
 
 
-_KERNEL32_MODULES =("wipe.device", "wipe.methods", "wipe.passthrough", "wipe.verify")
+_KERNEL32_MODULES = ("wipe.device", "wipe.methods", "wipe.passthrough", "wipe.verify",
+                     "wipe.drive_probe")
+# Modules that send drive commands (firmware commands and storage queries).
+_DRIVE_COMMAND_MODULES = ("wipe.passthrough", "wipe.sat", "wipe.nvme", "wipe.transport")
 _ERROR_ACCESS_DENIED = 5
+
+
+@pytest.fixture(autouse=True)
+def _no_real_drive_commands(monkeypatch):
+    """No drive command reaches a real device from a unit test.
+
+    Every DeviceIoControl of the drive-command modules fails like an
+    unprivileged call (access denied) unless the test installs its own fake.
+    Without this, a made-up handle number (1234) could name a real open
+    handle of the test process and the command would reach a real driver.
+    """
+    def blocked(*_args):
+        ctypes.set_last_error(_ERROR_ACCESS_DENIED)
+        return 0
+
+    for name in _DRIVE_COMMAND_MODULES:
+        try:
+            mod = importlib.import_module(name)
+        except Exception:  # noqa: BLE001 — module may not import off Windows
+            continue
+        k32 = getattr(mod, "kernel32", None)
+        if k32 is not None:
+            monkeypatch.setattr(k32, "DeviceIoControl", blocked)
 
 
 @pytest.fixture(autouse=True)

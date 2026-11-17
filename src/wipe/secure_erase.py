@@ -9,6 +9,10 @@ flash, reallocated sectors).
 can leave a drive locked or unusable. This module is therefore deliberately
 *safe in itself*:
 
+  * it sends NO command at all unless ``wipe.transport`` chose the "ata" path
+    for the handle's disk (a SATA disk on Microsoft's storahci driver that is
+    not a system disk) — never to USB, NVMe, vendor RAID/VMD drivers or the
+    system disk;
   * it NEVER issues an erase command on a drive that is frozen, locked, or that
     does not advertise the SECURITY feature set;
   * it NEVER raises — every public function returns a typed result, errors and
@@ -36,7 +40,7 @@ from core.log import audit_log
 # ``wipe.passthrough.ata_identify`` / ``wipe.passthrough.send_ata_command`` in
 # tests, and means the real implementation can be swapped in without touching
 # this file.
-from wipe import passthrough
+from wipe import passthrough, transport
 
 # ── ATA SECURITY feature-set command codes ───────────────────────────────────
 ATA_SECURITY_SET_PASSWORD = 0xF1
@@ -86,6 +90,17 @@ def _build_security_block(password: str, *, enhanced: bool = False) -> bytes:
     return bytes(buf)
 
 
+def _ata_path_refusal(handle) -> str | None:
+    """Why ``handle``'s disk must get no ATA command, or ``None`` if it may."""
+    try:
+        storage = transport.inspect_handle(handle)
+    except Exception as exc:  # inspect_handle should not raise, but never trust it
+        return f"drive-command path could not be determined: {exc}"
+    if storage.transport != "ata":
+        return storage.reason
+    return None
+
+
 def _result(
     *,
     success: bool,
@@ -118,6 +133,14 @@ def secure_erase_supported(handle: int) -> SecureEraseResult:
     """
     start = time.monotonic()
     try:
+        refusal = _ata_path_refusal(handle)
+        if refusal:
+            audit_log(f"secure_erase_supported: no ATA command sent — {refusal}")
+            return _result(
+                success=False, method="unsupported",
+                supported=False, frozen=False, start=start, error=refusal,
+            )
+
         identify = passthrough.ata_identify(handle)
         if identify is None or not identify.security_supported:
             return _result(
@@ -172,6 +195,14 @@ def secure_erase(
     """
     start = time.monotonic()
     try:
+        refusal = _ata_path_refusal(handle)
+        if refusal:
+            audit_log(f"secure_erase: refusing, no ATA command sent — {refusal}")
+            return _result(
+                success=False, method="unsupported",
+                supported=False, frozen=False, start=start, error=refusal,
+            )
+
         identify = passthrough.ata_identify(handle)
         if identify is None or not identify.security_supported:
             return _result(

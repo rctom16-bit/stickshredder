@@ -25,9 +25,11 @@ interface:
     device_configuration_identify_max(handle) -> int | None
         DCO max sector count (the factory maximum)
 
-A USB-bridge enclosure typically rejects ATA passthrough entirely; in that case
-``ata_identify`` returns ``None`` and we report ``supported=False`` rather than
-guessing.
+ATA commands are only sent when ``wipe.transport`` chose the "ata" path for
+the handle's disk: a SATA disk on Microsoft's storahci driver that is not a
+system disk. Every other disk — USB bridges and sticks, NVMe, vendor RAID/VMD
+drivers, the system disk, or any disk while the system disks are unknown —
+gets no ATA command and is reported ``supported=False`` rather than guessed.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from core.log import audit_log
+from wipe import transport
 
 # Fixed read-only interface from the shared passthrough module. It is built in
 # parallel; fall back to no-op stubs so this module (and its tests) still import
@@ -98,6 +101,7 @@ def detect_hidden_areas(handle: int) -> HiddenAreaInfo:
     """Probe a drive for HPA/DCO via ``wipe.passthrough``. NEVER raises.
 
     All passthrough calls are read-only. Any failure degrades gracefully:
+      * transport is not "ata" (see module doc) -> supported=False, nothing sent.
       * IDENTIFY returns None / errors -> supported=False (cannot probe).
       * accessible = identify.lba48_max_sectors
       * native = read_native_max_address(handle), falling back to accessible
@@ -107,6 +111,16 @@ def detect_hidden_areas(handle: int) -> HiddenAreaInfo:
       * dco_present  = dco_max > native
       * hidden-sector counts are clamped to >= 0.
     """
+    # ── Transport gate: ATA commands only for a SATA disk on storahci. ──
+    try:
+        storage = transport.inspect_handle(handle)
+    except Exception as exc:  # inspect_handle should not raise, but never trust it
+        audit_log(f"hidden_areas: drive-command path check raised: {exc!r}")
+        return _unsupported(f"drive-command path could not be determined: {exc}")
+    if storage.transport != "ata":
+        audit_log(f"hidden_areas: no ATA commands sent — {storage.reason}")
+        return _unsupported(f"HPA/DCO not probed: {storage.reason}")
+
     # ── IDENTIFY: the gatekeeper. No IDENTIFY -> we cannot probe at all. ──
     try:
         identify = ata_identify(handle)

@@ -10,8 +10,17 @@ three fixed passthrough entry points that `wipe.hidden_areas` depends on:
 """
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import pytest
+
+import wipe.transport as tr
+from tests.test_transport import (
+    FAKE_HANDLE,
+    FakeStack,
+    make_adapter_descriptor,
+    make_device_descriptor,
+)
 from wipe.hidden_areas import (
     HiddenAreaInfo,
     detect_hidden_areas,
@@ -19,6 +28,15 @@ from wipe.hidden_areas import (
 )
 
 SECTOR_SIZE = 512
+
+REAL_INSPECT = tr.inspect_handle
+SATA_ON_STORAHCI = tr.StorageInfo("ata", "SATA disk on storahci", disk_number=2)
+
+
+@pytest.fixture(autouse=True)
+def _sata_disk(monkeypatch):
+    """By default the handle is a non-system SATA disk on storahci."""
+    monkeypatch.setattr(tr, "inspect_handle", lambda handle, **kw: SATA_ON_STORAHCI)
 
 
 def _identify(lba48_max_sectors: int) -> SimpleNamespace:
@@ -176,6 +194,93 @@ def test_detect_never_raises_when_dco_raises():
     assert info.hpa_present is True
     assert info.dco_max_sectors == 0
     assert info.dco_present is False
+
+
+# ── Only SATA disks on storahci get ATA commands ───────────────────────
+
+def _spies():
+    return MagicMock(return_value=_identify(1000)), MagicMock(return_value=1000), MagicMock(return_value=0)
+
+
+@pytest.mark.parametrize("transport", ["sat", "nvme", "none"])
+def test_no_ata_command_unless_the_transport_is_ata(monkeypatch, transport):
+    reason = f"chosen transport is {transport}"
+    monkeypatch.setattr(tr, "inspect_handle",
+                        lambda handle, **kw: tr.StorageInfo(transport, reason))
+    identify, native, dco = _spies()
+
+    with patch("wipe.hidden_areas.ata_identify", identify), \
+         patch("wipe.hidden_areas.read_native_max_address", native), \
+         patch("wipe.hidden_areas.device_configuration_identify_max", dco):
+        info = detect_hidden_areas(FAKE_HANDLE)
+
+    assert info.supported is False
+    assert reason in info.error
+    identify.assert_not_called()
+    native.assert_not_called()
+    dco.assert_not_called()
+
+
+def _real_stack(monkeypatch, stack: FakeStack, system: set[int]):
+    monkeypatch.setattr(tr, "inspect_handle", REAL_INSPECT)
+    monkeypatch.setattr(tr.kernel32, "DeviceIoControl", stack)
+    monkeypatch.setattr(tr, "current_system_disks", lambda: system)
+    monkeypatch.setattr(tr, "_driver_for_scsi_port", lambda port: "storahci")
+
+
+def test_system_disk_gets_no_ata_command(monkeypatch):
+    stack = FakeStack(disk_number=0, port=0,
+                      adapter=make_adapter_descriptor(bus_type=tr.BusTypeSata),
+                      device=make_device_descriptor(bus_type=tr.BusTypeSata))
+    _real_stack(monkeypatch, stack, system={0})
+    identify, native, dco = _spies()
+
+    with patch("wipe.hidden_areas.ata_identify", identify):
+        info = detect_hidden_areas(FAKE_HANDLE)
+
+    assert info.supported is False
+    assert "system disk" in info.error
+    identify.assert_not_called()
+    assert stack.calls == [(tr.IOCTL_STORAGE_GET_DEVICE_NUMBER, None)]
+
+
+def test_usb_stick_gets_no_ata_command(monkeypatch):
+    stack = FakeStack(disk_number=1,
+                      adapter=make_adapter_descriptor(bus_type=tr.BusTypeUsb),
+                      device=make_device_descriptor(bus_type=tr.BusTypeUsb, vendor="USB",
+                                                    removable=True))
+    _real_stack(monkeypatch, stack, system={0})
+    identify, native, dco = _spies()
+
+    with patch("wipe.hidden_areas.ata_identify", identify):
+        info = detect_hidden_areas(FAKE_HANDLE)
+
+    assert info.supported is False
+    identify.assert_not_called()
+
+
+def test_sata_disk_on_storahci_is_probed(monkeypatch):
+    stack = FakeStack(disk_number=2, port=0,
+                      adapter=make_adapter_descriptor(bus_type=tr.BusTypeSata),
+                      device=make_device_descriptor(bus_type=tr.BusTypeSata))
+    _real_stack(monkeypatch, stack, system={0})
+
+    info = _detect(identify=_identify(1000), native=1200, dco=1200, handle=FAKE_HANDLE)
+
+    assert info.supported is True
+    assert info.hpa_present is True
+
+
+def test_detect_never_raises_when_the_transport_check_raises(monkeypatch):
+    def boom(handle, **kw):
+        raise RuntimeError("storage stack exploded")
+
+    monkeypatch.setattr(tr, "inspect_handle", boom)
+
+    info = _detect(identify=_identify(1000), native=1200, dco=1200)
+
+    assert info.supported is False
+    assert info.error is not None
 
 
 # ── hidden_bytes helper ────────────────────────────────────────────────

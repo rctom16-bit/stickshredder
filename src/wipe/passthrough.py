@@ -6,6 +6,10 @@ drive's firmware. Two sibling modules build on this:
   * ``wipe/hidden_areas.py`` — HPA/DCO detection (report-only).
   * ``wipe/secure_erase.py`` — ATA Secure Erase (experimental, opt-in).
 
+Callers send these only to a disk ``wipe.transport`` chose "ata" for (a SATA
+disk on Microsoft's storahci driver, not a system disk); the public entry
+points (``drive_probe``, ``hidden_areas``, ``secure_erase``) check that first.
+
 Design rules (mirrors ``wipe/device.py``):
   * ``kernel32`` is loaded with ``use_last_error=True`` and every function used
     gets explicit ``argtypes``/``restype`` so 64-bit values are never truncated.
@@ -32,11 +36,16 @@ from core.log import audit_log
 
 IOCTL_ATA_PASS_THROUGH_DIRECT = 0x0004D030
 
-# ATA_PASS_THROUGH_DIRECT.AtaFlags
+# ATA_PASS_THROUGH_DIRECT.AtaFlags (SDK names; pinned by test_struct_layout)
 ATA_FLAGS_DRDY_REQUIRED = 0x01
 ATA_FLAGS_DATA_IN = 0x02
 ATA_FLAGS_DATA_OUT = 0x04
-ATA_FLAGS_48BIT = 0x08
+ATA_FLAGS_48BIT_COMMAND = 0x08
+ATA_FLAGS_48BIT = ATA_FLAGS_48BIT_COMMAND
+
+# Data buffers handed to the driver are page aligned: that satisfies every
+# adapter AlignmentMask below 4 KiB (wipe.transport refuses larger masks).
+PAGE_SIZE = 4096
 
 # Status register bits
 ATA_STATUS_ERR = 0x01
@@ -69,13 +78,24 @@ kernel32.DeviceIoControl.argtypes = [
 kernel32.DeviceIoControl.restype = wintypes.BOOL
 
 
+def aligned_buffer(size: int, alignment: int = PAGE_SIZE) -> ctypes.Array:
+    """A zeroed ``c_ubyte`` array of exactly ``size`` bytes at an aligned address.
+
+    The returned array keeps the larger backing allocation alive.
+    """
+    backing = (ctypes.c_ubyte * (size + alignment))()
+    skip = (-ctypes.addressof(backing)) % alignment
+    return (ctypes.c_ubyte * size).from_buffer(backing, skip)
+
+
 class ATA_PASS_THROUGH_DIRECT(ctypes.Structure):
     """Mirror of the Win32 ``ATA_PASS_THROUGH_DIRECT`` structure.
 
     On 64-bit Windows the ``PVOID DataBuffer`` field forces 8-byte alignment,
     so ctypes inserts 4 bytes of padding after ``ReservedAsUlong`` and the
     whole structure is 48 bytes. Do NOT add ``_pack_`` — the natural alignment
-    is exactly what the driver expects.
+    is exactly what the driver expects (pinned by tests/test_struct_layout.py
+    against the Windows SDK).
     """
 
     _fields_ = [
@@ -170,24 +190,25 @@ def _execute_aptd(
 
         flags = ATA_FLAGS_DRDY_REQUIRED
         if use_lba48:
-            flags |= ATA_FLAGS_48BIT
+            flags |= ATA_FLAGS_48BIT_COMMAND
 
-        # Allocate the separate data buffer the struct points at. Keep a Python
-        # reference (``data_buf``) alive until after the call returns.
+        # The separate, page-aligned data buffer the struct points at; its
+        # length is exactly DataTransferLength. ``data_buf`` stays referenced
+        # until after the call returns.
         data_buf = None
         if data_out is not None:
             flags |= ATA_FLAGS_DATA_OUT
-            data_buf = (ctypes.c_ubyte * len(data_out)).from_buffer_copy(data_out)
-            aptd.DataTransferLength = len(data_out)
+            data_buf = aligned_buffer(len(data_out))
+            ctypes.memmove(data_buf, data_out, len(data_out))
         elif data_in_len > 0:
             flags |= ATA_FLAGS_DATA_IN
-            data_buf = (ctypes.c_ubyte * data_in_len)()
-            aptd.DataTransferLength = data_in_len
+            data_buf = aligned_buffer(data_in_len)
 
         aptd.AtaFlags = flags
         aptd.TimeOutValue = timeout_seconds
         if data_buf is not None:
-            aptd.DataBuffer = ctypes.cast(data_buf, ctypes.c_void_p)
+            aptd.DataTransferLength = ctypes.sizeof(data_buf)
+            aptd.DataBuffer = ctypes.addressof(data_buf)
 
         # Input task file.
         ctf = aptd.CurrentTaskFile
