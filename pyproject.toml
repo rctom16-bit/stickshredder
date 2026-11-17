@@ -30,6 +30,7 @@ dependencies = [
     "reportlab>=4.0",
     "pywin32>=306",
     "wmi>=1.5",
+    "cryptography>=43",
 ]
 
 [project.optional-dependencies]
