@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.config import AppConfig
+from core.config import APP_VERSION, AppConfig
 from core.log import audit_log, read_wipe_history
 from gui.history_dialog import HistoryDialog
 from gui.settings_dialog import SettingsDialog
@@ -83,7 +83,7 @@ class MainWindow(QMainWindow):
         self.worker: WipeWorker | None = None
         self._device_checkboxes: list[QCheckBox] = []
 
-        self.setWindowTitle("StickShredder v1.0.0 \u2014 Secure USB Wipe Tool")
+        self.setWindowTitle(f"StickShredder v{APP_VERSION} \u2014 Secure Wipe Tool")
         self.setMinimumSize(1000, 700)
         self.resize(1200, 740)
 
@@ -166,7 +166,7 @@ class MainWindow(QMainWindow):
     # ── Device panel ─────────────────────────────────────────────────────
 
     def _build_device_panel(self) -> QGroupBox:
-        group = QGroupBox("Detected Devices / Erkannte Datentrager")
+        group = QGroupBox("Detected Devices / Erkannte Datenträger")
         layout = QVBoxLayout(group)
         layout.setSpacing(8)
 
@@ -258,7 +258,7 @@ class MainWindow(QMainWindow):
     # ── Control panel ────────────────────────────────────────────────────
 
     def _build_control_panel(self) -> QGroupBox:
-        group = QGroupBox("Wipe Configuration / Loschoptionen")
+        group = QGroupBox("Wipe Configuration / Löschoptionen")
         layout = QVBoxLayout(group)
         layout.setSpacing(10)
 
@@ -1455,7 +1455,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About StickShredder",
-            "<h2>StickShredder v1.0.0</h2>"
+            f"<h2>StickShredder v{APP_VERSION}</h2>"
             "<p><b>Secure USB Wipe Tool</b></p>"
             "<p>Generates deletion certificates structured according to "
             "DIN 66399 / ISO 21964 conventions for verifiable, "
@@ -1479,7 +1479,7 @@ class MainWindow(QMainWindow):
             "<tr><td><b>License:</b></td>"
             "<td>MIT License (Open Source)</td></tr>"
             "<tr><td><b>Version:</b></td>"
-            "<td>1.0.0</td></tr>"
+            f"<td>{APP_VERSION}</td></tr>"
             "</table>"
             "<p style='margin-top:12px; color:#718096; font-size:11px;'>"
             "Copyright 2026 Robin Oertel</p>",

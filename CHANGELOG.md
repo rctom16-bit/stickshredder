@@ -4,6 +4,23 @@ All notable changes to StickShredder are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-11-17
+
+### Security
+
+- **Every partition of the Windows disk is now blocked, not just `C:`.** Previously the system guard compared drive letters only. A second partition on the same physical disk (e.g. a `D:` data partition) was listed as "INTERNAL" and could be selected; wiping it writes to the whole physical disk from sector 0 and destroys the Windows installation. The guard now works per physical disk. If the Windows disk cannot be determined, all non-USB disks are blocked.
+- **Identity re-check right before writing.** The disk behind `\\.\PhysicalDriveN` is re-read immediately before it is opened; if serial number, model or size changed (e.g. a stick was swapped after the list was refreshed) or it is now the system disk, the wipe is refused.
+- **All volumes of the target disk are dismounted**, not only the selected drive letter. If one cannot be dismounted, the wipe is refused instead of continuing with a warning. A failed volume lock no longer blocks the (forced) dismount.
+- **Selecting two partitions of the same disk wipes it once**, not twice.
+- Model and serial number are HTML-escaped in the confirmation dialog.
+
+### Fixed
+
+- Window title, About dialog and the certificate footer showed version 1.0.0. The version now comes from a single source.
+- Missing umlauts in the GUI ("Erkannte Datenträger", "Löschoptionen").
+- README Quick Start CLI examples used flags that do not exist (`--list`, `--drive`, `--cert-output`, `random3`, `vsitr`). They now match the real commands.
+- README build command pointed at `installer/stickshredder.spec`; the spec file is in the repository root.
+
 ## [1.1.0] - 2026-04-17
 
 ### Added

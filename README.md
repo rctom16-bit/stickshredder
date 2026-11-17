@@ -126,7 +126,7 @@ pip install -e ".[dev]"
 python -m src.main
 
 # Build standalone executable
-pyinstaller installer/stickshredder.spec
+pyinstaller stickshredder.spec
 ```
 
 The built executable will be in the `dist/` folder.
@@ -147,15 +147,17 @@ The built executable will be in the `dist/` folder.
 ### CLI
 
 ```bash
-# List connected USB devices
-stickshredder --list
+# List connected devices
+stickshredder list
 
 # Wipe drive E: with 3-pass random overwrite
-stickshredder --drive E: --method random3
+stickshredder wipe --device E: --method standard --operator "Your Name"
 
-# Wipe with BSI VSITR method and save certificate to a specific path
-stickshredder --drive E: --method vsitr --cert-output "C:\Certificates\wipe_2026-04-16.pdf"
+# Wipe with the BSI VSITR method and save the certificate to a specific folder
+stickshredder wipe --device E: --method bsi --operator "Your Name" --output-dir "C:\Certificates"
 ```
+
+Methods: `zero` (1 pass), `standard` (3-pass random), `bsi` (BSI VSITR, 7 passes), `custom` (with `--passes` and `--pattern`). Run `stickshredder wipe --help` for all options.
 
 > **Note:** Administrator privileges are required. Right-click and select "Run as administrator" or use an elevated terminal.
 
@@ -271,7 +273,7 @@ For a detailed discussion, see [docs/SECURITY.md](docs/SECURITY.md).
 
 ### Can I wipe my system drive?
 
-**No, by design.** StickShredder explicitly refuses to wipe any drive that contains the active Windows installation or any mounted system partition. It is intended exclusively for removable USB media.
+**No, by design.** StickShredder refuses to wipe the physical disk that holds the active Windows installation — including every other partition on that disk (e.g. a `D:` data partition next to `C:`). If it cannot tell which disk Windows is on, it blocks all internal disks. Right before writing, it re-checks that the disk is still the one you selected and dismounts every volume on it.
 
 ### Which file systems are supported?
 
@@ -440,7 +442,7 @@ pip install -e ".[dev]"
 python -m src.main
 
 # Eigenständige .exe erstellen
-pyinstaller installer/stickshredder.spec
+pyinstaller stickshredder.spec
 ```
 
 Die erstellte Datei befindet sich im Ordner `dist/`.
@@ -461,15 +463,17 @@ Die erstellte Datei befindet sich im Ordner `dist/`.
 #### CLI
 
 ```bash
-# Angeschlossene USB-Geräte auflisten
-stickshredder --list
+# Angeschlossene Datenträger auflisten
+stickshredder list
 
 # Laufwerk E: mit 3-Pass Random-Überschreibung löschen
-stickshredder --drive E: --method random3
+stickshredder wipe --device E: --method standard --operator "Ihr Name"
 
-# Mit BSI VSITR-Methode löschen und Zertifikat an bestimmtem Pfad speichern
-stickshredder --drive E: --method vsitr --cert-output "C:\Zertifikate\wipe_2026-04-16.pdf"
+# Mit BSI VSITR-Methode löschen und Zertifikat in einem bestimmten Ordner speichern
+stickshredder wipe --device E: --method bsi --operator "Ihr Name" --output-dir "C:\Zertifikate"
 ```
+
+Methoden: `zero` (1 Durchgang), `standard` (3-Pass Random), `bsi` (BSI VSITR, 7 Durchgänge), `custom` (mit `--passes` und `--pattern`). Alle Optionen: `stickshredder wipe --help`.
 
 > **Hinweis:** Administratorrechte sind erforderlich. Klicken Sie mit der rechten Maustaste und wählen Sie "Als Administrator ausführen" oder verwenden Sie ein Terminal mit erhöhten Rechten.
 
@@ -583,7 +587,7 @@ Eine ausführliche Erläuterung finden Sie in [docs/SECURITY.md](docs/SECURITY.m
 
 #### Kann ich mein Systemlaufwerk löschen?
 
-**Nein, absichtlich nicht.** StickShredder verweigert ausdrücklich das Löschen eines Laufwerks, das die aktive Windows-Installation oder eine eingebundene Systempartition enthält. Es ist ausschließlich für Wechseldatenträger (USB) vorgesehen.
+**Nein, absichtlich nicht.** StickShredder verweigert das Löschen der physischen Platte, auf der die aktive Windows-Installation liegt — einschließlich aller weiteren Partitionen dieser Platte (z. B. eine Datenpartition `D:` neben `C:`). Kann es nicht feststellen, auf welcher Platte Windows liegt, sperrt es alle internen Platten. Unmittelbar vor dem Schreiben prüft es erneut, ob die Platte noch die ausgewählte ist, und hängt alle ihre Volumes aus.
 
 #### Welche Dateisysteme werden unterstützt?
 
