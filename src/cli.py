@@ -4,16 +4,26 @@ from __future__ import annotations
 
 import argparse
 import csv
+import getpass
 import shutil
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import NoReturn
+from urllib.parse import parse_qs
 
+import core.config as settings
 from cert.generator import CertificateData, format_capacity, generate_certificate
-from core.config import AppConfig, get_next_cert_number, DEFAULT_CERT_OUTPUT
-from core.log import audit_log, log_wipe_to_csv, read_wipe_history, setup_logging
+from cert.payload import PAYLOAD_LABELS, RESULT_LABELS
+from cert.signing import SigningKey, SigningKeyError, b64url_decode
+from cert.verify_cert import (
+    TrustStore, extract_key_from_keycard_pdf, extract_token_from_pdf, verify_token,
+)
+from core.config import AppConfig, get_next_cert_number, DEFAULT_CERT_OUTPUT, load_signing_key
+from core.log import (
+    audit_log, log_wipe_to_csv, read_wipe_history, setup_logging, verify_wipe_history,
+)
 from wipe.device import (
     DeviceInfo, UnsafeTargetError, list_devices, open_physical_drive, close_drive,
     get_drive_size, is_safe_to_wipe, lock_volume, unlock_volume, prepare_target,
@@ -286,6 +296,32 @@ def _success(message: str) -> None:
     print(_c(_Ansi.GREEN, f"  {message}"))
 
 
+def _printable(value: object) -> str:
+    """Text safe for the terminal: control characters (e.g. ANSI escapes
+    smuggled into a certificate field) are replaced, never interpreted."""
+    return "".join(ch if ch.isprintable() else "�" for ch in str(value))
+
+
+def _load_key_or_die() -> SigningKey:
+    """This installation's signing key (created on first use), or exit 1."""
+    try:
+        return load_signing_key()
+    except (SigningKeyError, OSError) as exc:
+        _die(
+            "Der Signaturschlüssel kann nicht geladen werden; es wurde nichts verändert. / "
+            f"The signing key cannot be loaded; nothing was changed.\n  {exc}\n"
+            "  Abhilfe / Fix: stickshredder key import <exportierte Schlüsseldatei / "
+            "exported key file>"
+        )
+
+
+def _load_trust_store_or_die() -> TrustStore:
+    try:
+        return TrustStore.load(settings.TRUST_FILE)
+    except ValueError as exc:
+        _die(str(exc))
+
+
 def _physical_label(device_id: str) -> str:
     """Short label for a physical drive id, e.g. r'\\\\.\\PhysicalDrive2' -> 'PD2'."""
     import re
@@ -395,6 +431,11 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     language: str = getattr(args, "language", "") or config.cert_language
     verify_mode: str = getattr(args, "verify", "sample") or "sample"
     auto_yes: bool = getattr(args, "yes", False)
+
+    # -- Signing key ----------------------------------------------------------
+    # Loaded before anything is touched: every certificate is signed, and a
+    # key problem must stop the run while the data is still intact.
+    signing_key = _load_key_or_die()
 
     # -- Display device details ---------------------------------------------
     print(_c(_Ansi.BOLD, "  Device Details:"))
@@ -737,6 +778,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         secure_erase_method=(
             secure_erase_result.method if secure_erase_result else ""
         ),
+        wipe_success=bool(wipe_result.success),
     )
     try:
         cert_data = CertificateData(**cert_kwargs)
@@ -748,23 +790,12 @@ def cmd_wipe(args: argparse.Namespace) -> None:
             "bad_sector_count", "bad_sector_bytes", "bad_sector_offsets",
             "hidden_area_probed", "hpa_present", "hpa_hidden_bytes",
             "dco_present", "dco_hidden_bytes",
-            "secure_erase_used", "secure_erase_method",
+            "secure_erase_used", "secure_erase_method", "wipe_success",
         ):
             cert_kwargs.pop(_key, None)
         cert_data = CertificateData(**cert_kwargs)
 
-    cert_filename = f"SS-{cert_number:06d}_{device.serial_number or 'UNKNOWN'}_{cert_date.strftime('%Y%m%d')}.pdf"
-    cert_path = str(Path(output_dir) / cert_filename)
-
-    _info("Generating certificate...")
-    try:
-        abs_cert_path = generate_certificate(cert_data, cert_path)
-        _success(f"Certificate saved: {abs_cert_path}")
-    except Exception as exc:
-        _warn(f"Certificate generation failed: {exc}")
-        abs_cert_path = ""
-
-    # -- Log to CSV ---------------------------------------------------------
+    # -- Log to the history first: its chain hash goes into the certificate ---
     duration_seconds = int((wipe_result.end_time - wipe_result.start_time).total_seconds())
     if hidden is not None and hidden.supported:
         _ha_parts = []
@@ -775,7 +806,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         hidden_area_str = "+".join(_ha_parts) if _ha_parts else "NONE"
     else:
         hidden_area_str = "n/a"
-    log_wipe_to_csv({
+    history_row = {
         "date": cert_date.strftime("%Y-%m-%d %H:%M:%S"),
         "device_model": device.model or "Unknown",
         "serial_number": device.serial_number or "N/A",
@@ -796,7 +827,26 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         "reformat_label": format_result.label if format_result and format_result.success else "",
         "bad_sectors": str(wipe_result.bad_sector_count),
         "hidden_area": hidden_area_str,
-    })
+    }
+    try:
+        history_hash = log_wipe_to_csv(history_row)
+    except (OSError, ValueError) as exc:
+        _warn(f"Verlauf konnte nicht geschrieben werden / History could not be written: {exc}")
+        history_hash = ""
+
+    # -- Generate the signed certificate ------------------------------------
+    cert_filename = f"SS-{cert_number:06d}_{device.serial_number or 'UNKNOWN'}_{cert_date.strftime('%Y%m%d')}.pdf"
+    cert_path = str(Path(output_dir) / cert_filename)
+
+    _info("Generating certificate...")
+    try:
+        abs_cert_path = generate_certificate(
+            cert_data, cert_path, signing_key=signing_key, history_hash=history_hash
+        )
+        _success(f"Certificate saved: {abs_cert_path}")
+    except Exception as exc:
+        _warn(f"Certificate generation failed: {exc}")
+        abs_cert_path = ""
 
     # -- Summary ------------------------------------------------------------
     print()
@@ -839,6 +889,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     print(f"    Certificate:     SS-{cert_number:06d}")
     if abs_cert_path:
         print(f"    Certificate PDF: {abs_cert_path}")
+        print(f"    Signed by key:   {signing_key.fingerprint()}")
     print(f"    Operator:        {args.operator}")
     print()
 
@@ -848,6 +899,10 @@ def cmd_wipe(args: argparse.Namespace) -> None:
 def cmd_history(args: argparse.Namespace) -> None:
     """Handle the 'history' command."""
     export_file: str | None = getattr(args, "export", None)
+
+    if getattr(args, "verify", False):
+        _verify_history()
+        return
 
     history = read_wipe_history()
 
@@ -928,6 +983,269 @@ def cmd_history(args: argparse.Namespace) -> None:
     print(f"\n  {len(history)} record(s) total.\n")
 
 
+def _cert_label(value: object) -> str:
+    try:
+        return f"SS-{int(str(value)):06d}"
+    except ValueError:
+        return _printable(value)
+
+
+def _verify_history() -> None:
+    """``history --verify``: exit 0 when the chain is intact, 1 at the first break."""
+    check = verify_wipe_history()
+    print(_c(_Ansi.BOLD + _Ansi.CYAN, "\n  StickShredder -- Verlauf prüfen / Verify history"))
+    print()
+    if check.total == 0:
+        _info("Kein Verlauf vorhanden / No history found.")
+        print()
+        return
+    if check.legacy:
+        _info(
+            f"{check.legacy} ältere(r) Eintrag/Einträge ohne Prüfsumme (vor Version 2.0) "
+            f"übersprungen / older entr(y/ies) without checksum (before 2.0) skipped."
+        )
+    if check.ok:
+        _success(
+            f"Verlauf unverändert / History unchanged — {check.checked} "
+            f"Eintrag/Einträge geprüft / entr(y/ies) checked."
+        )
+        print()
+        return
+    row = check.broken_entry or {}
+    print(_c(
+        _Ansi.RED + _Ansi.BOLD,
+        f"  Verlauf verändert / History changed — Eintrag / entry {check.broken_row} "
+        f"von / of {check.total}",
+    ))
+    print(f"    Datum / Date:              {_printable(row.get('date') or '-')}")
+    print(f"    Zertifikat / Certificate:  {_cert_label(row.get('cert_number') or '-')}")
+    print(f"    Seriennummer / Serial:     {_printable(row.get('serial_number') or '-')}")
+    print(f"    Grund / Reason:            {check.reason}")
+    print()
+    sys.exit(1)
+
+
+# -- Command: verify-cert ---------------------------------------------------
+
+_VERIFY_EXIT = {"trusted": 0, "unknown_key": 1, "invalid": 2}
+_VERIFY_MODE_TEXT = {
+    "none": "Nicht durchgeführt / Skipped",
+    "sample": "Stichprobe / Sample",
+    "full": "Vollständig / Full",
+}
+
+
+def _payload_value(key: str, value: object) -> str:
+    if key == "n":
+        return _cert_label(value)
+    if key == "dc" and isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return f"{format_capacity(value)} ({value:,} Bytes)".replace(",", ".")
+    if key == "r" and value in RESULT_LABELS:
+        de, en = RESULT_LABELS[value]
+        return f"{de} / {en}"
+    if key == "vm" and value in _VERIFY_MODE_TEXT:
+        return _VERIFY_MODE_TEXT[value]
+    if key == "h" and not value:
+        return "-"
+    return _printable(value)
+
+
+def cmd_verify_cert(args: argparse.Namespace) -> None:
+    """Check a certificate PDF's signature. Exit 0 trusted, 1 unknown key, 2 invalid."""
+    print(_c(_Ansi.BOLD + _Ansi.CYAN, "\n  StickShredder -- Zertifikat prüfen / Verify certificate"))
+    print()
+    try:
+        pdf_bytes = Path(args.pdf).read_bytes()
+    except OSError as exc:
+        print(_c(_Ansi.RED + _Ansi.BOLD, f"  Datei nicht lesbar / Cannot read file: {exc}"))
+        sys.exit(2)
+
+    token = extract_token_from_pdf(pdf_bytes)
+    if token is None:
+        print(_c(_Ansi.RED + _Ansi.BOLD, "  Ungültig oder verändert / Invalid or altered"))
+        _info(
+            "Kein Prüfcode im PDF gefunden — das Zertifikat ist nicht signiert oder kein "
+            "StickShredder-Zertifikat. / No verification code found in the PDF — the "
+            "certificate is unsigned or not a StickShredder certificate."
+        )
+        print()
+        sys.exit(2)
+
+    try:
+        trusted = TrustStore.load(settings.TRUST_FILE).as_dict()
+    except ValueError as exc:
+        _warn(f"{exc} — es wird ohne vertraute Schlüssel geprüft / checking without trusted keys.")
+        trusted = {}
+
+    outcome = verify_token(token, trusted)
+    if outcome.status == "trusted":
+        print(_c(_Ansi.GREEN + _Ansi.BOLD, f"  {_printable(outcome.reason)}"))
+    elif outcome.status == "unknown_key":
+        print(_c(_Ansi.YELLOW + _Ansi.BOLD, f"  {outcome.reason}"))
+    else:
+        print(_c(_Ansi.RED + _Ansi.BOLD, "  Ungültig oder verändert / Invalid or altered"))
+        _info(f"Grund / Reason: {outcome.reason}")
+
+    rows: list[tuple[str, str]] = []
+    if outcome.fingerprint:
+        rows.append(("Fingerabdruck / Fingerprint", outcome.fingerprint))
+    for key, (de, en) in PAYLOAD_LABELS.items():
+        if outcome.payload and key not in ("k", "v") and key in outcome.payload:
+            rows.append((f"{de} / {en}", _payload_value(key, outcome.payload[key])))
+    if rows:
+        width = max(len(label) for label, _ in rows)
+        print()
+        for label, value in rows:
+            print(f"    {label:<{width}}  {value}")
+    print()
+    sys.exit(_VERIFY_EXIT[outcome.status])
+
+
+# -- Command: keycard -------------------------------------------------------
+
+def cmd_keycard(args: argparse.Namespace) -> None:
+    """Write the key card PDF for this installation's signing key."""
+    from cert.keycard import generate_keycard
+
+    config = AppConfig.load()
+    key = _load_key_or_die()
+    language = args.language or config.cert_language or "de"
+    if args.output:
+        output = Path(args.output)
+    else:
+        prefix = key.fingerprint()[:9]
+        output = Path(config.cert_output_dir) / f"StickShredder-Schluesselkarte_{prefix}.pdf"
+    if not config.company.name:
+        _warn(
+            "Kein Firmenname eingestellt — er fehlt auf der Karte / No company name set — "
+            "it is missing on the card."
+        )
+    try:
+        path = generate_keycard(key, config.company.name, output, language=language)
+    except (OSError, ValueError) as exc:
+        _die(f"Schlüsselkarte konnte nicht erstellt werden / Key card could not be created: {exc}")
+    _success(f"Schlüsselkarte gespeichert / Key card saved: {Path(path).resolve()}")
+    _info(f"Fingerabdruck / Fingerprint: {key.fingerprint()}")
+    print()
+
+
+# -- Command: trust ---------------------------------------------------------
+
+def _key_from_source(source: str) -> tuple[bytes, str]:
+    """Public key (and a suggested name) from a key-card URL, key-card PDF or base64url key."""
+    text = source.strip()
+    candidate = Path(text)
+    if text.lower().endswith(".pdf") or candidate.is_file():
+        try:
+            public_key = extract_key_from_keycard_pdf(candidate.read_bytes())
+        except OSError as exc:
+            raise ValueError(f"Datei nicht lesbar / Cannot read file: {exc}") from exc
+        if public_key is None:
+            raise ValueError(
+                "Keine Schlüsselkarte von StickShredder / Not a StickShredder key card"
+            )
+        return public_key, ""
+    name = ""
+    key_text = text
+    if "#" in text:
+        params = parse_qs(text.split("#", 1)[1], keep_blank_values=True)
+        key_text = (params.get("key") or [""])[0]
+        name = (params.get("name") or [""])[0].strip()
+    try:
+        public_key = b64url_decode(key_text)
+    except ValueError:
+        public_key = b""
+    if len(public_key) != 32:
+        raise ValueError(
+            "Kein gültiger Schlüssel (Schlüsselkarten-Link, Schlüsselkarte als PDF oder "
+            "Base64url-Schlüssel erwartet) / Not a valid key (expected a key-card link, a "
+            "key-card PDF or a base64url key)"
+        )
+    return public_key, name
+
+
+def cmd_trust(args: argparse.Namespace) -> None:
+    """Manage the list of trusted signing keys."""
+    store = _load_trust_store_or_die()
+
+    if args.trust_command == "add":
+        try:
+            public_key, suggested = _key_from_source(args.source)
+        except ValueError as exc:
+            _die(str(exc))
+        name = (args.name or suggested).strip()
+        if not name:
+            _die("Bitte einen Namen angeben: --name NAME / Please give a name: --name NAME")
+        fingerprint = store.add(public_key, name)
+        _success(f"Vertrauter Schlüssel gespeichert / Trusted key saved: {_printable(name)}")
+        _info(f"Fingerabdruck / Fingerprint: {fingerprint}")
+        _info(
+            "Fingerabdruck mit der Schlüsselkarte vergleichen / Compare the fingerprint "
+            "with the key card."
+        )
+        return
+
+    if args.trust_command == "remove":
+        if not store.remove(args.fingerprint):
+            _die(
+                f"Schlüssel nicht gefunden / Key not found: {_printable(args.fingerprint)}"
+            )
+        _success(f"Schlüssel entfernt / Key removed: {args.fingerprint.strip().upper()}")
+        return
+
+    # list
+    trusted = store.as_dict()
+    print(_c(_Ansi.BOLD + _Ansi.CYAN, "\n  StickShredder -- Vertraute Schlüssel / Trusted keys"))
+    print()
+    if not trusted:
+        _info("Keine vertrauten Schlüssel / No trusted keys.")
+    for fingerprint, name in trusted.items():
+        print(f"    {fingerprint}  {_printable(name)}")
+    print()
+
+
+# -- Command: key -----------------------------------------------------------
+
+def cmd_key(args: argparse.Namespace) -> None:
+    """Export or import this installation's signing key (password protected)."""
+    path = Path(args.path)
+    if args.key_command == "export":
+        if path.exists():
+            _die(f"Datei existiert bereits / File already exists: {path}")
+        key = _load_key_or_die()
+        password = getpass.getpass("  Passwort für die Exportdatei / Password for the export file: ")
+        if not password:
+            _die("Passwort darf nicht leer sein / Password must not be empty")
+        if getpass.getpass("  Passwort wiederholen / Repeat password: ") != password:
+            _die("Passwörter stimmen nicht überein / Passwords do not match")
+        if len(password) < 10:
+            _warn("Kurzes Passwort — mindestens 10 Zeichen empfohlen / Short password — "
+                  "at least 10 characters recommended.")
+        try:
+            key.export_protected(path, password)
+        except (OSError, ValueError) as exc:
+            _die(f"Export fehlgeschlagen / Export failed: {exc}")
+        audit_log(f"Signing key exported: fingerprint={key.fingerprint()} path={path.resolve()}")
+        _success(f"Schlüssel exportiert / Key exported: {path.resolve()}")
+        _info(f"Fingerabdruck / Fingerprint: {key.fingerprint()}")
+        _warn("Die Datei enthält den privaten Schlüssel — sicher aufbewahren / The file "
+              "contains the private key — keep it safe.")
+        return
+
+    # import
+    password = getpass.getpass("  Passwort der Schlüsseldatei / Password of the key file: ")
+    try:
+        key = SigningKey.import_protected(path, password, settings.KEY_DIR)
+    except SigningKeyError as exc:
+        _die(str(exc))
+    settings.trust_own_key(key)
+    audit_log(f"Signing key imported: fingerprint={key.fingerprint()} path={path.resolve()}")
+    _success("Schlüssel importiert / Key imported.")
+    _info(f"Fingerabdruck / Fingerprint: {key.fingerprint()}")
+    _info("Ein vorheriger Schlüssel wurde als signing_key.<Zeit>.bak gesichert / A previous "
+          "key was kept as signing_key.<time>.bak.")
+
+
 # -- Argument parser --------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -944,6 +1262,12 @@ def build_parser() -> argparse.ArgumentParser:
             '  stickshredder wipe --device E: --method custom --passes 5 --pattern random --operator "Robin"\n'
             '  stickshredder history\n'
             '  stickshredder history --export out.csv\n'
+            '  stickshredder history --verify\n'
+            '  stickshredder verify-cert SS-000042_0901C3F2_20261117.pdf\n'
+            '  stickshredder keycard --language both\n'
+            '  stickshredder trust add "https://rctom16-bit.github.io/stickshredder/verify/#key=...&name=..."\n'
+            '  stickshredder trust list\n'
+            '  stickshredder key export D:\\backup\\stickshredder-key.pem\n'
         ),
     )
 
@@ -1104,7 +1428,84 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="Export wipe history to a CSV file",
     )
+    sub_history.add_argument(
+        "--verify",
+        action="store_true",
+        help="Check the history's hash chain for changed, removed or inserted entries "
+             "(exit 0 unchanged, 1 changed)",
+    )
     sub_history.set_defaults(func=cmd_history)
+
+    # ── verify-cert ───────────────────────────────────────────────────────
+    sub_verify = subparsers.add_parser(
+        "verify-cert",
+        help="Check the signature of a certificate PDF",
+        description="Check a signed deletion certificate. Exit code 0: genuine and key "
+                    "trusted; 1: signature valid but key unknown (compare the fingerprint "
+                    "with the key card); 2: invalid, altered or unsigned.",
+    )
+    sub_verify.add_argument("pdf", metavar="PDF", help="Certificate PDF file")
+    sub_verify.set_defaults(func=cmd_verify_cert)
+
+    # ── keycard ───────────────────────────────────────────────────────────
+    sub_keycard = subparsers.add_parser(
+        "keycard",
+        help="Create the key card PDF for this installation's signing key",
+        description="Create the one-page key card (company, fingerprint, QR code) to file "
+                    "with the IT documentation or hand to the auditor.",
+    )
+    sub_keycard.add_argument(
+        "--output", metavar="PATH", default="",
+        help="Output PDF (default: certificate folder from config)",
+    )
+    sub_keycard.add_argument(
+        "--language", choices=["de", "en", "both"], default="",
+        help="Card language: de, en or both (default: certificate language from config)",
+    )
+    sub_keycard.set_defaults(func=cmd_keycard)
+
+    # ── trust ─────────────────────────────────────────────────────────────
+    sub_trust = subparsers.add_parser(
+        "trust",
+        help="Manage trusted signing keys",
+        description="Keys in this list make certificates verify as genuine.",
+    )
+    trust_sub = sub_trust.add_subparsers(
+        dest="trust_command", metavar="{add,list,remove}", required=True,
+    )
+    trust_add = trust_sub.add_parser(
+        "add", help="Trust a key from a key-card link, key-card PDF or base64url key",
+    )
+    trust_add.add_argument(
+        "source", metavar="KEY",
+        help="Key-card URL (…/verify/#key=…&name=…), key-card PDF or base64url public key",
+    )
+    trust_add.add_argument(
+        "--name", default="", metavar="NAME",
+        help="Display name (default: the name in the key-card link)",
+    )
+    trust_sub.add_parser("list", help="List trusted keys")
+    trust_remove = trust_sub.add_parser("remove", help="Remove a trusted key")
+    trust_remove.add_argument("fingerprint", metavar="FINGERPRINT")
+    sub_trust.set_defaults(func=cmd_trust)
+
+    # ── key ───────────────────────────────────────────────────────────────
+    sub_key = subparsers.add_parser(
+        "key",
+        help="Export or import the signing key (password protected)",
+        description="Move this installation's signing key to another PC so both sign "
+                    "with the same key. The password is asked for interactively.",
+    )
+    key_sub = sub_key.add_subparsers(
+        dest="key_command", metavar="{export,import}", required=True,
+    )
+    key_export = key_sub.add_parser("export", help="Write the key to a password-protected file")
+    key_export.add_argument("path", metavar="PATH")
+    key_import = key_sub.add_parser(
+        "import", help="Replace this installation's key with an exported one",
+    )
+    key_import.add_argument("path", metavar="PATH")
+    sub_key.set_defaults(func=cmd_key)
 
     return parser
 
@@ -1113,6 +1514,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     """CLI entry point."""
+    # Redirected output uses the ANSI code page on Windows; replace characters
+    # it cannot encode (e.g. in a certificate's company name) instead of crashing.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     setup_logging()
 
     parser = build_parser()

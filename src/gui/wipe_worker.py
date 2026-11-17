@@ -10,9 +10,10 @@ from typing import TYPE_CHECKING, Any
 
 from PySide6.QtCore import QThread, Signal
 
-from core.config import AppConfig, get_next_cert_number
+from core.config import AppConfig, get_next_cert_number, load_signing_key
 from core.log import audit_log, log_wipe_to_csv
 from cert.generator import CertificateData, generate_certificate, format_capacity
+from cert.signing import SigningKeyError
 from wipe.device import (
     DeviceInfo,
     UnsafeTargetError,
@@ -186,6 +187,23 @@ class WipeWorker(QThread):
 
     def run(self) -> None:  # noqa: C901
         """Main worker loop — processes each device sequentially."""
+        # Every certificate is signed. Load the key before touching any
+        # device so a key problem stops the run while the data is intact.
+        try:
+            signing_key = load_signing_key()
+        except (SigningKeyError, OSError) as exc:
+            message = (
+                "Signaturschlüssel kann nicht geladen werden, es wurde nichts gelöscht / "
+                f"Signing key cannot be loaded, nothing was wiped: {exc}"
+            )
+            audit_log(f"WipeWorker: {message}")
+            self.status_message.emit(message)
+            for idx in range(len(self.devices)):
+                self.error.emit(idx, message)
+                self.device_completed.emit(idx, False, "")
+            self.all_completed.emit()
+            return
+
         for idx, device in enumerate(self.devices):
             if self.is_cancelled:
                 self.status_message.emit("Wipe cancelled by user.")
@@ -562,6 +580,22 @@ class WipeWorker(QThread):
                     company_address=self.config.company.address,
                     company_logo_path=self.config.company.logo_path,
                     language=self.config.cert_language,
+                    # The signed payload states how verification ran and
+                    # whether the wipe itself succeeded (three-level result).
+                    verify_method=(
+                        getattr(verify_result, "method", "none") or "none"
+                        if verify_result is not None else "none"
+                    ),
+                    verify_bytes=int(getattr(verify_result, "bytes_verified", 0) or 0),
+                    verify_pattern=str(getattr(verify_result, "expected_pattern", "") or ""),
+                    verify_error_count=int(getattr(verify_result, "error_count", 0) or 0),
+                    verify_mismatch_offsets=list(
+                        getattr(verify_result, "mismatch_offsets", None) or []
+                    ),
+                    verify_duration_seconds=float(
+                        getattr(verify_result, "duration_seconds", 0.0) or 0.0
+                    ),
+                    wipe_success=bool(wipe_result.success),
                 )
 
                 try:
@@ -571,16 +605,8 @@ class WipeWorker(QThread):
                     # don't break the wipe pipeline on a transient ordering.
                     cert_data = CertificateData(**base_kwargs)
 
-                cert_filename = (
-                    f"SS-{cert_number:06d}_"
-                    f"{device.serial_number or 'unknown'}_"
-                    f"{datetime.now().strftime('%Y%m%d')}.pdf"
-                )
-                cert_dir = self.config.cert_output_dir
-                cert_path = str(Path(cert_dir) / cert_filename)
-                cert_path = generate_certificate(cert_data, cert_path)
-
-                # 10. Log to CSV
+                # 10. Log to the history first — its chain hash goes into
+                # the signed certificate (same order as the CLI).
                 duration = (
                     wipe_result.end_time - wipe_result.start_time
                 ).total_seconds()
@@ -590,7 +616,7 @@ class WipeWorker(QThread):
                     verification_text = "FAILED"
                 else:
                     verification_text = "SKIPPED"
-                log_wipe_to_csv({
+                history_row = {
                     "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "device_model": device.model,
                     "serial_number": device.serial_number,
@@ -605,7 +631,24 @@ class WipeWorker(QThread):
                     "verification": verification_text,
                     "cert_number": cert_number,
                     "bad_sectors": wipe_result.bad_sector_count,
-                })
+                }
+                try:
+                    history_hash = log_wipe_to_csv(history_row)
+                except (OSError, ValueError) as exc:
+                    audit_log(f"History could not be written: {exc}")
+                    history_hash = ""
+
+                cert_filename = (
+                    f"SS-{cert_number:06d}_"
+                    f"{device.serial_number or 'unknown'}_"
+                    f"{datetime.now().strftime('%Y%m%d')}.pdf"
+                )
+                cert_dir = self.config.cert_output_dir
+                cert_path = str(Path(cert_dir) / cert_filename)
+                cert_path = generate_certificate(
+                    cert_data, cert_path,
+                    signing_key=signing_key, history_hash=history_hash,
+                )
 
                 # Overall device success: wipe must succeed, and if verify
                 # ran, it must succeed too. "Verify not run" is neutral.

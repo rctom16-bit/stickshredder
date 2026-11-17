@@ -203,7 +203,7 @@ def test_secure_erase_runs_and_marks_certificate():
 
     captured = {}
 
-    def _capture_cert(cert_data, path):
+    def _capture_cert(cert_data, path, **_signing):
         captured["cert"] = cert_data
         return "C:/tmp/fake.pdf"
 
@@ -245,7 +245,7 @@ def test_hpa_detection_flows_to_certificate():
 
     captured = {}
 
-    def _capture_cert(cert_data, path):
+    def _capture_cert(cert_data, path, **_signing):
         captured["cert"] = cert_data
         return "C:/tmp/fake.pdf"
 
@@ -342,7 +342,7 @@ def test_cert_uses_wipe_result_passes_not_method_passes():
     captured_cert: dict = {}
     captured_csv: dict = {}
 
-    def _capture_cert(cert_data, cert_path):
+    def _capture_cert(cert_data, cert_path, **_signing):
         captured_cert["data"] = cert_data
         return cert_path
 
