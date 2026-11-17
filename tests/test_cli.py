@@ -385,3 +385,22 @@ def test_cmd_wipe_aborts_before_opening_disk_when_target_unsafe():
 
     assert exc_info.value.code != 0
     opener.assert_not_called()
+
+
+def test_cmd_wipe_confirmation_names_every_letter_of_the_disk(capsys, monkeypatch):
+    """1.1.1: 'wipe --device E:' on a disk with E: and G: must warn about both."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_REQUIRED_WIPE_ARGS)
+    dev = _fake_device()
+    dev.disk_letters = ["E:", "G:"]
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "n")
+
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[dev]),
+        patch.object(cli, "audit_log"),
+    ):
+        with pytest.raises(SystemExit):
+            cli.cmd_wipe(args)
+
+    assert "E:, G:" in capsys.readouterr().out

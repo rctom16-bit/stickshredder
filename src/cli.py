@@ -359,7 +359,9 @@ def cmd_wipe(args: argparse.Namespace) -> None:
 
     # -- Display device details ---------------------------------------------
     print(_c(_Ansi.BOLD, "  Device Details:"))
-    print(f"    Drive Letter:    {device.drive_letter}")
+    # Wiping writes the whole physical disk: name every letter on it.
+    all_letters = ", ".join(getattr(device, "disk_letters", None) or [device.drive_letter])
+    print(f"    Drive Letters:   {all_letters}")
     print(f"    Model:           {device.model or 'Unknown'}")
     print(f"    Serial:          {device.serial_number or 'N/A'}")
     print(f"    Capacity:        {_format_size_short(device.capacity_bytes)} ({device.capacity_bytes:,} bytes)")
@@ -400,7 +402,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     # -- Confirmation 1 -----------------------------------------------------
     if not auto_yes:
         print(_c(_Ansi.RED + _Ansi.BOLD,
-               f"  ALL DATA on {device.drive_letter} ({device.model or 'Unknown'}) "
+               f"  ALL DATA on {all_letters} ({device.model or 'Unknown'}) "
                f"will be PERMANENTLY DESTROYED."))
         print()
         resp = input("  Are you sure? [y/N] ").strip().lower()

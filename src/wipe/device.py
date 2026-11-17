@@ -8,6 +8,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Optional
 
+import pythoncom
 import wmi
 
 from core.log import audit_log
@@ -111,7 +112,32 @@ class DeviceInfo:
 # ── WMI helpers ────────────────────────────────────────────────────────
 
 def _get_wmi_connection() -> wmi.WMI:
+    # WMI is COM: every thread must initialise COM before using it. The GUI
+    # calls prepare_target() from the WipeWorker QThread; without this the
+    # re-check failed there and refused every real wipe. Safe to call
+    # repeatedly on the same thread.
+    pythoncom.CoInitialize()
     return wmi.WMI()
+
+
+def _storage_system_disks() -> set[int]:
+    """Disk numbers the Windows storage stack flags as boot or system disk.
+
+    IsSystem marks the disk holding the EFI/system partition the PC actually
+    booted from — which can be a different disk than the one with Windows
+    on it. Best-effort: returns an empty set if the query fails (the
+    Windows-folder check still applies).
+    """
+    try:
+        pythoncom.CoInitialize()
+        storage = wmi.WMI(namespace=r"root\Microsoft\Windows\Storage")
+        return {
+            int(d.Number) for d in storage.MSFT_Disk()
+            if d.IsSystem or d.IsBoot
+        }
+    except Exception as exc:  # noqa: BLE001
+        audit_log(f"Storage system-disk query failed: {exc}")
+        return set()
 
 
 def _system_drive_letter() -> str:
@@ -173,7 +199,23 @@ def _system_disk_indices(c: wmi.WMI) -> set[int] | None:
     except Exception as exc:  # noqa: BLE001 — fail closed below
         audit_log(f"System disk lookup failed: {exc}")
         return None
-    return indices or None
+    if not indices:
+        return None
+    return indices | _storage_system_disks()
+
+
+def _letters_on_disk(c: wmi.WMI, index: int) -> list[str]:
+    """Drive letters currently mounted from partitions of physical disk ``index``."""
+    partition_ids = {
+        assoc.Dependent.DeviceID
+        for assoc in c.Win32_DiskDriveToDiskPartition()
+        if int(assoc.Antecedent.Index) == index
+    }
+    return sorted({
+        assoc.Dependent.DeviceID.upper()
+        for assoc in c.Win32_LogicalDiskToPartition()
+        if assoc.Antecedent.DeviceID in partition_ids
+    })
 
 
 def _connection_type_from_interface(interface_type: str | None) -> str:
@@ -524,6 +566,9 @@ def prepare_target(device: DeviceInfo) -> None:
             (d for d in c.Win32_DiskDrive() if int(d.Index) == index), None
         )
         sys_indices = _system_disk_indices(c)
+        # Re-read the letters now: one added since listing must be
+        # dismounted too, one that moved to another disk must not be.
+        letters = _letters_on_disk(c, index)
     except UnsafeTargetError:
         raise
     except Exception as exc:  # noqa: BLE001 — fail closed
@@ -551,9 +596,7 @@ def prepare_target(device: DeviceInfo) -> None:
             f"{device.device_id} ist die Systemplatte / is the system disk"
         )
 
-    for letter in device.disk_letters or [device.drive_letter]:
-        if not letter:
-            continue
+    for letter in letters:
         try:
             dismount_volume(letter)
         except OSError as exc:

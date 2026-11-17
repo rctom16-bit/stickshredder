@@ -11,7 +11,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - **Every partition of the Windows disk is now blocked, not just `C:`.** Previously the system guard compared drive letters only. A second partition on the same physical disk (e.g. a `D:` data partition) was listed as "INTERNAL" and could be selected; wiping it writes to the whole physical disk from sector 0 and destroys the Windows installation. The guard now works per physical disk. If the Windows disk cannot be determined, all non-USB disks are blocked.
 - **Identity re-check right before writing.** The disk behind `\\.\PhysicalDriveN` is re-read immediately before it is opened; if serial number, model or size changed (e.g. a stick was swapped after the list was refreshed) or it is now the system disk, the wipe is refused.
 - **All volumes of the target disk are dismounted**, not only the selected drive letter. If one cannot be dismounted, the wipe is refused instead of continuing with a warning. A failed volume lock no longer blocks the (forced) dismount.
-- **Selecting two partitions of the same disk wipes it once**, not twice.
+- **The disk the PC booted from is blocked too**, even when it is not the disk Windows is on (e.g. the EFI partition of an older install on a second internal disk). Uses the Windows storage stack's boot/system flags.
+- The drive letters of the target disk are re-read right before dismounting, so a partition mounted after the list was refreshed is dismounted as well, and a letter that moved to another disk is left alone.
+- **Selecting two partitions of the same disk wipes it once**, not twice. The CLI confirmation now names every drive letter on the disk, not just the one passed to `--device`.
 - Model and serial number are HTML-escaped in the confirmation dialog.
 
 ### Fixed

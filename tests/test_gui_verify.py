@@ -697,7 +697,7 @@ def test_worker_refuses_real_device_when_target_unsafe(qtbot, app_config):
     from wipe.methods import ZeroFill
 
     device = DeviceInfo(
-        drive_letter="E:", device_id=r"\.\PhysicalDrive7", model="Stick",
+        drive_letter="E:", device_id=r"\\.\PhysicalDrive7", model="Stick",
         serial_number="SN7", capacity_bytes=1024**3, filesystem="FAT32",
         connection_type="USB", is_removable=True, is_system_drive=False,
         disk_letters=["E:"],

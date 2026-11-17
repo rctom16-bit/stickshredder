@@ -210,13 +210,33 @@ def fake_env(monkeypatch):
     monkeypatch.setattr(device_mod, "_check_bitlocker", lambda _l: False)
     monkeypatch.setattr(device_mod, "_check_active_processes", lambda _l: False)
 
-    def run(layout: dict, sys_letter: str = "C:") -> dict:
+    def run(layout: dict, sys_letter: str = "C:", storage_system: set | None = None) -> dict:
         c = _fake_wmi(layout)
         monkeypatch.setattr(device_mod, "_get_wmi_connection", lambda: c)
         monkeypatch.setattr(device_mod, "_system_drive_letter", lambda: sys_letter)
+        monkeypatch.setattr(device_mod, "_storage_system_disks",
+                            lambda: set(storage_system or ()))
         return {d.drive_letter: d for d in list_devices()}
 
     return run
+
+
+def test_disk_with_the_active_boot_partition_is_blocked(fake_env):
+    # Windows on Disk 0, but the firmware booted from an EFI partition on
+    # internal Disk 1 (Windows storage stack reports IsSystem for Disk 1).
+    devs = fake_env({0: ("SCSI", ["C:"]), 1: ("IDE", ["D:"])}, storage_system={1})
+    assert devs["D:"].is_system_drive is True
+
+
+def test_wmi_connection_initialises_com_for_worker_threads(monkeypatch):
+    """The GUI runs prepare_target in a QThread; WMI needs COM there."""
+    import wipe.device as device_mod
+    calls: list[str] = []
+    monkeypatch.setattr(device_mod.pythoncom, "CoInitialize", lambda: calls.append("com"))
+    monkeypatch.setattr(device_mod.wmi, "WMI",
+                        lambda *a, **k: calls.append("wmi") or MagicMock())
+    device_mod._get_wmi_connection()
+    assert calls == ["com", "wmi"]
 
 
 def test_second_partition_on_system_disk_is_blocked(fake_env):
@@ -256,12 +276,33 @@ def gate(monkeypatch):
 
     monkeypatch.setattr(device_mod, "audit_log", lambda *a, **k: None)
     monkeypatch.setattr(device_mod, "_system_drive_letter", lambda: "C:")
+    monkeypatch.setattr(device_mod, "_storage_system_disks", lambda: set())
     c = _fake_wmi(USB_LAYOUT)
     monkeypatch.setattr(device_mod, "_get_wmi_connection", lambda: c)
     dismount = MagicMock()
     monkeypatch.setattr(device_mod, "dismount_volume", dismount)
-    dismount.wmi = c
+
+    def use_layout(layout: dict) -> None:
+        new_c = _fake_wmi(layout)
+        monkeypatch.setattr(device_mod, "_get_wmi_connection", lambda: new_c)
+
+    dismount.use_layout = use_layout
     return dismount
+
+
+def test_prepare_target_dismounts_letters_present_now(gate):
+    """A letter that appeared after listing (G:) is dismounted too."""
+    from wipe.device import prepare_target
+    prepare_target(_usb_target(disk_letters=["E:"]))
+    assert [c.args[0] for c in gate.call_args_list] == ["E:", "G:"]
+
+
+def test_prepare_target_skips_letter_now_on_another_disk(gate):
+    """A stale listed letter (H:, now on Disk 2) must not be force-dismounted."""
+    from wipe.device import prepare_target
+    gate.use_layout({0: ("SCSI", ["C:"]), 1: ("USB", ["E:"]), 2: ("USB", ["H:"])})
+    prepare_target(_usb_target(disk_letters=["E:", "H:"]))
+    assert [c.args[0] for c in gate.call_args_list] == ["E:"]
 
 
 def _usb_target(**overrides) -> DeviceInfo:
