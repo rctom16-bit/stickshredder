@@ -196,6 +196,11 @@ def _check_bitlocker(drive_letter: str) -> bool:
             ["manage-bde", "-status", drive_letter],
             capture_output=True,
             text=True,
+            # Console tools print in the OEM code page (cp850 on German
+            # Windows); decoding with the ANSI default crashed the reader
+            # thread on umlauts and left stdout empty.
+            encoding="oem",
+            errors="replace",
             timeout=10,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
@@ -217,6 +222,8 @@ def _check_active_processes(drive_letter: str) -> bool:
             ["handle.exe", "-accepteula", drive_letter + "\\"],
             capture_output=True,
             text=True,
+            encoding="oem",
+            errors="replace",
             timeout=10,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )

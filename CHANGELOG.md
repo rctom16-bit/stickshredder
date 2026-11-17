@@ -18,6 +18,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - Window title, About dialog and the certificate footer showed version 1.0.0. The version now comes from a single source.
 - Missing umlauts in the GUI ("Erkannte Datenträger", "Löschoptionen").
+- Device scan printed `UnicodeDecodeError` tracebacks on German Windows: `manage-bde` / `handle.exe` output is now decoded with the console (OEM) code page.
 - README Quick Start CLI examples used flags that do not exist (`--list`, `--drive`, `--cert-output`, `random3`, `vsitr`). They now match the real commands.
 - README build command pointed at `installer/stickshredder.spec`; the spec file is in the repository root.
 

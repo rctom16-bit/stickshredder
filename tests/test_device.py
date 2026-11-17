@@ -376,3 +376,33 @@ def _make_device(**overrides) -> DeviceInfo:
     )
     defaults.update(overrides)
     return DeviceInfo(**defaults)
+
+
+# ── German Windows: tool output with umlauts (1.1.1) ──────────────────
+
+def _run_emitting(payload: bytes):
+    """subprocess.run stand-in: runs a real child that writes raw bytes."""
+    import subprocess as sp
+
+    real_run = sp.run
+
+    def fake_run(_cmd, **kwargs):
+        code = f"import sys; sys.stdout.buffer.write({payload!r})"
+        return real_run([sys.executable, "-c", code], **kwargs)
+
+    return fake_run
+
+
+def test_bitlocker_probe_survives_non_ascii_output(monkeypatch):
+    import wipe.device as device_mod
+    # 0x81 is "ü" in the German OEM code page and undefined in cp1252.
+    monkeypatch.setattr(device_mod.subprocess, "run",
+                        _run_emitting(b"Verschl\x81sselung\r\nProtection On\r\n"))
+    assert device_mod._check_bitlocker("F:") is True
+
+
+def test_handle_probe_survives_non_ascii_output(monkeypatch):
+    import wipe.device as device_mod
+    monkeypatch.setattr(device_mod.subprocess, "run",
+                        _run_emitting(b"explorer.exe pid: 42 \x81 F:\\Users\r\n"))
+    assert device_mod._check_active_processes("F:") is True
