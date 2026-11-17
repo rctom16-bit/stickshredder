@@ -110,6 +110,9 @@ def _fake_wipe_result():
         error_message=None,
         verify_result=verify,
         zero_blank_appended=False,
+        bad_sector_count=0,
+        bad_sector_bytes=0,
+        bad_sector_offsets=[],
     )
 
 
@@ -164,6 +167,124 @@ def test_cmd_wipe_requires_admin_when_not_elevated():
 
 
 # ─────────────────────────────────────────────────────────────────────
+# v1.2: HPA/DCO detection + experimental ATA Secure Erase
+# ─────────────────────────────────────────────────────────────────────
+
+_SECURE_ERASE_ARGS = [
+    "wipe", "--device", "E:", "--method", "secure-erase",
+    "--operator", "Test Operator",
+]
+
+
+def _no_hidden_areas():
+    return SimpleNamespace(
+        supported=False, hpa_present=False, dco_present=False,
+        hpa_hidden_sectors=0, dco_hidden_sectors=0,
+    )
+
+
+def test_secure_erase_requires_experimental_flag():
+    """--method secure-erase without --experimental must abort (SystemExit)."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_SECURE_ERASE_ARGS + ["--yes"])
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[_fake_device()]),
+        patch.object(cli, "audit_log"),
+    ):
+        with pytest.raises(SystemExit):
+            cli.cmd_wipe(args)
+
+
+def test_secure_erase_runs_and_marks_certificate():
+    """With --experimental, cmd_wipe calls secure_erase() and flags the cert."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+
+    captured = {}
+
+    def _capture_cert(cert_data, path):
+        captured["cert"] = cert_data
+        return "C:/tmp/fake.pdf"
+
+    se_result = SimpleNamespace(
+        success=True, method="ata-secure-erase", supported=True,
+        frozen=False, duration_seconds=1.0, error=None,
+    )
+
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[_fake_device()]),
+        patch.object(cli, "prepare_target") as mock_gate,
+        patch.object(cli, "open_physical_drive", return_value=12345),
+        patch.object(cli, "close_drive"),
+        patch.object(cli, "lock_volume"),
+        patch.object(cli, "unlock_volume"),
+        patch.object(cli, "get_drive_size", return_value=1024 * 1024),
+        patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()),
+        patch.object(cli, "secure_erase", return_value=se_result) as mock_se,
+        patch.object(cli, "get_next_cert_number", return_value=1),
+        patch.object(cli, "generate_certificate", side_effect=_capture_cert),
+        patch.object(cli, "log_wipe_to_csv"),
+        patch.object(cli, "audit_log"),
+    ):
+        cli.cmd_wipe(args)
+
+    mock_gate.assert_called_once()
+    mock_se.assert_called_once()
+    cert = captured["cert"]
+    assert cert.secure_erase_used is True
+    assert cert.secure_erase_method == "ata-secure-erase"
+    assert cert.wipe_method.startswith("ATA Secure Erase")
+
+
+def test_hpa_detection_flows_to_certificate():
+    """A detected HPA must land on the certificate (hidden_area fields)."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_REQUIRED_WIPE_ARGS + ["--verify", "none", "--yes"])
+
+    captured = {}
+
+    def _capture_cert(cert_data, path):
+        captured["cert"] = cert_data
+        return "C:/tmp/fake.pdf"
+
+    fake_method = MagicMock()
+    fake_method.name = "ZeroFill"
+    fake_method.passes = 1
+    fake_method.sicherheitsstufe = "1-2"
+    fake_method.execute.return_value = _fake_wipe_result()
+
+    hidden = SimpleNamespace(
+        supported=True, hpa_present=True, hpa_hidden_sectors=2048 * 1024,
+        dco_present=False, dco_hidden_sectors=0,
+    )
+
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[_fake_device()]),
+        patch.object(cli, "_resolve_wipe_method", return_value=fake_method),
+        patch.object(cli, "prepare_target"),
+        patch.object(cli, "open_physical_drive", return_value=12345),
+        patch.object(cli, "close_drive"),
+        patch.object(cli, "lock_volume"),
+        patch.object(cli, "unlock_volume"),
+        patch.object(cli, "get_drive_size", return_value=1024 * 1024),
+        patch.object(cli, "detect_hidden_areas", return_value=hidden),
+        patch.object(cli, "get_next_cert_number", return_value=1),
+        patch.object(cli, "generate_certificate", side_effect=_capture_cert),
+        patch.object(cli, "log_wipe_to_csv"),
+        patch.object(cli, "audit_log"),
+    ):
+        cli.cmd_wipe(args)
+
+    cert = captured["cert"]
+    assert cert.hidden_area_probed is True
+    assert cert.hpa_present is True
+    assert cert.hpa_hidden_bytes == 2048 * 1024 * 512
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Certificate passes reflect wipe_result.passes (actual), not method.passes
 # ─────────────────────────────────────────────────────────────────────
 
@@ -193,6 +314,9 @@ def _fake_wipe_result_vsitr_with_blank():
         error_message=None,
         verify_result=verify,
         zero_blank_appended=True,
+        bad_sector_count=0,
+        bad_sector_bytes=0,
+        bad_sector_offsets=[],
     )
 
 
@@ -385,6 +509,81 @@ def test_cmd_wipe_aborts_before_opening_disk_when_target_unsafe():
 
     assert exc_info.value.code != 0
     opener.assert_not_called()
+
+
+def test_secure_erase_calls_prepare_target_first():
+    """--method secure-erase passes the same gate: when prepare_target
+    refuses, the disk is never opened and no ATA command is sent."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    opener = MagicMock(return_value=12345)
+
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[_fake_device()]),
+        patch.object(
+            cli, "prepare_target",
+            side_effect=cli.UnsafeTargetError("is the system disk"),
+        ),
+        patch.object(cli, "open_physical_drive", opener),
+        patch.object(cli, "close_drive"),
+        patch.object(cli, "secure_erase") as mock_se,
+        patch.object(cli, "audit_log"),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            cli.cmd_wipe(args)
+
+    assert exc_info.value.code != 0
+    opener.assert_not_called()
+    mock_se.assert_not_called()
+
+
+def test_reformat_rechecks_target_and_is_skipped_when_refused():
+    """Reformat writes a new partition table, so prepare_target runs again
+    right before it. A refusal skips the reformat; the wipe's certificate
+    is still issued."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_REQUIRED_WIPE_ARGS + ["--reformat", "exfat", "--yes"])
+
+    fake_method = MagicMock()
+    fake_method.name = "ZeroFill"
+    fake_method.passes = 1
+    fake_method.sicherheitsstufe = "1-2"
+    fake_method.execute.return_value = _fake_wipe_result()
+    fake_reformat = MagicMock(return_value=_fake_format_result())
+
+    import sys as _sys
+    import types as _types
+    fake_format_mod = _types.ModuleType("wipe.format")
+    fake_format_mod.reformat_drive = fake_reformat
+    _sys.modules["wipe.format"] = fake_format_mod
+
+    gate = MagicMock(side_effect=[None, cli.UnsafeTargetError("stick swapped")])
+    try:
+        with (
+            patch.object(cli, "is_admin", return_value=True),
+            patch.object(cli, "list_devices", return_value=[_fake_device()]),
+            patch.object(cli, "_resolve_wipe_method", return_value=fake_method),
+            patch.object(cli, "prepare_target", gate),
+            patch.object(cli, "open_physical_drive", return_value=12345),
+            patch.object(cli, "close_drive"),
+            patch.object(cli, "lock_volume"),
+            patch.object(cli, "unlock_volume"),
+            patch.object(cli, "get_drive_size", return_value=1024 * 1024),
+            patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()),
+            patch.object(cli, "get_next_cert_number", return_value=1),
+            patch.object(cli, "generate_certificate",
+                         return_value="C:/tmp/fake.pdf") as mock_cert,
+            patch.object(cli, "log_wipe_to_csv"),
+            patch.object(cli, "audit_log"),
+        ):
+            cli.cmd_wipe(args)
+    finally:
+        _sys.modules.pop("wipe.format", None)
+
+    assert gate.call_count == 2
+    fake_reformat.assert_not_called()
+    mock_cert.assert_called_once()
 
 
 def test_cmd_wipe_confirmation_names_every_letter_of_the_disk(capsys, monkeypatch):

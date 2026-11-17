@@ -104,6 +104,57 @@ def test_checkbox_default_unchecked(main_window):
     assert main_window.full_verify_cb.isChecked() is False
 
 
+# -- v1.2: internal-drive safety gate ----------------------------------------
+
+
+def _internal_device():
+    from wipe.device import DeviceInfo
+    return DeviceInfo(
+        drive_letter="",
+        device_id=r"\\.\PhysicalDrive2",
+        model="Seagate Internal 2TB",
+        serial_number="INT-DISK-1",
+        capacity_bytes=2 * 1024 ** 4,
+        filesystem="RAW",
+        connection_type="SATA",
+        is_removable=False,
+        is_system_drive=False,
+        is_internal=True,
+    )
+
+
+def test_allow_internal_checkbox_default_unchecked(main_window):
+    """The 'allow internal drives' opt-in must exist and start off."""
+    assert hasattr(main_window, "allow_internal_cb")
+    assert main_window.allow_internal_cb.isChecked() is False
+
+
+def test_internal_device_checkbox_disabled_without_optin(main_window):
+    """An internal drive is unselectable until the opt-in is ticked."""
+    main_window.devices = [_internal_device()]
+    main_window._populate_device_table()
+    assert len(main_window._device_checkboxes) == 1
+    assert main_window._device_checkboxes[0].isEnabled() is False
+
+    # Opt in -> the table re-renders and the checkbox becomes enabled.
+    main_window.allow_internal_cb.setChecked(True)
+    assert main_window._device_checkboxes[0].isEnabled() is True
+
+
+def test_wipe_refused_for_internal_without_optin(main_window):
+    """The safety gate must refuse an internal wipe when not opted in."""
+    main_window.devices = [_internal_device()]
+    main_window._populate_device_table()
+    # Programmatically select the (disabled) internal device.
+    main_window._device_checkboxes[0].setChecked(True)
+
+    with patch("gui.main_window.QMessageBox") as mock_box:
+        main_window._on_wipe_clicked()
+
+    assert mock_box.critical.called
+    assert main_window.worker is None
+
+
 def test_checkbox_has_bilingual_label_and_tooltip(main_window):
     """Label and tooltip must cover both DE and EN."""
     cb = main_window.full_verify_cb
@@ -718,3 +769,55 @@ def test_worker_refuses_real_device_when_target_unsafe(qtbot, app_config):
 
     assert results == [(0, False)]
     opener.assert_not_called()
+
+
+def test_worker_rechecks_target_before_reformat(qtbot, app_config):
+    """Reformat rewrites the partition table of a real disk, so the worker runs
+    prepare_target again right before it. A refusal skips the reformat; the
+    wipe itself stays successful and its certificate is still issued."""
+    from types import SimpleNamespace
+    from gui.wipe_worker import WipeWorker
+    from wipe.device import DeviceInfo, UnsafeTargetError
+    from wipe.methods import WipeResult
+
+    device = DeviceInfo(
+        drive_letter="E:", device_id=r"\\.\PhysicalDrive7", model="Stick",
+        serial_number="SN7", capacity_bytes=1024**2, filesystem="FAT32",
+        connection_type="USB", is_removable=True, is_system_drive=False,
+        disk_letters=["E:"],
+    )
+    now = datetime.now()
+    method = MagicMock()
+    method.name = "ZeroFill"
+    method.passes = 1
+    method.sicherheitsstufe = "H-2"
+    method.execute.return_value = WipeResult(
+        method_name="ZeroFill", passes=1, start_time=now, end_time=now,
+        bytes_written=1024**2, success=True, error_message=None,
+    )
+    no_hidden = SimpleNamespace(supported=False, hpa_present=False, dco_present=False,
+                                hpa_hidden_sectors=0, dco_hidden_sectors=0)
+    gate = MagicMock(side_effect=[None, UnsafeTargetError("swapped")])
+    reformat = MagicMock()
+    with patch("gui.wipe_worker.prepare_target", gate), \
+         patch("gui.wipe_worker.open_physical_drive", return_value=1), \
+         patch("gui.wipe_worker.get_drive_size", return_value=1024**2), \
+         patch("gui.wipe_worker.detect_hidden_areas", return_value=no_hidden), \
+         patch("gui.wipe_worker.unlock_volume"), \
+         patch("gui.wipe_worker.close_drive"), \
+         patch("gui.wipe_worker.get_next_cert_number", return_value=1), \
+         patch("gui.wipe_worker.generate_certificate", return_value="x.pdf") as cert, \
+         patch("gui.wipe_worker.log_wipe_to_csv"), \
+         patch("gui.wipe_worker.audit_log"), \
+         patch("wipe.format.reformat_drive", reformat):
+        worker = WipeWorker(devices=[device], wipe_method=method, config=app_config,
+                            verify_mode="none", reformat="exfat")
+        results: list[tuple[int, bool]] = []
+        worker.device_completed.connect(lambda i, ok, _p: results.append((i, ok)))
+        with qtbot.waitSignal(worker.all_completed, timeout=5000):
+            worker.start()
+
+    assert gate.call_count == 2
+    reformat.assert_not_called()
+    cert.assert_called_once()
+    assert results == [(0, True)]

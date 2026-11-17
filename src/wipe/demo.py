@@ -8,11 +8,18 @@ import random
 import tempfile
 import time
 from datetime import datetime
+from typing import Callable
 
 from core.log import audit_log
 from wipe.device import DeviceInfo
 from wipe.format import FormatResult
-from wipe.methods import WipeMethod, WipeResult, ProgressCallback
+from wipe.methods import (
+    WipeMethod,
+    WipeResult,
+    ProgressCallback,
+    _BadSectorTracker,
+    DEFAULT_MAX_BAD_FRACTION,
+)
 from wipe.verify import VerifyResult, VerifyProgressCallback
 
 SECTOR_SIZE = 512
@@ -77,23 +84,35 @@ def create_demo_file(size_bytes: int = DEFAULT_DEMO_SIZE, path: str = "") -> str
 
 def _write_zero_pass(f, file_size: int, block_size: int,
                      progress_callback: ProgressCallback | None,
-                     pass_num: int, total_passes: int) -> int:
-    """Write zeros across the whole file. Returns bytes written."""
-    f.seek(0)
+                     pass_num: int, total_passes: int,
+                     bad_block_simulator: Callable[[int], bool] | None = None,
+                     bad_tracker: "_BadSectorTracker | None" = None) -> int:
+    """Write zeros across the whole file. Returns bytes written.
+
+    Bad-sector tolerant (mirrors WipeMethod._run_single_pass): a block for which
+    ``bad_block_simulator(offset)`` returns True is recorded and skipped (its old
+    data is left in place so a follow-up full-verify can detect it).
+    """
     pass_start = time.monotonic()
     bytes_done = 0
-    remaining = file_size
+    offset = 0
     zero_block = b"\x00" * block_size
-    while remaining > 0:
-        chunk = min(block_size, remaining)
+    while offset < file_size:
+        chunk = min(block_size, file_size - offset)
+        if bad_block_simulator is not None and bad_block_simulator(offset):
+            if bad_tracker is not None:
+                bad_tracker.record(offset, chunk)
+            offset += chunk
+            continue
+        f.seek(offset)
         data = zero_block if chunk == block_size else b"\x00" * chunk
         f.write(data)
         bytes_done += chunk
-        remaining -= chunk
+        offset += chunk
         if progress_callback is not None:
             elapsed = time.monotonic() - pass_start
-            speed = (bytes_done / (1024 * 1024)) / elapsed if elapsed > 0 else 0.0
-            progress_callback(pass_num, total_passes, bytes_done, file_size, speed)
+            speed = (offset / (1024 * 1024)) / elapsed if elapsed > 0 else 0.0
+            progress_callback(pass_num, total_passes, offset, file_size, speed)
     return bytes_done
 
 
@@ -106,6 +125,8 @@ def wipe_demo_file(
     reformat: str = "none",
     reformat_label: str = "USB",
     reformat_partition: str = "MBR",
+    bad_block_simulator: Callable[[int], bool] | None = None,
+    max_bad_fraction: float = DEFAULT_MAX_BAD_FRACTION,
 ) -> WipeResult:
     """Simulate a full wipe (+ optional verify) on a local file.
 
@@ -125,6 +146,7 @@ def wipe_demo_file(
     block_size = 1_048_576
     zero_blank_appended = False
     verify_result: VerifyResult | None = None
+    bad_tracker = _BadSectorTracker()
 
     file_size = os.path.getsize(path)
 
@@ -144,23 +166,29 @@ def wipe_demo_file(
                 audit_log(f"Demo pass {pass_num}/{total_passes} started ({method.name})")
                 pass_start = time.monotonic()
 
-                f.seek(0)
                 bytes_this_pass = 0
-                remaining = file_size
+                offset = 0
 
-                while remaining > 0:
-                    chunk = min(block_size, remaining)
+                while offset < file_size:
+                    chunk = min(block_size, file_size - offset)
+                    if bad_block_simulator is not None and bad_block_simulator(offset):
+                        # Simulated unwritable block: record it and skip, leaving
+                        # the old data in place (a follow-up full-verify detects it).
+                        bad_tracker.record(offset, chunk)
+                        offset += chunk
+                        continue
+                    f.seek(offset)
                     pattern = method.get_pattern(pass_num, chunk)
                     f.write(pattern)
                     written = len(pattern)
                     bytes_this_pass += written
                     total_written += written
-                    remaining -= written
+                    offset += written
 
                     if progress_callback is not None:
                         elapsed = time.monotonic() - pass_start
-                        speed = (bytes_this_pass / (1024 * 1024)) / elapsed if elapsed > 0 else 0.0
-                        progress_callback(pass_num, total_passes, bytes_this_pass, file_size, speed)
+                        speed = (offset / (1024 * 1024)) / elapsed if elapsed > 0 else 0.0
+                        progress_callback(pass_num, total_passes, offset, file_size, speed)
 
                 f.flush()
                 os.fsync(f.fileno())
@@ -178,6 +206,8 @@ def wipe_demo_file(
                 bytes_this_pass = _write_zero_pass(
                     f, file_size, block_size, progress_callback,
                     blank_pass, total_passes,
+                    bad_block_simulator=bad_block_simulator,
+                    bad_tracker=bad_tracker,
                 )
                 total_written += bytes_this_pass
                 f.flush()
@@ -192,6 +222,23 @@ def wipe_demo_file(
         success = False
         error_message = str(exc)
         audit_log(f"Demo wipe error: method={method.name}, error={exc}")
+
+    # Bad-sector ceiling (mirrors WipeMethod.execute): tolerate and report a few
+    # unwritable blocks, but fail the wipe if most of the drive is unwritable.
+    bad_fraction = bad_tracker.bytes_failed / file_size if file_size > 0 else 0.0
+    if success and bad_fraction > max_bad_fraction:
+        success = False
+        error_message = (
+            f"Too many unwritable sectors: {bad_tracker.count} regions, "
+            f"{bad_tracker.bytes_failed} bytes ({bad_fraction:.1%} of the drive). "
+            f"The drive is likely failing — wipe not trustworthy."
+        )
+        audit_log(error_message)
+    elif bad_tracker.count > 0:
+        audit_log(
+            f"Demo wipe completed with {bad_tracker.count} unwritable region(s), "
+            f"{bad_tracker.bytes_failed} bytes total."
+        )
 
     if success and verify_mode != "none":
         expected = _expected_final_pattern(method, append_zero_blank)
@@ -282,6 +329,9 @@ def wipe_demo_file(
         error_message=error_message,
         verify_result=verify_result,
         zero_blank_appended=zero_blank_appended,
+        bad_sector_count=bad_tracker.count,
+        bad_sector_bytes=bad_tracker.bytes_failed,
+        bad_sector_offsets=sorted(bad_tracker.offsets),
     )
     # Attach format_result via setattr so we don't hard-couple to Agent D's
     # WipeResult schema change. If the field doesn't exist as a dataclass

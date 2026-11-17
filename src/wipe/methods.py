@@ -7,7 +7,7 @@ import ctypes.wintypes as wintypes
 import os
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable
 
@@ -34,6 +34,14 @@ FILE_BEGIN = 0
 # drown Qt's signal bus on a 1 MB block size (which would otherwise yield
 # 64k callbacks per gigabyte).
 PROGRESS_INTERVAL = 50 * 1024 * 1024
+
+# Bad-sector handling (v1.2). A WriteFile failure on a block is recorded and
+# skipped rather than aborting the whole wipe, so a drive with a few unwritable
+# sectors can still be wiped and the defects reported on the certificate. We
+# keep at most this many byte offsets, and fail the wipe outright only if more
+# than DEFAULT_MAX_BAD_FRACTION of the drive turns out to be unwritable.
+MAX_BAD_SECTOR_OFFSETS = 100
+DEFAULT_MAX_BAD_FRACTION = 0.10
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -70,6 +78,34 @@ class WipeResult:
     verify_result: "VerifyResult | None" = None  # populated when verify_mode != "none"
     zero_blank_appended: bool = False  # true if a zero-blanking pass was added for verifiability
     format_result: "FormatResult | None" = None  # populated when reformat requested
+    # Bad-sector accounting (v1.2). count = number of unwritable regions (blocks);
+    # bad_sector_bytes = their total size; bad_sector_offsets = first 100 byte
+    # offsets. A wipe can succeed with bad_sector_count > 0 (the defects are
+    # reported on the certificate); only exceeding the bad-fraction ceiling fails it.
+    bad_sector_count: int = 0
+    bad_sector_bytes: int = 0
+    bad_sector_offsets: list[int] = field(default_factory=list)
+
+
+@dataclass
+class _BadSectorTracker:
+    """Accumulates unwritable block offsets across all passes (deduped by offset)."""
+
+    bytes_failed: int = 0
+    offsets: list[int] = field(default_factory=list)
+    _seen: set[int] = field(default_factory=set)
+
+    @property
+    def count(self) -> int:
+        return len(self._seen)
+
+    def record(self, offset: int, size: int) -> None:
+        if offset in self._seen:
+            return  # same block failed on an earlier pass — count it once
+        self._seen.add(offset)
+        self.bytes_failed += size
+        if len(self.offsets) < MAX_BAD_SECTOR_OFFSETS:
+            self.offsets.append(offset)
 
 
 ProgressCallback = Callable[[int, int, int, int, float], None]
@@ -136,36 +172,75 @@ class WipeMethod(ABC):
         total_passes: int,
         pattern_factory: Callable[[int, int], bytes],
         progress_callback: ProgressCallback | None,
+        bad_tracker: _BadSectorTracker | None = None,
     ) -> int:
-        """Run a single overwrite pass over the whole drive. Returns bytes written."""
+        """Run a single overwrite pass over the whole drive. Returns bytes written.
+
+        Bad-sector tolerant: a WriteFile failure on a block does not abort the
+        pass. The offset is recorded in ``bad_tracker``, the pass seeks past the
+        failed region and continues. This lets a drive with a handful of
+        unwritable sectors still be wiped (and the defects reported) instead of
+        failing the whole operation on the first bad block. The returned byte
+        count covers only the blocks that were written successfully.
+        """
         if not _set_file_pointer(handle, 0):
             raise OSError("SetFilePointerEx failed: could not seek to start")
 
         bytes_this_pass = 0
-        remaining = drive_size
+        offset = 0
         pass_start = time.monotonic()
         last_progress_bytes = 0
+        needs_seek = False  # set after a failure so we re-seek before the next write
 
-        while remaining > 0:
-            chunk = min(block_size, remaining)
+        while offset < drive_size:
+            chunk = min(block_size, drive_size - offset)
+
+            # On the happy path Windows auto-advances the file pointer after a
+            # successful WriteFile, so we only re-seek on error-recovery paths.
+            if needs_seek:
+                if not _set_file_pointer(handle, offset):
+                    # Can't even position to this block — treat it as bad and
+                    # skip ahead. Leave needs_seek set so the next iteration
+                    # re-seeks again.
+                    if bad_tracker is not None:
+                        bad_tracker.record(offset, chunk)
+                    offset += chunk
+                    continue
+                needs_seek = False
+
             pattern = pattern_factory(pass_num, chunk)
-            written = _write_block(handle, pattern)
+            try:
+                written = _write_block(handle, pattern)
+            except OSError as exc:
+                # A cancellation InterruptedError must propagate untouched.
+                if isinstance(exc, InterruptedError):
+                    raise
+                # Bad block: record it, skip past it, force a re-seek, keep going.
+                if bad_tracker is not None:
+                    bad_tracker.record(offset, chunk)
+                offset += chunk
+                needs_seek = True
+                continue
+
             bytes_this_pass += written
-            remaining -= written
+            offset += written
 
             if progress_callback is not None:
                 # Fire every PROGRESS_INTERVAL bytes, and always at end-of-pass.
-                if (bytes_this_pass - last_progress_bytes >= PROGRESS_INTERVAL
-                        or bytes_this_pass == drive_size):
+                # Progress tracks `offset` (position on the drive) rather than
+                # bytes_written so the bar still reaches 100% when bad sectors
+                # were skipped.
+                if (offset - last_progress_bytes >= PROGRESS_INTERVAL
+                        or offset >= drive_size):
                     elapsed = time.monotonic() - pass_start
                     speed = (
-                        (bytes_this_pass / (1024 * 1024)) / elapsed
+                        (offset / (1024 * 1024)) / elapsed
                         if elapsed > 0 else 0.0
                     )
                     progress_callback(
-                        pass_num, total_passes, bytes_this_pass, drive_size, speed,
+                        pass_num, total_passes, offset, drive_size, speed,
                     )
-                    last_progress_bytes = bytes_this_pass
+                    last_progress_bytes = offset
 
         return bytes_this_pass
 
@@ -177,12 +252,14 @@ class WipeMethod(ABC):
         progress_callback: ProgressCallback | None = None,
         verify_mode: str = "none",  # "none" | "sample" | "full"
         verify_progress_callback: VerifyProgressCallback | None = None,
+        max_bad_fraction: float = DEFAULT_MAX_BAD_FRACTION,
     ) -> WipeResult:
         start_time = datetime.now()
         total_written = 0
         error_message: str | None = None
         success = True
         pass_num = 0  # track for error reporting
+        bad_tracker = _BadSectorTracker()
 
         # Decide up front whether a zero-blanking pass needs to be appended so
         # post-wipe verification has a deterministic expected pattern.
@@ -211,6 +288,7 @@ class WipeMethod(ABC):
                     total_passes=total_passes,
                     pattern_factory=self.get_pattern,
                     progress_callback=progress_callback,
+                    bad_tracker=bad_tracker,
                 )
                 total_written += bytes_this_pass
                 audit_log(f"Pass {pass_num}/{total_passes} completed ({self.name}), "
@@ -232,6 +310,7 @@ class WipeMethod(ABC):
                         total_passes=total_passes,
                         pattern_factory=lambda _pn, size: b"\x00" * size,
                         progress_callback=progress_callback,
+                        bad_tracker=bad_tracker,
                     )
                 except OSError as exc:
                     # Let cancel bubble up untouched; anything else is a real
@@ -267,9 +346,30 @@ class WipeMethod(ABC):
             error_message = str(exc)
             audit_log(f"Wipe error: method={self.name}, pass={pass_num}, error={exc}")
 
+        # Bad-sector ceiling: a handful of unwritable sectors is tolerated and
+        # reported on the certificate, but a drive that is mostly unwritable is
+        # a real failure, not a successful wipe.
+        bad_fraction = (
+            bad_tracker.bytes_failed / drive_size if drive_size > 0 else 0.0
+        )
+        if success and bad_fraction > max_bad_fraction:
+            success = False
+            error_message = (
+                f"Too many unwritable sectors: {bad_tracker.count} regions, "
+                f"{bad_tracker.bytes_failed} bytes ({bad_fraction:.1%} of the "
+                f"drive). The drive is likely failing — wipe not trustworthy."
+            )
+            audit_log(error_message)
+        elif bad_tracker.count > 0:
+            audit_log(
+                f"Wipe completed with {bad_tracker.count} unwritable region(s), "
+                f"{bad_tracker.bytes_failed} bytes total — reported on certificate."
+            )
+
         end_time = datetime.now()
         audit_log(f"Wipe finished: method={self.name}, success={success}, "
-                  f"total_bytes_written={total_written}")
+                  f"total_bytes_written={total_written}, "
+                  f"bad_sectors={bad_tracker.count}")
 
         result = WipeResult(
             method_name=self.name,
@@ -281,6 +381,9 @@ class WipeMethod(ABC):
             error_message=error_message,
             verify_result=None,
             zero_blank_appended=append_zero_blank,
+            bad_sector_count=bad_tracker.count,
+            bad_sector_bytes=bad_tracker.bytes_failed,
+            bad_sector_offsets=sorted(bad_tracker.offsets),
         )
 
         # Post-wipe verification — only if wipe succeeded and verify was requested.

@@ -120,24 +120,38 @@ def _get_wmi_connection() -> wmi.WMI:
     return wmi.WMI()
 
 
-def _storage_system_disks() -> set[int]:
+_STORAGE_NAMESPACE = r"root\Microsoft\Windows\Storage"
+
+
+def _get_storage_wmi_connection() -> wmi.WMI:
+    """WMI connection to the Windows storage stack (MSFT_Disk, MSFT_Partition).
+
+    Same rule as _get_wmi_connection(): initialise COM on this thread first.
+    """
+    pythoncom.CoInitialize()
+    return wmi.WMI(namespace=_STORAGE_NAMESPACE)
+
+
+def _storage_system_disks() -> set[int] | None:
     """Disk numbers the Windows storage stack flags as boot or system disk.
 
-    IsSystem marks the disk holding the EFI/system partition the PC actually
-    booted from — which can be a different disk than the one with Windows
-    on it. Best-effort: returns an empty set if the query fails (the
-    Windows-folder check still applies).
+    IsBoot marks the disk with the running Windows' boot volume; IsSystem
+    marks the disk holding the EFI/system partition the PC actually booted
+    from — which can be a different disk than the one with Windows on it.
+
+    The MBR "active" flag of a partition is deliberately not used: bootable
+    USB installer sticks carry it, and it says nothing about the running
+    Windows. Returns None when the query fails, so callers can fail closed.
     """
     try:
-        pythoncom.CoInitialize()
-        storage = wmi.WMI(namespace=r"root\Microsoft\Windows\Storage")
+        storage = _get_storage_wmi_connection()
         return {
             int(d.Number) for d in storage.MSFT_Disk()
             if d.IsSystem or d.IsBoot
         }
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — caller fails closed on None
         audit_log(f"Storage system-disk query failed: {exc}")
-        return set()
+        return None
 
 
 def _system_drive_letter() -> str:
@@ -177,12 +191,15 @@ def _physical_drive_index_for_letter(
 
 
 def _system_disk_indices(c: wmi.WMI) -> set[int] | None:
-    """Return the physical disk indices hosting the Windows volume.
+    """Return the physical disk indices that must never be written.
 
-    Every partition on these disks must be treated as system: wiping any
-    of them writes to the whole physical disk, i.e. destroys the Windows
-    installation. Returns None when the mapping cannot be determined, so
-    callers can fail closed.
+    The union of (a) the disk(s) holding the Windows volume and (b) every
+    disk the storage stack reports as boot or system disk. Every partition
+    on these disks counts as system: wiping any of them writes the whole
+    physical disk, i.e. destroys Windows or leaves the PC unbootable.
+
+    Returns None when either part cannot be determined, so callers can fail
+    closed (see _blocked_as_system).
     """
     sys_letter = _system_drive_letter().upper()
     try:
@@ -200,8 +217,34 @@ def _system_disk_indices(c: wmi.WMI) -> set[int] | None:
         audit_log(f"System disk lookup failed: {exc}")
         return None
     if not indices:
+        audit_log(f"Windows disk for {sys_letter} could not be determined")
         return None
-    return indices | _storage_system_disks()
+    storage = _storage_system_disks()
+    if storage is None:
+        return None
+    return indices | storage
+
+
+def _current_system_disks() -> set[int] | None:
+    """_system_disk_indices() on a fresh WMI connection; None on any failure."""
+    try:
+        return _system_disk_indices(_get_wmi_connection())
+    except Exception as exc:  # noqa: BLE001 — caller fails closed on None
+        audit_log(f"System disk lookup failed: {exc}")
+        return None
+
+
+def _blocked_as_system(
+    index: int, connection: str, sys_indices: set[int] | None
+) -> bool:
+    """True if physical disk ``index`` must be treated as a system disk.
+
+    When the system layout is unknown (None/empty), every non-USB disk is
+    blocked: an internal disk might be the one Windows lives or boots on.
+    """
+    if not sys_indices:
+        return connection != "USB"
+    return index in sys_indices
 
 
 def _letters_on_disk(c: wmi.WMI, index: int) -> list[str]:
@@ -284,6 +327,7 @@ def _check_active_processes(drive_letter: str) -> bool:
 def list_devices() -> list[DeviceInfo]:
     """Enumerate removable (and optionally internal non-system) storage devices."""
     devices: list[DeviceInfo] = []
+    seen_phys_indices: set[int] = set()
     sys_letter = _system_drive_letter()
 
     try:
@@ -301,10 +345,12 @@ def list_devices() -> list[DeviceInfo]:
         audit_log(f"Failed to enumerate physical disks: {exc}")
         return devices
 
+    # Disks that must never be wiped: the Windows disk plus every disk the
+    # storage stack reports as boot/system disk. None = unknown layout.
     sys_indices = _system_disk_indices(c)
     audit_log(
         f"System disk indices: {sorted(sys_indices)}" if sys_indices
-        else "System disk could not be determined — all non-USB disks blocked"
+        else "System/boot disk could not be determined — all non-USB disks blocked"
     )
 
     # Walk logical disks (the ones with drive letters)
@@ -335,11 +381,10 @@ def list_devices() -> list[DeviceInfo]:
             )
 
             # Block every partition of the Windows disk, not just C:.
-            # If the Windows disk is unknown, block every non-USB disk.
+            # If the layout is unknown, block every non-USB disk.
             is_system = (
                 drive_letter.upper() == sys_letter.upper()
-                or (phys_index in sys_indices if sys_indices
-                    else connection != "USB")
+                or _blocked_as_system(phys_index, connection, sys_indices)
             )
             is_internal = connection != "USB" and not is_removable
 
@@ -380,6 +425,7 @@ def list_devices() -> list[DeviceInfo]:
                 friendly_name=friendly,
             )
             devices.append(info)
+            seen_phys_indices.add(phys_index)
             audit_log(
                 f"Detected device: {friendly} | {device_id} | "
                 f"{info.capacity_gb} GB | {connection} | "
@@ -395,13 +441,129 @@ def list_devices() -> list[DeviceInfo]:
             )
             continue
 
+    # Also surface physical disks that have NO drive letter (raw, unpartitioned,
+    # or unmounted internal data disks). Without this, an internal disk that
+    # Windows did not assign a letter — exactly the kind of disk wiped in a
+    # drive caddy — would be invisible to the tool.
+    for phys_index, phys_disk in disk_map.items():
+        if phys_index in seen_phys_indices:
+            continue
+        try:
+            interface_type = getattr(phys_disk, "InterfaceType", None)
+            connection = _connection_type_from_interface(interface_type)
+            media_type = (getattr(phys_disk, "MediaType", "") or "").lower()
+
+            is_removable = connection == "USB" or "removable" in media_type
+            is_system = _blocked_as_system(phys_index, connection, sys_indices)
+            is_internal = connection != "USB" and not is_removable
+
+            serial = (getattr(phys_disk, "SerialNumber", "") or "").strip()
+            model = (getattr(phys_disk, "Model", "") or "").strip()
+            capacity = int(getattr(phys_disk, "Size", 0) or 0)
+
+            part_count = 0
+            try:
+                for _assoc in c.Win32_DiskDriveToDiskPartition():
+                    if _assoc.Antecedent.Index == phys_index:
+                        part_count += 1
+            except Exception:
+                pass
+
+            device_id = f"\\\\.\\PhysicalDrive{phys_index}"
+            friendly = (
+                f"{model} (PhysicalDrive{phys_index}, no letter)"
+                if model else f"PhysicalDrive{phys_index} (no letter)"
+            )
+
+            info = DeviceInfo(
+                drive_letter="",
+                device_id=device_id,
+                model=model,
+                serial_number=serial,
+                capacity_bytes=capacity,
+                filesystem="RAW",
+                connection_type=connection,
+                is_removable=is_removable,
+                is_system_drive=is_system,
+                is_internal=is_internal,
+                has_bitlocker=False,  # no mounted volume to probe
+                has_active_processes=False,
+                partition_count=part_count,
+                friendly_name=friendly,
+            )
+            devices.append(info)
+            seen_phys_indices.add(phys_index)
+            audit_log(
+                f"Detected letterless device: {friendly} | {device_id} | "
+                f"{info.capacity_gb} GB | {connection} | "
+                f"removable={is_removable} | system={is_system} | internal={is_internal}"
+            )
+        except Exception as exc:
+            audit_log(
+                f"Error processing letterless disk {phys_index}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            continue
+
+    # Every letter on the same physical disk (empty for letterless disks).
     letters_by_disk: dict[str, list[str]] = {}
     for d in devices:
-        letters_by_disk.setdefault(d.device_id, []).append(d.drive_letter.upper())
+        if d.drive_letter:
+            letters_by_disk.setdefault(d.device_id, []).append(d.drive_letter.upper())
     for d in devices:
-        d.disk_letters = sorted(letters_by_disk[d.device_id])
+        d.disk_letters = sorted(letters_by_disk.get(d.device_id, []))
 
     return devices
+
+
+def is_safe_to_wipe(device: DeviceInfo, allow_internal: bool = False) -> tuple[bool, str]:
+    """Central safety gate: decide whether a device may be wiped.
+
+    Returns ``(safe, reason)``. ``reason`` is empty when safe, otherwise a
+    human-readable explanation of the refusal. The CLI and GUI must call this
+    before opening a device for writing.
+
+    Rules:
+      * The Windows system disk is never wipeable.
+      * Internal / non-removable disks are refused unless ``allow_internal``.
+      * Fail-safe: even with ``allow_internal``, an internal disk is refused
+        when StickShredder cannot determine which disks hold Windows or boot
+        the PC — because that unknown disk *might* be the one we are about
+        to wipe. The layout is re-read here, not taken from the listing.
+
+    prepare_target() still runs right before the disk is written.
+    """
+    system_reason = (
+        "Das ist die Windows-Systemplatte und kann nie gelöscht werden. / "
+        "This is the Windows system drive and can never be wiped."
+    )
+    if device.is_system_drive:
+        return False, system_reason
+    if device.is_internal:
+        if not allow_internal:
+            return False, (
+                "Interne (fest eingebaute) Platte: nur mit „Interne Festplatten "
+                "erlauben“ löschbar. / This is an internal (non-removable) drive. "
+                "Internal drives are refused by default — enable 'allow internal "
+                "drives' to wipe it."
+            )
+        sys_indices = _current_system_disks()
+        if not sys_indices:
+            return False, (
+                "Interne Platte verweigert: Es ließ sich nicht sicher bestimmen, "
+                "auf welcher Platte Windows liegt bzw. von welcher der PC startet. / "
+                "Refusing to wipe an internal drive: StickShredder could not "
+                "reliably determine which disk holds Windows or boots the PC "
+                "(system / boot layout unknown), so it cannot guarantee this is "
+                "not the system disk (fail-safe)."
+            )
+        try:
+            index = _physical_index(device.device_id)
+        except UnsafeTargetError as exc:
+            return False, str(exc)
+        if index in sys_indices:
+            return False, system_reason
+    return True, ""
 
 
 # ── Raw disk access helpers ────────────────────────────────────────────
@@ -410,8 +572,31 @@ def open_physical_drive(device_id: str) -> int:
     """Open a physical drive for raw read/write. Requires admin privileges.
 
     Returns the Win32 HANDLE as an integer.
+    Raises PermissionError if device_id is the system physical drive.
     Raises OSError on failure.
     """
+    # Last-line-of-defence: refuse to open the physical disk that hosts Windows,
+    # even if the caller did not check is_system_drive first.
+    # prepare_target() is the authoritative gate (it also fails closed on an
+    # unknown layout); this check only refuses disks known to be system.
+    try:
+        # Extract trailing integer from e.g. r"\\.\PhysicalDrive3" -> 3
+        drive_index = int(device_id.rstrip().split("PhysicalDrive")[-1])
+        sys_indices = _current_system_disks() or set()
+        if drive_index in sys_indices:
+            audit_log(
+                f"Refused to open system drive: {device_id} is PhysicalDrive{drive_index}"
+            )
+            raise PermissionError(
+                f"Refused to open system drive {device_id}: "
+                f"this is a system physical drive (PhysicalDrive{drive_index}). "
+                "Wiping it would destroy Windows or leave the PC unbootable."
+            )
+    except PermissionError:
+        raise
+    except Exception as exc:
+        audit_log(f"System-disk safeguard parse failed for {device_id!r}: {exc} — proceeding")
+
     handle = kernel32.CreateFileW(
         device_id,
         GENERIC_READ | GENERIC_WRITE,
@@ -591,7 +776,7 @@ def prepare_target(device: DeviceInfo) -> None:
             f"{device.device_id} ist nicht mehr das ausgewählte Gerät / "
             f"is no longer the selected device (now: {model} {serial})"
         )
-    if (index in sys_indices) if sys_indices else device.connection_type != "USB":
+    if _blocked_as_system(index, device.connection_type, sys_indices):
         raise UnsafeTargetError(
             f"{device.device_id} ist die Systemplatte / is the system disk"
         )

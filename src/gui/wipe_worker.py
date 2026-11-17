@@ -15,6 +15,7 @@ from core.log import audit_log, log_wipe_to_csv
 from cert.generator import CertificateData, generate_certificate, format_capacity
 from wipe.device import (
     DeviceInfo,
+    UnsafeTargetError,
     prepare_target,
     open_physical_drive,
     close_drive,
@@ -24,6 +25,7 @@ from wipe.device import (
 )
 from wipe.methods import WipeMethod, WipeResult
 from wipe.demo import create_demo_file, wipe_demo_file, verify_demo_file
+from wipe.hidden_areas import detect_hidden_areas, hidden_bytes
 
 if TYPE_CHECKING:
     pass
@@ -199,6 +201,7 @@ class WipeWorker(QThread):
             cert_path = ""
             success = False
             verify_result: Any = None
+            hidden = None  # HiddenAreaInfo from the real-device HPA/DCO probe
             is_demo = device.device_id.startswith(r"\\.\DemoDevice")
 
             # Signal that this device is entering the wipe phase.
@@ -297,7 +300,9 @@ class WipeWorker(QThread):
                     # ── Real device mode ──
                     # 1. Re-check identity and dismount every volume of
                     #    the disk. Raises UnsafeTargetError -> device fails.
-                    letters = ", ".join(device.disk_letters or [device.drive_letter])
+                    letters = ", ".join(
+                        device.disk_letters or [device.drive_letter or device.device_id]
+                    )
                     self.status_message.emit(f"Checking and dismounting {letters}...")
                     prepare_target(device)
 
@@ -321,6 +326,24 @@ class WipeWorker(QThread):
                     self.status_message.emit(
                         f"Drive size: {format_capacity(drive_size)}"
                     )
+
+                    # 4b. Probe for hidden areas (HPA/DCO) — read-only. USB
+                    # bridges report unsupported; we never modify the drive.
+                    hidden = detect_hidden_areas(handle)
+                    if hidden.supported and (hidden.hpa_present or hidden.dco_present):
+                        parts = []
+                        if hidden.hpa_present:
+                            parts.append(
+                                f"HPA {format_capacity(hidden_bytes(hidden.hpa_hidden_sectors))}"
+                            )
+                        if hidden.dco_present:
+                            parts.append(
+                                f"DCO {format_capacity(hidden_bytes(hidden.dco_hidden_sectors))}"
+                            )
+                        self.status_message.emit(
+                            "Hidden area(s) detected (" + ", ".join(parts)
+                            + ") — recorded on certificate; not reached by overwrite."
+                        )
 
                     if self.is_cancelled:
                         raise InterruptedError("Cancelled before wipe")
@@ -411,7 +434,21 @@ class WipeWorker(QThread):
                         from wipe.format import reformat_drive
                         import re
                         m = re.search(r"PhysicalDrive(\d+)", device.device_id)
-                        if m:
+                        # Reformatting writes a new partition table: same
+                        # gate as the wipe. A refusal only skips the reformat.
+                        try:
+                            prepare_target(device)
+                            unsafe = None
+                        except UnsafeTargetError as exc:
+                            unsafe = exc
+                        if unsafe is not None:
+                            audit_log(
+                                f"Reformat skipped for {device.device_id}: {unsafe}"
+                            )
+                            self.status_message.emit(
+                                f"Formatieren übersprungen / reformat skipped: {unsafe}"
+                            )
+                        elif m:
                             disk_number = int(m.group(1))
                             format_result = reformat_drive(
                                 disk_number=disk_number,
@@ -479,6 +516,24 @@ class WipeWorker(QThread):
                         format_result.label
                         if format_result and format_result.success
                         else ""
+                    ),
+                    # Bad-sector accounting (v1.2). Reported on the certificate
+                    # when > 0; harmless defaults otherwise.
+                    "bad_sector_count": wipe_result.bad_sector_count,
+                    "bad_sector_bytes": wipe_result.bad_sector_bytes,
+                    "bad_sector_offsets": list(wipe_result.bad_sector_offsets),
+                    # Hidden areas (HPA/DCO) (v1.2). `hidden` is None on the demo
+                    # path (no real handle to probe).
+                    "hidden_area_probed": bool(hidden is not None and hidden.supported),
+                    "hpa_present": bool(hidden and hidden.hpa_present),
+                    "hpa_hidden_bytes": (
+                        hidden_bytes(hidden.hpa_hidden_sectors)
+                        if hidden and hidden.hpa_present else 0
+                    ),
+                    "dco_present": bool(hidden and hidden.dco_present),
+                    "dco_hidden_bytes": (
+                        hidden_bytes(hidden.dco_hidden_sectors)
+                        if hidden and hidden.dco_present else 0
                     ),
                 }
 
@@ -549,6 +604,7 @@ class WipeWorker(QThread):
                     "result": "SUCCESS" if wipe_result.success else "FAILED",
                     "verification": verification_text,
                     "cert_number": cert_number,
+                    "bad_sectors": wipe_result.bad_sector_count,
                 })
 
                 # Overall device success: wipe must succeed, and if verify

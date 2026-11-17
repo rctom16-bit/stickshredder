@@ -62,7 +62,11 @@ Existing alternatives fall short in this space: **nwipe** is Linux-only and requ
 - **Multiple wipe methods** with configurable pass counts
 - **Real-time progress tracking** with estimated time remaining
 - **Drive detection** via WMI -- automatically identifies connected USB devices
-- **Safety guard** -- refuses to wipe system drives by design
+- **Safety guard** -- refuses to wipe system drives by design, with a fail-safe that never touches the Windows disk
+- **Internal drive support** *(2.0)* -- optionally wipe internal SATA disks (explicit opt-in), including disks without a drive letter
+- **Bad-sector tolerance** *(2.0)* -- unwritable sectors are skipped, counted, and reported on the certificate instead of aborting the wipe
+- **Hidden-area detection** *(2.0)* -- detects HPA/DCO regions an overwrite cannot reach and flags them on the certificate
+- **ATA Secure Erase** *(2.0, experimental)* -- issues the drive's own firmware erase for SSD/flash media (CLI, opt-in, not yet hardware-verified)
 - **Portable** -- no installation required (standalone .exe via PyInstaller)
 - **100% offline** -- no network access, no telemetry, no cloud dependency
 - **Free and open source** under the MIT license
@@ -100,7 +104,7 @@ A full wipe walks the operator through **two confirmations, a live progress view
   </tr>
 </table>
 
-Full-resolution images: [`docs/screenshots/`](docs/screenshots/). Example certificate: [`docs/examples/sample-certificate.pdf`](docs/examples/sample-certificate.pdf).
+Full-resolution images: [`docs/screenshots/`](docs/screenshots/). Example certificates: [`sample-certificate.pdf`](docs/examples/sample-certificate.pdf) and the [2.0 preview sample](docs/examples/sample-certificate-v1.2.pdf) showing the new bad-sector, HPA/DCO, and Secure Erase sections.
 
 ---
 
@@ -147,17 +151,26 @@ The built executable will be in the `dist/` folder.
 ### CLI
 
 ```bash
-# List connected devices
+# List detected devices (USB + internal)
 stickshredder list
 
-# Wipe drive E: with 3-pass random overwrite
+# Wipe drive E: with a 3-pass random overwrite
 stickshredder wipe --device E: --method standard --operator "Your Name"
 
-# Wipe with the BSI VSITR method and save the certificate to a specific folder
-stickshredder wipe --device E: --method bsi --operator "Your Name" --output-dir "C:\Certificates"
+# BSI VSITR (7-pass), Schutzklasse 3, client reference, certificate saved to a specific folder
+stickshredder wipe --device E: --method bsi --schutzklasse 3 --operator "Your Name" --client "ACME GmbH" --output-dir "C:\Certificates"
+
+# Wipe an internal SATA disk (opt-in; the Windows disk is always protected)
+stickshredder wipe --device PhysicalDrive2 --method standard --allow-internal --operator "Your Name"
+
+# EXPERIMENTAL: ATA Secure Erase (the drive's own firmware erase; directly connected SATA drives only)
+stickshredder wipe --device PhysicalDrive2 --method secure-erase --experimental --allow-internal --operator "Your Name"
+
+# Show the wipe history
+stickshredder history
 ```
 
-Methods: `zero` (1 pass), `standard` (3-pass random), `bsi` (BSI VSITR, 7 passes), `custom` (with `--passes` and `--pattern`). Run `stickshredder wipe --help` for all options.
+Methods: `zero` (1 pass), `standard` (3-pass random), `bsi` (BSI VSITR, 7 passes), `custom` (with `--passes` and `--pattern`), `secure-erase` (experimental, needs `--experimental`). Run `stickshredder wipe --help` for all options.
 
 > **Note:** Administrator privileges are required. Right-click and select "Run as administrator" or use an elevated terminal.
 
@@ -177,6 +190,10 @@ Methods: `zero` (1 pass), `standard` (3-pass random), `bsi` (BSI VSITR, 7 passes
 > **Note:** For SSDs and flash-based USB drives, overwrite-based methods have inherent limitations due to wear leveling. See [SSD Limitations](#ssd-limitations) and [SECURITY.md](docs/SECURITY.md).
 
 > **Optional reformat:** After any wipe method, StickShredder can automatically create a fresh partition and format the drive (FAT32 / exFAT / NTFS) so it is immediately usable without a trip through Disk Management. See [Reformat After Wipe](#reformat-after-wipe).
+
+> **Internal disks & bad sectors (2.0):** every overwrite method also works on internal SATA disks (opt-in via `--allow-internal`) and tolerates unwritable sectors — both are recorded on the certificate. The drive is also probed for hidden areas (HPA/DCO) and warned about. See the [FAQ](#faq).
+
+> **ATA Secure Erase (2.0, experimental):** a non-overwrite alternative for SSD/flash that issues the drive's own firmware erase. CLI-only, opt-in via `--method secure-erase --experimental`. See [SSD Limitations](#ssd-limitations).
 
 ---
 
@@ -254,8 +271,13 @@ Modern USB drives and SSDs use **wear leveling**, **over-provisioning**, and **c
 
 **For high-sensitivity data on SSD/flash media**, consider:
 
-- **ATA Secure Erase** (planned for a future version of StickShredder)
-- **Physical destruction** (shredding per DIN 66399 media type E)
+- **ATA Secure Erase** *(2.0, experimental)* — available via the CLI:
+  `stickshredder wipe --device PhysicalDrive2 --method secure-erase --experimental --allow-internal --operator "..."`.
+  It issues the drive's own firmware erase, which reaches wear-levelled cells a
+  host overwrite cannot. **Untested on real hardware** — treat results as
+  unverified until you can confirm on your own drive.
+- **Physical destruction** (shredding per DIN 66399 media type E) — still the
+  only guaranteed method for HPA/DCO regions and failed-but-unreported sectors.
 
 For a detailed discussion, see [docs/SECURITY.md](docs/SECURITY.md).
 
@@ -273,7 +295,23 @@ For a detailed discussion, see [docs/SECURITY.md](docs/SECURITY.md).
 
 ### Can I wipe my system drive?
 
-**No, by design.** StickShredder refuses to wipe the physical disk that holds the active Windows installation — including every other partition on that disk (e.g. a `D:` data partition next to `C:`). If it cannot tell which disk Windows is on, it blocks all internal disks. Right before writing, it re-checks that the disk is still the one you selected and dismounts every volume on it.
+**No, by design.** StickShredder refuses to wipe the physical disk that holds the active Windows installation — including every other partition on that disk (e.g. a `D:` data partition next to `C:`) — and every disk Windows reports as its boot or system disk (e.g. a second disk with the EFI partition the PC started from). An MBR "active" partition alone does not count, so bootable USB installer sticks stay wipeable. If it cannot tell which disk Windows is on or boots from, it blocks all internal disks. Right before writing, it re-checks that the disk is still the one you selected and dismounts every volume on it.
+
+### Can I wipe internal (non-USB) drives?
+
+**Yes, from 2.0 — but it is off by default.** Pass `--allow-internal` on the CLI (or tick "Allow internal drives" in the GUI). Internal disks without a drive letter are addressed as `PhysicalDriveN` (shown by `stickshredder list`). The system and boot disks remain hard-blocked.
+
+### What is ATA Secure Erase — and is it safe to use?
+
+It is the drive's own built-in erase command (firmware-level), which can reach wear-levelled flash cells a host overwrite cannot. It is available from 2.0 as an **experimental, opt-in CLI feature** for SATA drives connected directly (not through a USB enclosure) (`--method secure-erase --experimental`). It is **not yet verified on real hardware** and, like any firmware erase, can leave a drive temporarily locked or unusable if interrupted. Treat it as experimental until you have confirmed it on your own hardware.
+
+### What happens if my drive has bad sectors?
+
+From 2.0, an unwritable sector no longer aborts the wipe. StickShredder skips it, counts it, and lists the affected regions on the certificate. If a large share of the drive is unwritable (default >10%), the wipe is reported as **failed** rather than "successful" — a dying drive cannot be trusted.
+
+### My drive is an SSD — isn't a quick format plus TRIM enough?
+
+Often it is *practically* enough: after a quick format the OS issues TRIM and the SSD controller's garbage collection erases the underlying cells within minutes, so the data is no longer readable by normal means. But it is **not guaranteed or auditable** — TRIM timing is controller-dependent, it does not cover reallocated or over-provisioned cells, and it leaves no record. For documented, audit-ready disposal use a full wipe (with verification) or ATA Secure Erase; for the highest assurance, physical destruction.
 
 ### Which file systems are supported?
 
@@ -378,7 +416,11 @@ Bestehende Alternativen decken diesen Bedarf nur unzureichend ab: **nwipe** ist 
 - **Mehrere Löschmethoden** mit konfigurierbarer Durchlaufanzahl
 - **Echtzeit-Fortschrittsanzeige** mit geschätzter Restdauer
 - **Laufwerkserkennung** via WMI -- erkennt automatisch angeschlossene USB-Geräte
-- **Sicherheitssperre** -- verweigert das Löschen von Systemlaufwerken (by Design)
+- **Sicherheitssperre** -- verweigert das Löschen von Systemlaufwerken (by Design), mit Fail-safe, das die Windows-Platte niemals anfasst
+- **Interne Festplatten** *(2.0)* -- optionales Löschen interner SATA-Platten (ausdrückliches Opt-in), auch ohne Laufwerksbuchstaben
+- **Defekt-Sektor-Toleranz** *(2.0)* -- nicht beschreibbare Sektoren werden übersprungen, gezählt und im Zertifikat ausgewiesen, statt den Vorgang abzubrechen
+- **Erkennung versteckter Bereiche** *(2.0)* -- erkennt HPA/DCO-Bereiche, die ein Überschreiben nicht erreicht, und vermerkt sie im Zertifikat
+- **ATA Secure Erase** *(2.0, experimentell)* -- nutzt den Firmware-Löschbefehl der Platte für SSD/Flash (CLI, Opt-in, noch nicht auf Hardware verifiziert)
 - **Portabel** -- keine Installation erforderlich (eigenständige .exe via PyInstaller)
 - **100% offline** -- kein Netzwerkzugriff, keine Telemetrie, keine Cloud-Abhängigkeit
 - **Kostenlos und quelloffen** unter der MIT-Lizenz
@@ -463,17 +505,26 @@ Die erstellte Datei befindet sich im Ordner `dist/`.
 #### CLI
 
 ```bash
-# Angeschlossene Datenträger auflisten
+# Erkannte Geräte auflisten (USB + intern)
 stickshredder list
 
-# Laufwerk E: mit 3-Pass Random-Überschreibung löschen
+# Laufwerk E: mit 3-Pass Random überschreiben
 stickshredder wipe --device E: --method standard --operator "Ihr Name"
 
-# Mit BSI VSITR-Methode löschen und Zertifikat in einem bestimmten Ordner speichern
-stickshredder wipe --device E: --method bsi --operator "Ihr Name" --output-dir "C:\Zertifikate"
+# BSI VSITR (7 Durchgänge), Schutzklasse 3, mit Auftraggeber, Zertifikat in einem bestimmten Ordner speichern
+stickshredder wipe --device E: --method bsi --schutzklasse 3 --operator "Ihr Name" --client "ACME GmbH" --output-dir "C:\Zertifikate"
+
+# Interne SATA-Platte löschen (Opt-in; die Windows-Platte ist immer geschützt)
+stickshredder wipe --device PhysicalDrive2 --method standard --allow-internal --operator "Ihr Name"
+
+# EXPERIMENTELL: ATA Secure Erase (Firmware-Befehl der Platte; nur direkt angeschlossene SATA-Platten)
+stickshredder wipe --device PhysicalDrive2 --method secure-erase --experimental --allow-internal --operator "Ihr Name"
+
+# Löschverlauf anzeigen
+stickshredder history
 ```
 
-Methoden: `zero` (1 Durchgang), `standard` (3-Pass Random), `bsi` (BSI VSITR, 7 Durchgänge), `custom` (mit `--passes` und `--pattern`). Alle Optionen: `stickshredder wipe --help`.
+Methoden: `zero` (1 Durchgang), `standard` (3-Pass Random), `bsi` (BSI VSITR, 7 Durchgänge), `custom` (mit `--passes` und `--pattern`), `secure-erase` (experimentell, braucht `--experimental`). Alle Optionen: `stickshredder wipe --help`.
 
 > **Hinweis:** Administratorrechte sind erforderlich. Klicken Sie mit der rechten Maustaste und wählen Sie "Als Administrator ausführen" oder verwenden Sie ein Terminal mit erhöhten Rechten.
 
@@ -568,8 +619,15 @@ Moderne USB-Datenträger und SSDs verwenden **Wear Leveling**, **Over-Provisioni
 
 **Für hochsensible Daten auf SSD-/Flash-Medien** empfehlen wir:
 
-- **ATA Secure Erase** (für eine zukünftige Version von StickShredder geplant)
-- **Physische Vernichtung** (Schreddern nach DIN 66399 Datenträgertyp E)
+- **ATA Secure Erase** *(2.0, experimentell)* — über die CLI verfügbar:
+  `stickshredder wipe --device PhysicalDrive2 --method secure-erase --experimental --allow-internal --operator "..."`.
+  Nutzt den Firmware-Löschbefehl der Platte und erreicht damit auch
+  Wear-Leveling-Zellen, die ein Überschreiben nicht erreicht. **Auf echter
+  Hardware ungetestet** — Ergebnisse bis zur eigenen Prüfung als unbestätigt
+  behandeln.
+- **Physische Vernichtung** (Schreddern nach DIN 66399 Datenträgertyp E) —
+  weiterhin die einzige garantierte Methode für HPA/DCO-Bereiche und defekte,
+  aber nicht gemeldete Sektoren.
 
 Eine ausführliche Erläuterung finden Sie in [docs/SECURITY.md](docs/SECURITY.md).
 
@@ -587,7 +645,23 @@ Eine ausführliche Erläuterung finden Sie in [docs/SECURITY.md](docs/SECURITY.m
 
 #### Kann ich mein Systemlaufwerk löschen?
 
-**Nein, absichtlich nicht.** StickShredder verweigert das Löschen der physischen Platte, auf der die aktive Windows-Installation liegt — einschließlich aller weiteren Partitionen dieser Platte (z. B. eine Datenpartition `D:` neben `C:`). Kann es nicht feststellen, auf welcher Platte Windows liegt, sperrt es alle internen Platten. Unmittelbar vor dem Schreiben prüft es erneut, ob die Platte noch die ausgewählte ist, und hängt alle ihre Volumes aus.
+**Nein, absichtlich nicht.** StickShredder verweigert das Löschen der physischen Platte, auf der die aktive Windows-Installation liegt — einschließlich aller weiteren Partitionen dieser Platte (z. B. eine Datenpartition `D:` neben `C:`) — und jeder Platte, die Windows als Boot- oder Systemplatte meldet (z. B. eine zweite Platte mit der EFI-Partition, von der der PC gestartet ist). Eine „aktive“ MBR-Partition allein zählt nicht; bootfähige USB-Installationssticks bleiben löschbar. Kann es nicht feststellen, auf welcher Platte Windows liegt oder von welcher der PC startet, sperrt es alle internen Platten. Unmittelbar vor dem Schreiben prüft es erneut, ob die Platte noch die ausgewählte ist, und hängt alle ihre Volumes aus.
+
+#### Kann ich interne (Nicht-USB-)Platten löschen?
+
+**Ja, ab 2.0 — aber standardmäßig aus.** Geben Sie `--allow-internal` an der CLI an (oder setzen Sie das Häkchen „Interne Festplatten erlauben" in der GUI). Interne Platten ohne Laufwerksbuchstaben werden als `PhysicalDriveN` angesprochen (zeigt `stickshredder list`). System- und Boot-Platten bleiben hart gesperrt.
+
+#### Was ist ATA Secure Erase — und ist es sicher?
+
+Es ist der eingebaute Löschbefehl der Platte (Firmware-Ebene) und erreicht damit auch Wear-Leveling-Zellen, die ein Überschreiben nicht erreicht. Ab 2.0 als **experimentelle, ausdrücklich zu aktivierende CLI-Funktion** für direkt angeschlossene SATA-Platten (nicht im USB-Gehäuse) verfügbar (`--method secure-erase --experimental`). Es ist **auf echter Hardware noch nicht verifiziert** und kann — wie jeder Firmware-Löschvorgang — eine Platte vorübergehend sperren oder unbrauchbar machen, wenn er unterbrochen wird. Bis zur eigenen Prüfung als experimentell behandeln.
+
+#### Was passiert bei defekten Sektoren?
+
+Ab 2.0 bricht ein nicht beschreibbarer Sektor den Löschvorgang nicht mehr ab. StickShredder überspringt ihn, zählt ihn und führt die betroffenen Bereiche auf dem Zertifikat auf. Ist ein großer Teil der Platte nicht beschreibbar (Standard >10 %), wird der Vorgang als **fehlgeschlagen** statt „erfolgreich" gemeldet — einer sterbenden Platte ist nicht zu trauen.
+
+#### Meine Platte ist eine SSD — reicht da nicht Schnellformatierung + TRIM?
+
+Oft reicht es *praktisch*: Nach einer Schnellformatierung sendet das System TRIM, und die Garbage Collection des SSD-Controllers löscht die zugrunde liegenden Zellen binnen Minuten, sodass die Daten mit normalen Mitteln nicht mehr lesbar sind. Aber es ist **nicht garantiert und nicht nachweisbar** — das TRIM-Timing hängt vom Controller ab, es erfasst keine umgemappten oder Over-Provisioning-Zellen, und es hinterlässt keinen Nachweis. Für dokumentierte, prüffähige Entsorgung eine vollständige Löschung (mit Verifikation) oder ATA Secure Erase verwenden; für höchste Sicherheit die physische Vernichtung.
 
 #### Welche Dateisysteme werden unterstützt?
 
