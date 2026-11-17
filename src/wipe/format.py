@@ -106,7 +106,13 @@ def _build_command_script(
     """
     # Note: label is pre-sanitised to ASCII alnum/underscore/hyphen/space, so
     # double-quoting it inside the PowerShell script is safe.
+    # Last guard inside PowerShell itself: never clear the disk Windows boots
+    # from or runs on, whatever the caller passed in.
     return (
+        f"$d = Get-Disk -Number {disk_number} -ErrorAction Stop; "
+        f"if ($d.IsBoot -or $d.IsSystem) {{ throw "
+        f"'Disk {disk_number} ist Start-/Systemplatte - Formatieren verweigert / "
+        f"is a boot/system disk - refusing to format' }}; "
         f"Clear-Disk -Number {disk_number} -RemoveData -RemoveOEM -Confirm:$false; "
         f"Initialize-Disk -Number {disk_number} -PartitionStyle {partition_style}; "
         f"$p = New-Partition -DiskNumber {disk_number} -UseMaximumSize -AssignDriveLetter; "

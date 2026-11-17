@@ -52,6 +52,30 @@ def _fail_proc(stderr: str, stdout: str = "", returncode: int = 1) -> MagicMock:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Boot/system disk guard (2.0)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_script_refuses_boot_or_system_disk_before_clear_disk():
+    script = fmt._build_command_script(3, "MBR", "exFAT", "USB")
+    guard = script.find("Get-Disk -Number 3")
+    clear = script.find("Clear-Disk")
+    assert guard != -1 and clear != -1
+    assert guard < clear
+    head = script[:clear]
+    assert ".IsBoot" in head and ".IsSystem" in head
+    assert "throw" in head
+    assert "-ErrorAction Stop" in head
+
+
+def test_reformat_passes_guarded_script_to_powershell():
+    with patch.object(fmt.subprocess, "run", return_value=_ok_proc()) as run:
+        reformat_drive(2)
+    script = run.call_args.args[0][-1]
+    assert script.index("IsSystem") < script.index("Clear-Disk")
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Happy paths
 # ─────────────────────────────────────────────────────────────────────
 

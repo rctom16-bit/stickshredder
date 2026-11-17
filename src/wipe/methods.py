@@ -441,8 +441,11 @@ class RandomThreePass(WipeMethod):
     name = "RandomThreePass"
     passes = 3
     sicherheitsstufe = "3"
-    description_de = "Drei Durchgänge mit kryptographisch zufälligen Daten (Sicherheitsstufe 3)"
-    description_en = "Three passes of cryptographically random data (security level 3)"
+    description_de = ("Drei Durchgänge mit kryptographisch zufälligen Daten (Sicherheitsstufe 3) — "
+                      "nur wenn eine Vorgabe es verlangt — bringt bei heutigen Datenträgern "
+                      "keinen Sicherheitsgewinn")
+    description_en = ("Three passes of cryptographically random data (security level 3) — "
+                      "only if a policy requires it — adds no security on today's media")
     final_pass_is_random = True
 
     def get_pattern(self, pass_number: int, block_size: int) -> bytes:
@@ -453,8 +456,11 @@ class BsiVsitr(WipeMethod):
     name = "BSI-VSITR"
     passes = 7
     sicherheitsstufe = "4+"
-    description_de = "BSI VSITR 7-Durchgänge-Verfahren (Sicherheitsstufe 4+)"
-    description_en = "BSI VSITR 7-pass method (security level 4+)"
+    description_de = ("BSI VSITR 7-Durchgänge-Verfahren (Sicherheitsstufe 4+) — "
+                      "nur wenn eine Vorgabe es verlangt — bringt bei heutigen Datenträgern "
+                      "keinen Sicherheitsgewinn")
+    description_en = ("BSI VSITR 7-pass method (security level 4+) — "
+                      "only if a policy requires it — adds no security on today's media")
     final_pass_is_random = True  # pass 7 is random
 
     _PASS_BYTES = {

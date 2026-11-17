@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes as wintypes
+import re
 import subprocess
 from dataclasses import dataclass, field
 from typing import Optional
@@ -274,8 +275,76 @@ def _connection_type_from_interface(interface_type: str | None) -> str:
     return interface_type
 
 
+_BITLOCKER_NAMESPACE = r"root\CIMV2\Security\MicrosoftVolumeEncryption"
+
+# Set after the first failed BitLocker WMI query (non-admin): skip WMI then.
+_bitlocker_wmi_denied = False
+
+
+def _get_bitlocker_wmi_connection() -> wmi.WMI:
+    """WMI connection to the BitLocker namespace (Win32_EncryptableVolume).
+
+    Usually needs administrator rights; raises when access is denied.
+    """
+    pythoncom.CoInitialize()
+    return wmi.WMI(namespace=_BITLOCKER_NAMESPACE)
+
+
+def _bitlocker_via_wmi(drive_letter: str) -> bool:
+    """BitLocker state from Win32_EncryptableVolume. Raises if WMI is denied.
+
+    ProtectionStatus 1 = on, 2 = unknown (volume locked). ConversionStatus
+    0 = fully decrypted; anything else means (some) data is encrypted, even
+    while protection is suspended.
+    """
+    conn = _get_bitlocker_wmi_connection()
+    for vol in conn.Win32_EncryptableVolume(DriveLetter=drive_letter.upper()):
+        protection = int(getattr(vol, "ProtectionStatus", 0) or 0)
+        conversion = int(getattr(vol, "ConversionStatus", 0) or 0)
+        if protection in (1, 2) or conversion != 0:
+            return True
+    return False
+
+
+_BDE_PERCENT_RE = re.compile(
+    r"(?:prozent|percentage)[^:\n]*:\s*(\d+(?:[.,]\d+)?)", re.IGNORECASE
+)
+_BDE_LOCKED_RE = re.compile(
+    r"(?:lock status|sperrungsstatus)\s*:\s*(?:locked|gesperrt)\b", re.IGNORECASE
+)
+
+
+def _bitlocker_from_manage_bde(output: str) -> bool:
+    """Parse ``manage-bde -status`` output, German or English Windows."""
+    text = output.lower()
+    if "protection on" in text or "der schutz ist aktiviert" in text:
+        return True
+    if _BDE_LOCKED_RE.search(output):
+        return True
+    for match in _BDE_PERCENT_RE.finditer(output):
+        try:
+            if float(match.group(1).replace(",", ".")) > 0:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def _check_bitlocker(drive_letter: str) -> bool:
-    """Check if the volume is BitLocker-encrypted via manage-bde. Best-effort."""
+    """True if the volume is BitLocker-encrypted. Best-effort, never raises.
+
+    WMI first; when that is denied (no admin rights), fall back to
+    ``manage-bde -status`` and read its German or English output.
+    """
+    global _bitlocker_wmi_denied
+    if not _bitlocker_wmi_denied:
+        try:
+            return _bitlocker_via_wmi(drive_letter)
+        except Exception as exc:  # noqa: BLE001 — fall back to manage-bde
+            # A denied query takes ~5 s; rights don't change while we run,
+            # so don't pay that again for every further drive.
+            _bitlocker_wmi_denied = True
+            audit_log(f"BitLocker WMI query failed for {drive_letter}: {exc}")
     try:
         result = subprocess.run(
             ["manage-bde", "-status", drive_letter],
@@ -289,13 +358,9 @@ def _check_bitlocker(drive_letter: str) -> bool:
             timeout=10,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        output = (result.stdout or "").lower()
-        if "protection on" in output or "percentage encrypted" in output:
-            if "fully decrypted" not in output:
-                return True
+        return _bitlocker_from_manage_bde(result.stdout or "")
     except Exception:  # noqa: BLE001 — this is a non-safety-critical probe
-        pass
-    return False
+        return False
 
 
 def _check_active_processes(drive_letter: str) -> bool:
@@ -664,9 +729,18 @@ def _ioctl_no_data(handle: int, control_code: int, label: str) -> None:
         None,
     )
     if not success:
-        err = ctypes.get_last_error()
-        raise OSError(f"{label} failed (error {err})")
+        raise _win_os_error(f"{label} failed", ctypes.get_last_error())
     audit_log(f"{label} succeeded (handle={handle})")
+
+
+ERROR_ACCESS_DENIED = 5
+
+
+def _win_os_error(message: str, code: int) -> OSError:
+    """OSError whose ``winerror`` is the Win32 error code (message unchanged)."""
+    exc = OSError(f"{message} (error {code})")
+    exc.winerror = code
+    return exc
 
 
 def lock_volume(handle: int) -> None:
@@ -691,9 +765,9 @@ def dismount_volume(drive_letter: str) -> None:
         None,
     )
     if _handle_is_invalid(handle):
-        err = ctypes.get_last_error()
-        raise OSError(
-            f"Cannot open volume {volume_path} for dismount (error {err})"
+        raise _win_os_error(
+            f"Cannot open volume {volume_path} for dismount",
+            ctypes.get_last_error(),
         )
     try:
         try:
@@ -744,6 +818,10 @@ def prepare_target(device: DeviceInfo) -> None:
     stick swapped), if it is (or might be) the Windows disk, or if any of
     its volumes cannot be dismounted. Raises UnsafeTargetError.
     """
+    if device.is_system_drive:
+        raise UnsafeTargetError(
+            f"{device.device_id} ist die Systemplatte / is the system disk"
+        )
     index = _physical_index(device.device_id)
     try:
         c = _get_wmi_connection()
@@ -785,8 +863,13 @@ def prepare_target(device: DeviceInfo) -> None:
         try:
             dismount_volume(letter)
         except OSError as exc:
+            admin = (
+                "Administratorrechte erforderlich / administrator rights "
+                "required — "
+                if getattr(exc, "winerror", None) == ERROR_ACCESS_DENIED else ""
+            )
             raise UnsafeTargetError(
-                f"{letter} konnte nicht ausgehängt werden / "
+                f"{admin}{letter} konnte nicht ausgehängt werden / "
                 f"could not be dismounted: {exc}"
             ) from exc
     audit_log(f"Target verified and dismounted: {device.device_id}")
