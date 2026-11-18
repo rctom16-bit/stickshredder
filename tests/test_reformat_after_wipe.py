@@ -33,7 +33,7 @@ def _no_hidden():
 
 # ── CLI ────────────────────────────────────────────────────────────────
 
-def _run_cli_wipe(events: list, reformat, gate=None):
+def _run_cli_wipe(events: list, reformat, gate=None, log=None):
     args = cli.build_parser().parse_args([
         "wipe", "--device", "E:", "--method", "zero", "--operator", "Test",
         "--verify", "none", "--reformat", "exfat", "--yes",
@@ -59,7 +59,7 @@ def _run_cli_wipe(events: list, reformat, gate=None):
         patch.object(cli, "get_next_cert_number", return_value=1),
         patch.object(cli, "generate_certificate", cert),
         patch.object(cli, "log_wipe_to_csv"),
-        patch.object(cli, "audit_log"),
+        patch.object(cli, "audit_log", log or MagicMock()),
         patch("wipe.format.reformat_drive", side_effect=reformat),
     ):
         cli.cmd_wipe(args)
@@ -95,9 +95,13 @@ def test_cli_reformat_that_raises_keeps_the_wipe_and_the_certificate():
 def test_cli_reformat_gate_error_only_skips_the_reformat():
     reformat = MagicMock(side_effect=AssertionError("must not run"))
     gate = MagicMock(side_effect=[[1], ValueError("odd WMI answer")])
-    cert = _run_cli_wipe([], reformat, gate)
+    log = MagicMock()
+    cert = _run_cli_wipe([], reformat, gate, log)
     reformat.assert_not_called()
     assert cert.call_args.args[0].reformat_performed is False
+    lines = [c.args[0] for c in log.call_args_list]
+    assert any("Reformat skipped" in line and "PhysicalDrive99" in line
+               and "odd WMI answer" in line for line in lines)
 
 
 # ── GUI worker ─────────────────────────────────────────────────────────

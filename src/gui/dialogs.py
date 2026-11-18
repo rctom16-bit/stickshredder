@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from gui import theme
-from gui.i18n import fmt_size, language, pick, tr
+from gui.i18n import fmt_size, language, pick, serial_label, tr
 from gui.widgets import make_card, make_label
 from gui.wipe_options import FILESYSTEMS, METHOD_KEYS, MULTI_PASS_KEYS, WipeOptions
 from wipe.device import DeviceInfo
@@ -244,14 +244,14 @@ class ConfirmWipeDialog(QDialog):
         self._disk_lines: list[str] = []
         for device in self._devices:
             letters = disk_letters_text(device) or tr("confirm.no_letter")
-            serial = device.serial_number or "—"
+            serial = serial_label(device.serial_number)
             size = fmt_size(device.capacity_bytes)
-            self._disk_lines.append(f"{letters} · {device.model} · SN {serial} · {size}")
+            self._disk_lines.append(f"{letters} · {device.model} · {serial} · {size}")
             label = make_label("", "dialog-disk", wrap=True)
             label.setTextFormat(Qt.TextFormat.RichText)
             label.setText(
                 f"<b>{html.escape(letters)}</b> · {html.escape(device.model)} · "
-                f"<span style=\"font-family:'{mono}'\">SN {html.escape(serial)}</span>"
+                f"<span style=\"font-family:'{mono}'\">{html.escape(serial)}</span>"
                 f" · {html.escape(size)}"
             )
             box_layout.addWidget(label)

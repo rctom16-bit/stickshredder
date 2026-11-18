@@ -22,6 +22,7 @@ from cert.verify_cert import (
 )
 from core.config import AppConfig, get_next_cert_number, DEFAULT_CERT_OUTPUT, load_signing_key
 from core.protection_class import class3_note
+from core.serial import history_serial, serial_for_filename, serial_missing, serial_text
 from core.log import (
     audit_log, history_result_status, history_result_value, log_wipe_to_csv,
     read_wipe_history, setup_logging, verify_wipe_history,
@@ -121,6 +122,11 @@ def _truncate(text: str, width: int) -> str:
     if len(text) <= width:
         return text
     return text[: width - 1] + "\u2026"
+
+
+def _short_serial(serial) -> str:
+    """A serial for a narrow table column ("not reported" for zeros / empty)."""
+    return "not reported" if serial_missing(serial) else str(serial).strip()
 
 
 # -- Progress bar -----------------------------------------------------------
@@ -229,7 +235,7 @@ def _print_device_table(devices: list[DeviceInfo]) -> None:
         rows.append((
             dev.drive_letter or _physical_label(dev.device_id),
             _truncate(dev.model or "Unknown", 28),
-            _truncate(dev.serial_number or "N/A", 20),
+            _truncate(_short_serial(dev.serial_number), 20),
             _format_size_short(dev.capacity_bytes),
             dev.filesystem or "RAW",
             dev.connection_type,
@@ -602,7 +608,7 @@ def cmd_unlock(args: argparse.Namespace) -> None:
 
     print(_c(_Ansi.BOLD + _Ansi.CYAN, "\n  StickShredder -- Gesperrte Platte entsperren / Unlock"))
     print(f"    Laufwerk / Drive:  {device.model or 'Unknown'} · SN "
-          f"{device.serial_number or 'N/A'} · {device.device_id}")
+          f"{serial_text(device.serial_number)} · {device.device_id}")
     print(
         "    StickShredder versucht EINMAL, das Laufwerk mit dem temporären Passwort "
         f"„{hardware_erase.TEMP_PASSWORD}“ zu entsperren und das Passwort zu entfernen.\n"
@@ -761,7 +767,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     )
     print(f"    Drive Letters:   {all_letters}")
     print(f"    Model:           {device.model or 'Unknown'}")
-    print(f"    Serial:          {device.serial_number or 'N/A'}")
+    print(f"    Serial:          {serial_text(device.serial_number)}")
     print(f"    Capacity:        {_format_size_short(device.capacity_bytes)} ({device.capacity_bytes:,} bytes)")
     print(f"    Filesystem:      {device.filesystem}")
     print(f"    Connection:      {device.connection_type}")
@@ -1051,8 +1057,11 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         except Exception as exc:  # noqa: BLE001 — only skips the reformat
             unsafe = exc
         if unsafe is not None:
+            audit_log(f"Reformat skipped for {device.device_id}: {unsafe}")
             _warn(f"Reformat skipped / Formatieren übersprungen: {unsafe}")
         elif not m:
+            audit_log(f"Reformat skipped for {device.device_id}: "
+                      f"could not parse the disk number")
             _warn("Could not parse disk number; skipping reformat")
         else:
             disk_number = int(m.group(1))
@@ -1169,7 +1178,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     history_row = {
         "date": cert_date.strftime("%Y-%m-%d %H:%M:%S"),
         "device_model": device.model or "Unknown",
-        "serial_number": device.serial_number or "N/A",
+        "serial_number": history_serial(device.serial_number),
         "capacity_bytes": str(device.capacity_bytes),
         "method": cert_method_name,
         "passes": str(wipe_result.passes),
@@ -1195,7 +1204,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         history_hash = ""
 
     # -- Generate the signed certificate ------------------------------------
-    cert_filename = f"SS-{cert_number:06d}_{device.serial_number or 'UNKNOWN'}_{cert_date.strftime('%Y%m%d')}.pdf"
+    cert_filename = f"SS-{cert_number:06d}_{serial_for_filename(device.serial_number)}_{cert_date.strftime('%Y%m%d')}.pdf"
     cert_path = str(Path(output_dir) / cert_filename)
 
     _info("Generating certificate...")
@@ -1212,7 +1221,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     print()
     print(_c(_Ansi.BOLD + _Ansi.CYAN, "  === Wipe Summary ==="))
     print(f"    Device:          {device.drive_letter} ({device.model or 'Unknown'})")
-    print(f"    Serial:          {device.serial_number or 'N/A'}")
+    print(f"    Serial:          {serial_text(device.serial_number)}")
     print(f"    Method:          {cert_method_name} ({wipe_result.passes} passes)")
     print(f"    Duration:        {_format_duration(wipe_result.start_time, wipe_result.end_time)}")
     exit_code, result_line = wipe_outcome(cert_data)
@@ -1331,7 +1340,7 @@ def cmd_history(args: argparse.Namespace) -> None:
         cells = [
             _truncate(entry.get("date", ""), widths[0]),
             _truncate(entry.get("device_model", ""), widths[1]),
-            _truncate(entry.get("serial_number", ""), widths[2]),
+            _truncate(_short_serial(entry.get("serial_number")), widths[2]),
             _truncate(entry.get("method", ""), widths[3]),
             _truncate(entry.get("passes", ""), widths[4]),
         ]
@@ -1386,7 +1395,7 @@ def _verify_history() -> None:
     ))
     print(f"    Datum / Date:              {_printable(row.get('date') or '-')}")
     print(f"    Zertifikat / Certificate:  {_cert_label(row.get('cert_number') or '-')}")
-    print(f"    Seriennummer / Serial:     {_printable(row.get('serial_number') or '-')}")
+    print(f"    Seriennummer / Serial:     {_printable(serial_text(row.get('serial_number'), 'both'))}")
     status = history_result_status(row.get("result"))
     if status is not None:
         de, en = RESULT_LABELS[status]

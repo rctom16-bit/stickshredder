@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui.i18n import fmt_duration, fmt_size, tr
+from gui.i18n import fmt_duration, fmt_size, serial_label, tr
 from gui.widgets import (
     PhaseStepper,
     QrCode,
@@ -129,8 +129,7 @@ class HardwareEraseDialog(QDialog):
         letters = device.disk_letters or ([device.drive_letter] if device.drive_letter else [])
         parts = [", ".join(letters)] if letters else []
         parts.append(device.model or device.device_id)
-        if device.serial_number:
-            parts.append(tr("serial", serial=device.serial_number))
+        parts.append(serial_label(device.serial_number))
         parts.append(fmt_size(device.capacity_bytes))
         self.disk_label = make_label(" · ".join(parts), "muted", wrap=True)
         root.addWidget(self.disk_label)
@@ -664,7 +663,7 @@ class ResultView(QWidget):
         if payload:
             self.cert_number_label.setText(tr("result.cert_number", n=f"{int(payload.get('n', 0)):04d}"))
             lines = [
-                f"{payload.get('dm') or outcome.device.model} · SN {payload.get('ds') or '—'}",
+                f"{payload.get('dm') or outcome.device.model} · {serial_label(payload.get('ds'))}",
                 tr("result.cert_class", level=payload.get("sl") or "—",
                    category="Purge" if hardware == "erased" else "Clear"),
             ]

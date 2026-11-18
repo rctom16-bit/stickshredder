@@ -707,3 +707,39 @@ def test_demo_wipe_never_removes_a_partition_table(qtbot, app_config, demo_devic
         worker.wait(2000)
 
     clear.assert_not_called()
+
+
+@pytest.mark.parametrize("letter, disk_letters, named", [
+    ("", [], "\\\\.\\PhysicalDrive7"),
+    ("E:", ["E:"], "E:"),
+])
+def test_lock_skipped_log_names_the_disk_without_a_letter(qtbot, app_config,
+                                                          letter, disk_letters, named):
+    """18.11.2026: "Physical-drive lock skipped for  (...)" had an empty name
+    for a disk without a letter; it names the letter or the device id."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from gui.wipe_worker import WipeWorker
+
+    device = replace(_gui_lock_test_device(), drive_letter=letter, disk_letters=disk_letters)
+    no_hidden = SimpleNamespace(supported=False, hpa_present=False, dco_present=False,
+                                hpa_hidden_sectors=0, dco_hidden_sectors=0)
+    log = MagicMock()
+    with patch("gui.wipe_worker.prepare_target", return_value=[]), \
+         patch("gui.wipe_worker.release_volumes"), \
+         patch("gui.wipe_worker.open_physical_drive", return_value=1), \
+         patch("gui.wipe_worker.get_drive_size", return_value=1024**2), \
+         patch("gui.wipe_worker.detect_hidden_areas", return_value=no_hidden), \
+         patch("gui.wipe_worker.close_drive"), \
+         patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"), \
+         patch("gui.wipe_worker.log_wipe_to_csv"), \
+         patch("gui.wipe_worker.get_next_cert_number", return_value=1), \
+         patch("gui.wipe_worker.audit_log", log):
+        worker = WipeWorker(devices=[device],
+                            wipe_method=_gui_lock_test_method(lambda *a, **k: _ok_wipe_result()),
+                            config=app_config, verify_mode="none")
+        with qtbot.waitSignal(worker.all_completed, timeout=5000):
+            worker.start()
+
+    lines = [c.args[0] for c in log.call_args_list if "lock skipped" in c.args[0]]
+    assert lines == [f"Physical-drive lock skipped for {named} (dismount already exclusive)"]

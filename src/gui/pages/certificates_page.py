@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from cert.payload import RESULT_LABELS
 from cert.verify_cert import TrustStore, VerifyOutcome, extract_token_from_pdf, verify_token
+from core.serial import serial_for_filename, serial_text
 from core.log import (
     CSV_HEADERS,
     audit_log,
@@ -36,7 +37,7 @@ from core.log import (
     verify_wipe_history,
 )
 from gui import theme
-from gui.i18n import language, language_half, pick, tr
+from gui.i18n import language, language_half, pick, serial_label, tr
 from gui.pages.wipe_views import open_path
 from gui.widgets import ResultIcon, make_card, make_chip, make_label, set_prop, uppercase
 
@@ -96,8 +97,12 @@ def find_certificate_pdf(folder, number, serial: str = "") -> Path | None:
     if not base.is_dir():
         return None
     matches = sorted(base.glob(f"SS-{n:06d}_*.pdf"))
+    # "noserial" since 2.0; older files carry the raw value (e.g. zeros).
+    names = {f"_{serial_for_filename(serial)}_"}
+    if str(serial or "").strip():
+        names.add(f"_{str(serial).strip()}_")
     for match in matches:
-        if serial and f"_{serial}_" in match.name:
+        if any(name in match.name for name in names):
             return match
     return matches[0] if matches else None
 
@@ -311,7 +316,7 @@ class CertificatesPage(QWidget):
             values = {
                 "date": format_date(entry.get("date")),
                 "device": str(entry.get("device_model") or ""),
-                "serial": str(entry.get("serial_number") or ""),
+                "serial": serial_text(entry.get("serial_number"), language()),
                 "method": str(entry.get("method") or ""),
                 "cert": cert_label(entry.get("cert_number")),
             }
@@ -521,8 +526,7 @@ class CertificatesPage(QWidget):
         parts = [cert_label(payload.get("n"))]
         if payload.get("dm"):
             parts.append(str(payload["dm"]))
-        if payload.get("ds"):
-            parts.append(tr("serial", serial=payload["ds"]))
+        parts.append(serial_label(payload.get("ds")))
         stamp = str(payload.get("t") or "")[:10]
         if stamp:
             parts.append(format_date(stamp).split(" ")[0])
