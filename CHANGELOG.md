@@ -4,107 +4,129 @@ All notable changes to StickShredder are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — 2.0.0
+## [2.0.0] - unreleased
 
-Work in progress, driven by community feedback. It tackles the limits of pure
-overwrite wiping: bad sectors, internal disks, hidden disk areas, and
-firmware-level erase. Builds on 1.1.1.
+Driven by the community feedback on 1.x: a certificate you can check, honest
+results, internal disks, hidden areas and bad sectors, and a hardware erase
+for SSDs. Includes everything from 1.1.1 and 1.1.2. (The 1.2.0 version
+prepared in June was never released; its work is part of 2.0.)
 
 ### Added
 
-- **Bad-sector tolerance and reporting.** A failed `WriteFile` on a block no
-  longer aborts the whole wipe. The block offset is recorded, the pass seeks
-  past it and continues, and the defect count + first 100 offsets are reported
-  on the certificate (new "Bad Sectors / Defekte Sektoren" section), in the CLI
-  summary, and in a new `bad_sectors` CSV column. A bad-fraction ceiling
-  (default 10%) still fails the wipe outright when most of the drive is
-  unwritable, so a dying drive is never reported as "successfully wiped".
-- **Internal (non-removable) disk support.** Physical disks without a drive
-  letter (raw / unmounted internal data disks) are now enumerated and can be
-  wiped. Gated behind an explicit opt-in: CLI `--allow-internal` and a GUI
-  "Allow internal drives" checkbox (off by default). Internal wipes require an
-  extra model-name confirmation in the CLI. Letterless disks are selectable via
-  `--device PhysicalDriveN`.
-- **`is_safe_to_wipe()` central safety gate** used by both CLI and GUI. The
-  Windows system disk is always refused; internal drives are refused without
-  opt-in; and — fail-safe — internal drives are refused whenever the system
-  disk cannot be positively identified.
-- **ATA pass-through foundation** (`wipe/passthrough.py`): a defensive
-  `IOCTL_ATA_PASS_THROUGH_DIRECT` wrapper (`ata_identify`,
-  `read_native_max_address`, `device_configuration_identify_max`,
-  `send_ata_command`). Never raises; returns `None` when a device rejects ATA
-  pass-through (common on USB bridges).
-- **HPA/DCO detection** (`wipe/hidden_areas.py`, report-only). Before wiping, the
-  drive is probed for a Host Protected Area or Device Configuration Overlay —
-  regions hidden from the OS that an overwrite never reaches. Findings are
-  warned about and recorded on the certificate (new "Hidden Areas (HPA/DCO)"
-  section) and in a new `hidden_area` CSV column. The drive is never modified
-  (no SET MAX / DCO commands).
-- **Experimental ATA Secure Erase** (`wipe/secure_erase.py`). New CLI method
-  `--method secure-erase`, gated behind `--experimental` (plus `--enhanced`),
-  issues the drive's own firmware erase (SECURITY SET PASSWORD / ERASE PREPARE /
-  ERASE UNIT) instead of overwriting. Refuses on frozen / locked / unsupported
-  drives. Clearly marked experimental on the certificate. **Untested on real
-  hardware** — see SECURITY.md. (GUI exposure is a planned follow-up.)
-
-- **Recommendations.** New `stickshredder info --device <letter|number>`
-  shows model, type (HDD / SSD / USB stick / SD card), drive letters,
-  system/internal status and the recommended procedure (method, verification,
-  NIST SP 800-88 category, reason, warnings). It reads Windows' device
-  information only — the disk is never opened. `wipe` without `--method` uses
-  the recommended method and says so; `--method standard`/`bsi` print that
-  multi-pass wiping only makes sense when a policy requires it.
-- **Three-level result everywhere.** Successful / With limitations / Failed —
-  the same in the CLI, the history and the certificate. `wipe` exits with `0`,
-  `3` (with limitations: unwritable sectors, or a hidden area not removed) or
-  `1` (failed, including a failed verification).
-- **NIST SP 800-88 category on the certificate** next to the DIN 66399 level
+- **Signed certificates.** Every certificate is signed (Ed25519) with a key
+  StickShredder creates for the installation on first use and stores protected
+  by Windows (DPAPI). The certificate carries an "Echtheit / Authenticity"
+  section with a QR code, the verification code and the key's fingerprint, an
+  overall result line, and its data as a PDF attachment
+  (`stickshredder-certificate.json`).
+- **Verify page** (`docs/verify/`, served at
+  `https://rctom16-bit.github.io/stickshredder/verify/`): checks a certificate
+  from its QR code, verification code or PDF entirely in the browser — nothing
+  is uploaded. English and German, light and dark, works on phones.
+- **Key card:** a one-page PDF with company, fingerprint and QR code to file
+  with the IT documentation or hand to auditors. Scanning its QR code adds the
+  key as trusted on the verify page.
+- **Three verify levels** everywhere (GUI, CLI, verify page): genuine from a
+  trusted key / signature valid but key unknown / invalid or altered.
+- **Tamper-evident wipe history:** each entry carries a hash over the previous
+  one; the newest hash is written into every signed certificate. Older history
+  files are migrated (with a backup).
+- **New CLI commands:** `verify-cert`, `keycard`, `trust add/list/remove`,
+  `key export/import` (password-protected file), `history --verify`,
+  `info --device`, and `unlock`.
+- **Recommendations:** `stickshredder info --device` and the GUI pick the
+  procedure by device type (HDD, SSD, USB stick / SD card): one pass of zeros
+  plus full verification, with the NIST SP 800-88 category and warnings (SSD
+  spare areas; protection class 3 → destroy physically). It reads Windows'
+  device information only. `wipe` without `--method` uses the recommendation.
+- **Three-level result:** Successful / With limitations / Failed — the same in
+  the GUI, CLI, history and certificate. `wipe` exits `0`, `3` or `1`.
+- **NIST SP 800-88 category** on the certificate next to the DIN 66399 level
   ("Clear" for overwriting, "Purge" for a hardware erase).
-- **Certificate data as PDF attachment.** Signed certificates embed
-  `stickshredder-certificate.json` (the signed data and the verification code).
+- **Internal disks:** physical disks without a drive letter are listed and can
+  be wiped after an explicit opt-in (GUI "Interne Festplatten erlauben", CLI
+  `--allow-internal`, plus a model-name confirmation in the CLI).
+- **Bad sectors:** a sector that cannot be written because of a media error is
+  skipped, counted and listed on the certificate and in the history instead of
+  stopping the wipe. More than 10 % unwritable still fails the wipe.
+- **Hidden areas (HPA/DCO):** directly connected SATA disks are asked before
+  the wipe whether part of them is hidden from Windows. Findings are reported
+  on the certificate and in the history; nothing is changed on the disk.
+- **Hardware erase (Beta)** for SATA SSDs connected directly: the SSD erases
+  itself (ATA Secure Erase, enhanced when offered), then one pass of zeros and
+  a full verification. Behind „Beta-Funktionen aktivieren“ in Optionen (GUI) or
+  `--method secure-erase --experimental` (CLI). The drive is asked first and
+  the erase stops before anything is written if it is frozen, locked, already
+  has a password or does not support it. The temporary password is shown and
+  logged before it is set; the PC is kept awake. **Not tested on real
+  hardware yet.**
+- **Unlock** („SSD entsperren …“, `stickshredder unlock --experimental`):
+  removes StickShredder's temporary password from a drive an interrupted
+  hardware erase left locked. One try only.
+- **New window (design "Signal"):** pages Löschen, Zertifikate, Schlüssel and
+  Optionen; light and dark theme (follows Windows unless chosen); German and
+  English; the disk list refreshes when a USB device is plugged in or removed;
+  certificate preview with the real QR code; typed LÖSCHEN/DELETE confirmation.
+- **Zertifikate page:** history with search, open PDF/folder, CSV export, chain
+  status, and „Zertifikat prüfen“. **Schlüssel page:** fingerprint, key card,
+  trusted keys (add from a key-card PDF, rename, remove). **Optionen page:**
+  company data, logo, certificate folder and language, wipe defaults, theme,
+  language, Beta switch, demo mode.
+- **Demo mode** for the hardware erase: a demo SSD that pretends to erase
+  itself.
+- `docs/hardware-safety.md`: which drive commands StickShredder sends, on which
+  path, and why.
 
 ### Changed
 
-- Version `2.0.0.dev0` (single source, as introduced in 1.1.1).
-- **Full verification is the default** (CLI `--verify`, GUI checkbox, settings);
-  `sample` stays available as the quicker option. The default method in the
-  settings is now the one-pass zero fill.
-- `--method` is optional for `wipe` (defaults to the recommendation).
-- **Includes the 1.1.2 fix:** volumes stay locked through wipe and
-  verification — also during the experimental Secure Erase. The safety
-  re-check before "reformat after wipe" releases its locks before the disk
-  is reformatted.
-- **Only media errors count as bad sectors.** A `WriteFile` failure is
-  skipped as a bad sector only for real media errors (e.g. CRC, I/O device
-  error, hardware error). "Access denied" (error 5 — Windows mounted the
-  drive again) and every other error stop the wipe as failed instead of
-  being reported as thousands of bad sectors.
-- The history's `result` column records `OK` / `LIMITED` / `FAILED`. Older
-  entries with `SUCCESS` / `FAILED` are still read and shown correctly; the
-  history chain is unaffected.
+- **Full verification is the default** (CLI, GUI, settings); the default
+  method is one pass of zeros. The GUI offers full or sample verification.
+- **3-pass and 7-pass methods** stay selectable but are never recommended;
+  choosing them shows that they add time, not security.
+- `--method` is optional for `wipe`. `--enhanced` is kept for compatibility
+  and no longer needed.
+- **Only media errors count as bad sectors.** "Access denied" (Windows mounted
+  the disk again) and every other write error stop the wipe as failed.
+- The history's `result` column records `OK` / `LIMITED` / `FAILED`; older
+  `SUCCESS` / `FAILED` entries are still read correctly.
+- The connection type comes from Windows' storage bus type; SD, MMC and
+  external hard-disk media count as external.
+- Version 2.0.0.
 
 ### Security
 
-- **System-disk guard extended to internal disks.** System disks are the disk
-  holding the Windows folder plus every disk the Windows storage stack reports
-  as boot or system disk (`MSFT_Disk` `IsBoot`/`IsSystem`, as in 1.1.1).
-  `open_physical_drive()` refuses every such disk as a last line of defence.
-  With internal-disk wiping now possible, the guard fails safe: if the Windows
-  disk or the boot layout cannot be read, every internal disk is refused.
-- **An MBR "active" partition no longer counts as system.** Bootable USB
-  installer sticks carry that flag; they stay wipeable.
-- **The pre-write safety gate (`prepare_target`) now also runs before
-  `--method secure-erase` and before "reformat after wipe"**, and accepts
-  letterless disks (nothing to dismount). A refused reformat is skipped; the
-  wipe's certificate is still issued.
+- **Drive commands follow strict rules:** one path per disk chosen from bus
+  type and driver, only Microsoft's in-box drivers (`storahci`, `stornvme`),
+  never the system disk, never a second path after a failure. USB bridges get
+  read-only queries only. (A pre-release probe that tried command families one
+  after another crashed Windows on the development PC; this never shipped.)
+- The pre-write safety check now also runs before a hardware erase, before an
+  unlock and before "reformat after wipe", and accepts disks without a drive
+  letter. The reformat script refuses boot/system disks before `Clear-Disk`.
+- The system-disk guard fails safe for internal disks: if the Windows disk or
+  the boot layout cannot be read, every internal disk is refused. An MBR
+  "active" partition alone does not make a disk a system disk, so bootable USB
+  installer sticks stay wipeable.
+- The private signing key is never shown; it leaves the PC only as a
+  password-protected export.
+- Hardware erase: a drive that already has a password is refused before
+  anything is set; after the drive rejects the unlock password the unlock is
+  not offered again for that disk in the session; the window cannot be closed
+  while an SSD erases itself or is being unlocked.
 
-### Tests
+### Fixed
 
-- 338 passing. New: bad-sector tolerance/ceiling/dedup, letterless
-  enumeration, `is_safe_to_wipe` gate, active-partition USB sticks stay wipeable,
-  ATA pass-through parsing, HPA/DCO detection, secure-erase state machine, CLI
-  secure-erase + HPA wiring, the safety gate before secure erase and reformat,
-  and the GUI internal-drive safety gate.
+- A USB enclosure using UAS (e.g. Realtek RTL9210B) was shown as an internal
+  NVMe disk.
+- Missing administrator rights are named as such when a volume cannot be
+  opened (Win32 error 5).
+<!-- wave-5 polish -->
+
+### Removed
+
+- The old main window and the options, history and settings dialogs (replaced
+  by the new pages).
+- The 1.x screenshots in `docs/screenshots/`.
 
 ## [1.1.2] - 2026-11-18
 

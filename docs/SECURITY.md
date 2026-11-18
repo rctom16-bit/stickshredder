@@ -8,14 +8,27 @@ Dieses Dokument enthält eine ehrliche Bewertung der Sicherheitsfähigkeiten und
 
 ## Table of Contents
 
+- [Supported Versions](#supported-versions)
 - [Software Limitations](#software-limitations)
 - [SSD and Flash Wear Leveling](#ssd-and-flash-wear-leveling)
 - [HDD vs. SSD: Effectiveness of Overwrite Methods](#hdd-vs-ssd-effectiveness-of-overwrite-methods)
 - [Not a Substitute for Physical Destruction](#not-a-substitute-for-physical-destruction)
+- [Signed Certificates and the Key Card](#signed-certificates-and-the-key-card)
+- [Hardware Erase (Beta)](#hardware-erase-beta)
 - [DEKRA / DIN Certification Disclaimer](#dekra--din-certification-disclaimer)
 - [When to Use Commercial Tools Instead](#when-to-use-commercial-tools-instead)
 - [Responsible Disclosure](#responsible-disclosure)
 - [Contact](#contact)
+
+---
+
+## Supported Versions
+
+| Version | Security fixes |
+|---|---|
+| 2.0.x | Yes |
+| 1.1.x | Yes, until 2.0 is released |
+| older | No |
 
 ---
 
@@ -27,9 +40,9 @@ Key implications:
 
 - **Operating system dependency:** StickShredder relies on the Windows storage stack to address sectors on the target device. If the OS cannot see a sector, StickShredder cannot overwrite it.
 - **Controller abstraction:** Modern storage devices (especially SSDs and flash drives) place a controller between the host and the physical storage cells. The controller may remap, reserve, or hide sectors in ways that are invisible to software running on the host.
-- **Device firmware:** The behavior of the storage device depends on its firmware. StickShredder has no ability to verify firmware behavior, detect hidden partitions managed by the controller (HPA, DCO), or bypass firmware-level protections.
+- **Device firmware:** The behavior of the storage device depends on its firmware. StickShredder cannot verify firmware behavior or bypass firmware-level protections. Since 2.0 it detects hidden areas (HPA, DCO) on SATA disks connected directly and reports them — it never removes them, and it cannot detect them behind USB bridges or vendor RAID/VMD drivers.
 - **Functional device required:** The target device must be operational and writable. StickShredder cannot wipe a device that is physically damaged, read-only, or otherwise non-functional.
-- **No verification of physical erasure:** StickShredder verifies that overwrite operations complete without I/O errors. It cannot verify that the underlying physical cells have actually been overwritten, as this would require hardware-level access that is not available through standard OS interfaces.
+- **Verification reads back what the device returns:** Full verification (the default since 2.0) reads every addressable sector back and compares it with the expected pattern. It proves what the device *returns* to Windows. It cannot prove that every physical cell was overwritten (spare, remapped or over-provisioned flash), as that would require access below the controller that standard OS interfaces do not provide.
 
 ---
 
@@ -84,7 +97,7 @@ For a typical 32 GB USB flash drive:
 
 For data requiring guaranteed destruction on SSD or flash media:
 
-1. **ATA Secure Erase / NVMe Format:** These are firmware-level commands that instruct the controller to erase all cells, including over-provisioned and remapped areas. Not all devices implement these commands correctly or at all. Support for ATA Secure Erase is planned for a future version of StickShredder.
+1. **ATA Secure Erase / NVMe Format:** These are firmware-level commands that instruct the controller to erase all cells, including over-provisioned and remapped areas. Not all devices implement these commands correctly or at all. StickShredder 2.0 offers ATA Secure Erase as a **Beta** for SATA SSDs connected directly (see [Hardware Erase (Beta)](#hardware-erase-beta)); it is **not tested on real hardware yet**. NVMe sanitize/format is not built.
 
 2. **Cryptographic Erase (if supported):** Some self-encrypting drives (SEDs) support cryptographic erase, which destroys the encryption key, rendering all data on the drive unrecoverable. This is instantaneous and effective, but only available on devices with hardware encryption.
 
@@ -120,7 +133,7 @@ StickShredder's wipe methods provide **partial protection** on SSDs and flash dr
 | Single-pass sufficient | Yes (for most use cases) | No guarantee |
 | Multi-pass adds security | Marginal (on modern drives) | Does not address fundamental limitation |
 | Suitable for Schutzklasse 1 | Yes | Yes (with caveats) |
-| Suitable for Schutzklasse 2 | Yes | Use ATA Secure Erase or physical destruction |
+| Suitable for Schutzklasse 2 | Yes | Hardware erase (Beta, SATA only, untested) or physical destruction |
 | Suitable for Schutzklasse 3 | Physical destruction recommended | Physical destruction required |
 
 ---
@@ -135,6 +148,30 @@ StickShredder is a software-based tool. It **cannot and does not** replace physi
 - **Regulatory or contractual mandates:** Where laws, contracts, or industry standards explicitly require physical destruction with certified documentation.
 
 For physical destruction, use a DIN 66399-certified destruction service that provides an official destruction certificate (Vernichtungsnachweis). This is fundamentally different from the deletion certificates generated by StickShredder.
+
+---
+
+## Signed Certificates and the Key Card
+
+Since 2.0 every deletion certificate is signed with Ed25519.
+
+- **The key** is created per installation on first use and stored in `%USERPROFILE%\.stickshredder\`, protected with Windows DPAPI (bound to the Windows user). The private key is never shown. `stickshredder key export` writes it to a password-protected file to move it to another PC; `key import` replaces the installation's key.
+- **What a valid signature proves:** the certificate's data has not changed since it was signed, and it was signed with this key. It does **not** prove that the disk was physically erased — that rests on the wipe and the read-back verification recorded in the certificate.
+- **Trust anchor:** a fingerprint printed on a certificate proves nothing alone, since a forger can sign with their own key. The **key card** (one-page PDF: company, fingerprint, QR code) is meant to be signed on paper and filed with the IT documentation or given to auditors. A certificate is trustworthy when its fingerprint matches the key card. Keys are trusted per installation (`stickshredder trust …`, Schlüssel page) and per browser on the verify page.
+- **Verify page** (`https://rctom16-bit.github.io/stickshredder/verify/`): static HTML and JavaScript, no external scripts, no tracking. The verification code is in the link after `#`, which browsers do not send to the server; a dropped PDF is read locally. Trusted keys are kept in the browser's local storage.
+- **History chain:** each wipe-history entry contains a SHA-256 hash over the previous entry's hash and its own data. Editing, deleting, inserting or reordering entries breaks the chain from that point (`stickshredder history --verify`). The newest hash is written into each signed certificate, so removing entries at the end is visible as well.
+- **Limits:** anyone who can use the Windows account that owns the key can sign certificates with it. Protect that account, and remove a key from the trusted lists if a PC is lost or the key may have leaked.
+
+---
+
+## Hardware Erase (Beta)
+
+Available since 2.0 for **SATA SSDs connected directly** (Microsoft's `storahci` driver). Off by default: GUI „Beta-Funktionen aktivieren“, CLI `--method secure-erase --experimental`.
+
+- **Procedure:** the drive is asked whether its security erase is ready (IDENTIFY only). If it is frozen, locked, already has a password or does not support the command, StickShredder stops before anything is written. Otherwise it sets the temporary user password `StickShredder` (shown on screen and written to the audit log first), runs ATA SECURITY ERASE UNIT (enhanced when offered), then writes one pass of zeros and verifies every sector. The certificate result comes from that verification; the drive's own report alone never makes a wipe "successful".
+- **Not offered** for SSDs behind USB bridges (StickShredder sends only read-only queries over USB bridges), for NVMe (sanitize is not built), for disks behind vendor RAID/VMD drivers, and never for the system disk. The rules are in [hardware-safety.md](hardware-safety.md).
+- **Interruption:** if the erase is interrupted, the drive may stay locked with the temporary password. „SSD entsperren …“ / `stickshredder unlock --experimental` removes it with one try (SECURITY UNLOCK + DISABLE PASSWORD).
+- **Status:** **not tested on real hardware.** The maintainer has no PC with a SATA port; the procedure is tested against simulated drives only. Firmware erase implementations vary between vendors. Do not rely on it for sensitive data until it has been confirmed on your own hardware.
 
 ---
 
@@ -169,7 +206,7 @@ Consider using a commercially certified wipe tool or destruction service in the 
 
 5. **Liability concerns:** If improper data destruction could expose your organization to significant legal or financial liability, the cost of certified tools (typically EUR 200-500/year) is a reasonable investment.
 
-6. **SSD/flash with sensitive data:** For guaranteed erasure of SSDs, look for tools that support ATA Secure Erase with vendor-level verification.
+6. **SSD/flash with sensitive data:** StickShredder's hardware erase is Beta and untested. For guaranteed erasure of SSDs, use tools with tested, vendor-level erase support — or destroy the drive physically.
 
 Commercial tools in this space include Blancco Drive Eraser, Certus Erasure, and others that hold relevant certifications. This is not an endorsement of any specific product.
 
@@ -194,7 +231,8 @@ If you discover a security vulnerability in StickShredder -- for example, a scen
 
 - Data not being overwritten correctly (sectors skipped, patterns not applied)
 - System drive protection bypass (wipe of a system drive becoming possible)
-- Certificate forgery or manipulation vulnerabilities
+- Certificate forgery or manipulation vulnerabilities (signature, verify page, key card, history chain)
+- A drive command sent to a disk or driver that the [hardware-safety rules](hardware-safety.md) exclude
 - Privilege escalation through StickShredder
 - Any behavior that could lead to incomplete wipe without user awareness
 
@@ -210,7 +248,7 @@ If you discover a security vulnerability in StickShredder -- for example, a scen
 
 - **Author:** Robin Oertel
 - **Email:** roertel16@gmail.com
-- **GitHub:** https://github.com/roertel16/stickshredder
+- **GitHub:** https://github.com/rctom16-bit/stickshredder
 - **Security reports:** roertel16@gmail.com (subject line: "StickShredder Security Report")
 
 For general questions and feature requests, please use the GitHub issue tracker.

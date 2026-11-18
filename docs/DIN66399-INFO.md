@@ -179,20 +179,34 @@ Die folgende Tabelle zeigt, welche Sicherheitsstufen für welche Schutzklassen z
 
 **(How StickShredder Maps to These Levels)**
 
-StickShredder ist ein softwarebasiertes Überschreibtool. Es kann logische Löschung (Überschreiben) durchführen, aber keine physische Vernichtung. Daher deckt es die Sicherheitsstufen **H-1 bis H-4** ab:
+StickShredder ist ein softwarebasiertes Löschtool. Es kann logisch löschen (überschreiben, bei SATA-SSDs als Beta zusätzlich den Löschbefehl der SSD auslösen), aber nicht physisch vernichten. Auf dem Zertifikat stehen die gewählte **Schutzklasse** (Standard: 2) und die **Sicherheitsstufe des Verfahrens**:
 
-(StickShredder is a software-based overwriting tool. It can perform logical deletion -- overwriting -- but not physical destruction. Therefore, it covers security levels H-1 through H-4.)
+(StickShredder is a software-based tool. It can delete logically — overwrite, and as a Beta also trigger a SATA SSD's own erase command — but it cannot destroy physically. The certificate states the chosen protection class, default 2, and the security level of the method.)
 
-| StickShredder-Methode | DIN 66399 Stufe | Geeignet für Schutzklasse |
+| StickShredder-Verfahren | Stufe auf dem Zertifikat | NIST SP 800-88 |
 |---|---|---|
-| Zero-Fill (1 Durchlauf) | H-1 / H-2 | Schutzklasse 1 |
-| 3-Pass Random (3 Durchläufe) | H-3 | Schutzklasse 1, bedingt Schutzklasse 2 |
-| BSI VSITR (7 Durchläufe) | H-4 | Schutzklasse 1-2 |
-| Benutzerdefiniert | Variiert | Abhängig von Konfiguration |
+| Nullen, 1 Durchgang (empfohlen) | 1-2 | Clear |
+| Zufall, 3 Durchgänge | 3 | Clear |
+| BSI-VSITR, 7 Durchgänge | 4+ | Clear |
+| Benutzerdefiniert | custom | Clear |
+| Hardware-Löschung (Beta) + 1× Nullen | 1-2 (Stufe des Überschreibens) | Purge |
 
-> **Einschränkung bei SSDs/Flash (Limitation for SSDs/Flash):** Die oben genannten Zuordnungen gelten primär für herkömmliche Festplatten (HDDs). Bei SSDs und Flash-basierten USB-Datenträgern kann aufgrund von Wear Leveling und Over-Provisioning nicht garantiert werden, dass alle physischen Speicherzellen überschrieben werden. Für SSDs mit Daten der Schutzklasse 2 oder höher wird physische Vernichtung oder ATA Secure Erase empfohlen.
+> **Wichtig (Important):** Die Stufen sind die herkömmliche Einordnung der Überschreibverfahren, keine Prüfung nach der Norm. Seit 2.0 empfiehlt StickShredder für jeden Datenträger **einen Durchgang mit Nullen und eine vollständige Prüfung** (jeder Sektor wird zurückgelesen): Mehr Durchgänge bringen bei heutigen Datenträgern keinen Sicherheitsgewinn — bei Festplatten genügt ein Durchgang, bei SSDs und Flash liegt das Problem in Zellen, die Überschreiben gar nicht erreicht. 3 und 7 Durchgänge bleiben für Vorgaben wählbar, die sie verlangen. Ob ein Verfahren zu Ihrer Schutzklasse passt, entscheiden Sie mit Ihrem Datenschutzbeauftragten.
 >
-> (The mappings above apply primarily to traditional hard drives. For SSDs and flash-based USB drives, wear leveling and over-provisioning mean that overwriting all physical memory cells cannot be guaranteed. For SSDs with data of protection class 2 or higher, physical destruction or ATA Secure Erase is recommended.)
+> (The levels are the customary classification of overwrite methods, not an assessment under the standard. Since 2.0 StickShredder recommends one pass of zeros plus full verification for every medium: more passes add no security on today's media — one pass is enough for hard disks, and on SSDs and flash the problem is cells that overwriting cannot reach at all. 3 and 7 passes remain selectable for policies that require them. Whether a method fits your protection class is for you and your data protection officer to decide.)
+
+> **Einschränkung bei SSDs/Flash (Limitation for SSDs/Flash):** Bei SSDs und Flash-basierten USB-Datenträgern kann wegen Wear Leveling und Over-Provisioning nicht garantiert werden, dass alle physischen Speicherzellen überschrieben werden. StickShredder weist darauf hin; bei Schutzklasse 3 empfiehlt es die physische Vernichtung. Die Hardware-Löschung (Beta) erreicht auch Reserve-Bereiche, gibt es aber nur für direkt angeschlossene SATA-SSDs, und sie ist **noch nicht auf echter Hardware getestet**.
+>
+> (For SSDs and flash-based USB drives, wear leveling and over-provisioning mean that overwriting every physical cell cannot be guaranteed. StickShredder warns about this and recommends physical destruction for protection class 3. The hardware erase (Beta) also reaches spare areas, but only exists for SATA SSDs connected directly and is not tested on real hardware yet.)
+
+### Das Zertifikat (The Certificate)
+
+- Das Zertifikat ist **nach den Begriffen der DIN 66399 / ISO 21964 aufgebaut**. StickShredder ist **nicht** von DEKRA, DIN oder einer anderen Stelle zertifiziert; das steht auch in der Fußzeile des Zertifikats.
+- Seit 2.0 ist jedes Zertifikat **signiert**. Die Signatur beweist, dass das Zertifikat seit der Erstellung unverändert ist und mit dem Schlüssel dieser Installation erstellt wurde. Vertrauensanker ist die unterschriebene **Schlüsselkarte** mit dem Fingerabdruck des Schlüssels. Geprüft wird in StickShredder (Seite Zertifikate, `stickshredder verify-cert`) oder im Browser auf der Prüfseite; dort wird nichts hochgeladen.
+- Die Signatur beweist **nicht**, dass physisch gelöscht wurde. Das belegen das Löschprotokoll und die Rückleseprüfung auf dem Zertifikat — so weit, wie der Datenträger an Windows zurückmeldet.
+- Ergebnis in drei Stufen: *Erfolgreich*, *Mit Einschränkungen* (z. B. nicht beschreibbare Sektoren oder ein versteckter Bereich HPA/DCO) oder *Fehlgeschlagen*.
+
+(The certificate is laid out along DIN 66399 / ISO 21964 terms; StickShredder is not certified by DEKRA, DIN or anyone else, as the certificate footer states. Since 2.0 each certificate is signed: the signature proves the certificate is unchanged and was made with this installation's key; the trust anchor is the signed key card with the key's fingerprint. Checking works in StickShredder or on the verify page in the browser, where nothing is uploaded. The signature does not prove physical erasure — the wipe log and the read-back verification do, as far as the device reports to Windows. Results come in three levels: successful, with limitations, failed.)
 
 ---
 
@@ -210,9 +224,9 @@ Es gibt zwei grundsätzlich verschiedene Ansätze zur Datenvernichtung:
 - **Werkzeuge:** Software wie StickShredder, nwipe, DBAN, Eraser
 - **Vorteile:** Datenträger kann wiederverwendet werden; keine spezielle Hardware erforderlich; kostengünstig
 - **Nachteile:** Bei SSDs/Flash nicht alle Zellen erreichbar; abhängig von korrekter Software-Implementierung; Datenträger muss funktionsfähig sein
-- **Abdeckung:** Sicherheitsstufen H-1 bis H-4 (für HDDs)
+- **Abdeckung:** bei HDDs alle adressierbaren Sektoren; bei SSDs/Flash nicht die Reserve-Bereiche
 
-(Method: Overwriting data on the carrier with new data. Tools: Software like StickShredder. Advantages: Carrier can be reused; no special hardware required; cost-effective. Disadvantages: Not all cells reachable on SSDs/flash; depends on correct software implementation; carrier must be functional. Coverage: Security levels H-1 to H-4 for HDDs.)
+(Method: Overwriting data on the carrier with new data. Tools: Software like StickShredder. Advantages: Carrier can be reused; no special hardware required; cost-effective. Disadvantages: Not all cells reachable on SSDs/flash; depends on correct software implementation; carrier must be functional. Coverage: every addressable sector on HDDs; not the spare areas of SSDs/flash.)
 
 ### Physische Vernichtung (Physical Destruction)
 
@@ -238,9 +252,9 @@ Physische Vernichtung wird empfohlen oder ist erforderlich in folgenden Fällen:
 
    (Protection Class 3: The minimum security level H-5 requires physical destruction. Software-based overwriting is *not* sufficient.)
 
-2. **SSD- und Flash-Datenträger mit sensiblen Daten:** Aufgrund von Wear Leveling und Over-Provisioning kann softwarebasiertes Überschreiben nicht alle physischen Zellen erreichen. Bei Schutzklasse 2 und höher auf SSDs/Flash ist physische Vernichtung oder ATA Secure Erase dringend empfohlen.
+2. **SSD- und Flash-Datenträger mit sensiblen Daten:** Aufgrund von Wear Leveling und Over-Provisioning kann softwarebasiertes Überschreiben nicht alle physischen Zellen erreichen. Bei Schutzklasse 2 und höher auf SSDs/Flash ist physische Vernichtung oder ein geprüfter Hardware-Löschbefehl (ATA Secure Erase; in StickShredder als ungetestete Beta für SATA-SSDs) dringend empfohlen.
 
-   (SSDs and flash carriers with sensitive data: Due to wear leveling and over-provisioning, software-based overwriting cannot reach all physical cells. For protection class 2 and higher on SSDs/flash, physical destruction or ATA Secure Erase is strongly recommended.)
+   (SSDs and flash carriers with sensitive data: Due to wear leveling and over-provisioning, software-based overwriting cannot reach all physical cells. For protection class 2 and higher on SSDs/flash, physical destruction or a proven hardware erase command — ATA Secure Erase; in StickShredder an untested Beta for SATA SSDs — is strongly recommended.)
 
 3. **Defekte Datenträger:** Wenn ein Datenträger nicht mehr funktionsfähig ist und nicht überschrieben werden kann, ist physische Vernichtung die einzige Option.
 
