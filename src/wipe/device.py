@@ -90,7 +90,7 @@ class DeviceInfo:
     serial_number: str
     capacity_bytes: int
     filesystem: str                  # NTFS, FAT32, exFAT, RAW, …
-    connection_type: str             # USB / SATA / NVMe / Unknown
+    connection_type: str             # USB / SATA / NVMe / SD / ... (MSFT_Disk.BusType)
     is_removable: bool
     is_system_drive: bool
     is_internal: bool = False
@@ -262,17 +262,65 @@ def _letters_on_disk(c: wmi.WMI, index: int) -> list[str]:
     })
 
 
+# MSFT_Disk.BusType (STORAGE_BUS_TYPE) -> connection shown to the user.
+_BUS_TYPE_NAMES = {
+    1: "SCSI", 3: "ATA", 7: "USB", 8: "RAID", 10: "SAS",
+    11: "SATA", 12: "SD", 13: "MMC", 17: "NVMe",
+}
+
+# Buses whose disks are plugged in from outside, not built into the PC.
+_EXTERNAL_CONNECTIONS = {"USB", "SD", "MMC"}
+
+
+def _storage_bus_types() -> dict[int, int] | None:
+    """{disk number: MSFT_Disk.BusType}; None when the storage query fails.
+
+    Win32_DiskDrive.InterfaceType is unreliable: a USB enclosure speaking
+    UAS reports "SCSI", like a system NVMe disk does. The storage stack
+    reports the real bus.
+    """
+    try:
+        storage = _get_storage_wmi_connection()
+        return {int(d.Number): int(d.BusType or 0) for d in storage.MSFT_Disk()}
+    except Exception as exc:  # noqa: BLE001 — fall back to InterfaceType
+        audit_log(f"Storage bus-type query failed: {exc}")
+        return None
+
+
+def _connection_type(
+    index: int, interface_type: str | None, bus_types: dict[int, int] | None
+) -> str:
+    """Connection of physical disk ``index``: storage BusType, else InterfaceType."""
+    name = _BUS_TYPE_NAMES.get((bus_types or {}).get(index, 0))
+    return name or _connection_type_from_interface(interface_type)
+
+
 def _connection_type_from_interface(interface_type: str | None) -> str:
+    """Fallback from Win32_DiskDrive.InterfaceType when BusType is unknown.
+
+    "SCSI" stays "SCSI": NVMe disks and UAS USB enclosures both report it,
+    so it says nothing about the real bus.
+    """
     if not interface_type:
         return "Unknown"
     iface = interface_type.upper()
     if "USB" in iface:
         return "USB"
-    if "NVME" in iface or "SCSI" in iface:
+    if "NVME" in iface:
         return "NVMe"
     if "IDE" in iface or "SATA" in iface:
         return "SATA"
     return interface_type
+
+
+def _is_external(connection: str, media_type: str) -> bool:
+    """True for disks plugged in from outside (USB, SD/MMC, external media)."""
+    media = media_type.lower()
+    return (
+        connection in _EXTERNAL_CONNECTIONS
+        or "removable" in media
+        or "external" in media
+    )
 
 
 _BITLOCKER_NAMESPACE = r"root\CIMV2\Security\MicrosoftVolumeEncryption"
@@ -417,6 +465,8 @@ def list_devices() -> list[DeviceInfo]:
         f"System disk indices: {sorted(sys_indices)}" if sys_indices
         else "System/boot disk could not be determined — all non-USB disks blocked"
     )
+    # Real bus per disk from the storage stack; None = use InterfaceType.
+    bus_types = _storage_bus_types()
 
     # Walk logical disks (the ones with drive letters)
     try:
@@ -436,12 +486,11 @@ def list_devices() -> list[DeviceInfo]:
                 continue
 
             interface_type = getattr(phys_disk, "InterfaceType", None)
-            connection = _connection_type_from_interface(interface_type)
-            media_type = (getattr(phys_disk, "MediaType", "") or "").lower()
+            connection = _connection_type(phys_index, interface_type, bus_types)
+            media_type = getattr(phys_disk, "MediaType", "") or ""
 
             is_removable = (
-                connection == "USB"
-                or "removable" in media_type
+                _is_external(connection, media_type)
                 or getattr(ldisk, "DriveType", 0) == 2  # DriveType 2 = Removable
             )
 
@@ -515,10 +564,10 @@ def list_devices() -> list[DeviceInfo]:
             continue
         try:
             interface_type = getattr(phys_disk, "InterfaceType", None)
-            connection = _connection_type_from_interface(interface_type)
-            media_type = (getattr(phys_disk, "MediaType", "") or "").lower()
+            connection = _connection_type(phys_index, interface_type, bus_types)
+            media_type = getattr(phys_disk, "MediaType", "") or ""
 
-            is_removable = connection == "USB" or "removable" in media_type
+            is_removable = _is_external(connection, media_type)
             is_system = _blocked_as_system(phys_index, connection, sys_indices)
             is_internal = connection != "USB" and not is_removable
 
