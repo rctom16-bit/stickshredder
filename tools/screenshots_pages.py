@@ -21,17 +21,18 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tools"))
 
-from screenshots_v2 import _isolate_profile  # noqa: E402
+from screenshots_v2 import DEMO_OPERATOR, _isolate_profile  # noqa: E402
 
+# Made-up devices: no real model names or serial numbers in published screenshots.
 _HISTORY = [
-    ("2026-11-12 08:41:10", "SanDisk 3.2Gen1", "0901C3F2CFA4", "Zero Fill (1 pass)", "OK"),
-    ("2026-11-12 09:30:52", "Intenso Basic Line", "21100845000102", "Zero Fill (1 pass)", "OK"),
-    ("2026-11-13 14:02:37", "WD Elements 2TB", "WX12A3456789", "Random (3 passes)", "OK"),
-    ("2026-11-14 10:15:05", "Kingston DataTraveler", "E0D55EA5741B", "Zero Fill (1 pass)",
+    ("2026-11-12 08:41:10", "Generic USB Flash Disk", "DEMO00000001", "Zero Fill (1 pass)", "OK"),
+    ("2026-11-12 09:30:52", "Example USB Stick 32GB", "DEMO00000003", "Zero Fill (1 pass)", "OK"),
+    ("2026-11-13 14:02:37", "Example External HDD 2TB", "DEMO00000004", "Random (3 passes)", "OK"),
+    ("2026-11-14 10:15:05", "Example USB Stick 16GB", "DEMO00000005", "Zero Fill (1 pass)",
      "LIMITED"),
-    ("2026-11-17 16:48:21", "Samsung SSD 870 EVO", "S6PNNS0T123456", "Zero Fill (1 pass)", "OK"),
-    ("2026-11-18 11:03:44", "Verbatim Store'n'Go", "075E1C2B", "BSI-VSITR (7 passes)", "FAILED"),
-    ("2026-11-18 13:27:09", "SanDisk Ultra Fit", "4C530001230925", "Zero Fill (1 pass)", "OK"),
+    ("2026-11-17 16:48:21", "Example SATA SSD 500GB", "DEMO00000002", "Zero Fill (1 pass)", "OK"),
+    ("2026-11-18 11:03:44", "Example USB Stick 8GB", "DEMO00000006", "BSI-VSITR (7 passes)", "FAILED"),
+    ("2026-11-18 13:27:09", "Example USB Stick 64GB", "DEMO00000007", "Zero Fill (1 pass)", "OK"),
 ]
 
 
@@ -55,10 +56,10 @@ def _demo_data(home: Path, config) -> Path:
     TrustStore.load(cfg.TRUST_FILE).add(partner.public_key_bytes(), "Muster IT · Außenstelle Fürth")
     token = key.sign_payload({
         "v": 1, "n": 14, "t": "2026-11-18T12:27:09Z", "op": config.operator_name,
-        "co": config.company.name, "dm": "SanDisk Ultra Fit", "ds": "4C530001230925",
+        "co": config.company.name, "dm": "Example USB Stick 64GB", "ds": "DEMO00000007",
         "r": "ok",
     })
-    pdf = home / "SS-000014_4C530001230925_20261118.pdf"
+    pdf = home / "SS-000014_DEMO00000007_20261118.pdf"
     pdf.write_bytes(b"%PDF-1.4\n% demo certificate\n% stickshredder-token:" + token.encode())
     return pdf
 
@@ -82,8 +83,9 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     config = AppConfig()
-    config.cert_output_dir = str(home / "certificates")
-    config.operator_name = "Robin"
+    # Shown on the Optionen page: a made-up folder, not the temp profile path.
+    config.cert_output_dir = r"D:\IT-Doku\Löschzertifikate"
+    config.operator_name = DEMO_OPERATOR
     config.company.name = "Muster IT GmbH"
     config.company.address = "Königstraße 12\n90402 Nürnberg"
     pdf = _demo_data(home, config)

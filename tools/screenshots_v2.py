@@ -21,6 +21,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 
+DEMO_OPERATOR = "Max Mustermann"
+
+
 def _isolate_profile(home: Path) -> None:
     import core.config as config
     import core.log as log
@@ -40,26 +43,27 @@ def _isolate_profile(home: Path) -> None:
 
 
 def _sample_disks():
+    """Made-up disks: no real model names or serial numbers in published screenshots."""
     from wipe.device import DeviceInfo
 
     gib = 1024 ** 3
     stick = DeviceInfo(
-        drive_letter="F:", device_id="\\\\.\\PhysicalDrive1", model="SanDisk 3.2Gen1",
-        serial_number="0901C3F2CFA4", capacity_bytes=int(57.7 * gib), filesystem="exFAT",
+        drive_letter="F:", device_id="\\\\.\\PhysicalDrive1", model="Generic USB Flash Disk",
+        serial_number="DEMO00000001", capacity_bytes=int(57.7 * gib), filesystem="exFAT",
         connection_type="USB", is_removable=True, is_system_drive=False,
-        friendly_name="SanDisk 3.2Gen1 (F:)", disk_letters=["F:"],
+        friendly_name="Generic USB Flash Disk (F:)", disk_letters=["F:"],
     )
     system = DeviceInfo(
-        drive_letter="C:", device_id="\\\\.\\PhysicalDrive0", model="SK hynix PVC10",
-        serial_number="AJ0ABC123", capacity_bytes=int(953.9 * gib), filesystem="NTFS",
+        drive_letter="C:", device_id="\\\\.\\PhysicalDrive0", model="Example NVMe SSD 1TB",
+        serial_number="DEMO00000000", capacity_bytes=int(953.9 * gib), filesystem="NTFS",
         connection_type="NVMe", is_removable=False, is_system_drive=True, is_internal=True,
-        friendly_name="SK hynix PVC10 (C:)", disk_letters=["C:"],
+        friendly_name="Example NVMe SSD 1TB (C:)", disk_letters=["C:"],
     )
     ssd = DeviceInfo(
-        drive_letter="", device_id="\\\\.\\PhysicalDrive2", model="Samsung SSD 870 EVO",
-        serial_number="S6PNNS0T123456", capacity_bytes=int(465.8 * gib), filesystem="RAW",
+        drive_letter="", device_id="\\\\.\\PhysicalDrive2", model="Example SATA SSD 500GB",
+        serial_number="DEMO00000002", capacity_bytes=int(465.8 * gib), filesystem="RAW",
         connection_type="USB", is_removable=False, is_system_drive=False,
-        friendly_name="Samsung SSD 870 EVO", disk_letters=[],
+        friendly_name="Example SATA SSD 500GB", disk_letters=[],
     )
     media = {stick.device_id: "flash", system.device_id: "ssd", ssd.device_id: "ssd"}
     return [system, stick, ssd], media
@@ -95,7 +99,7 @@ def main() -> int:
     app.setStyle("Fusion")
     config = AppConfig()
     config.cert_output_dir = str(Path(tempfile.mkdtemp(prefix="stickshredder_certs_")))
-    config.operator_name = "Robin"
+    config.operator_name = DEMO_OPERATOR
     theme = ThemeManager(app, "dark", load_fonts())
     theme.apply()
     window = AppWindow(config, theme)

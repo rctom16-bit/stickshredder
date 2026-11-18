@@ -1,6 +1,6 @@
 <h1 align="center">StickShredder</h1>
 
-<p align="center"><strong>Secure USB wipe tool with DIN 66399 / ISO 21964 deletion certificates</strong></p>
+<p align="center"><strong>Wipe USB sticks and disks on Windows — with a signed deletion certificate you can check</strong></p>
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-blue.svg"></a>
@@ -9,757 +9,655 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/03-wipe-progress.png" alt="StickShredder wiping a 128 GB USB drive" width="780">
+  <img src="docs/screenshots/v2/main-dark.png" alt="StickShredder: a USB stick selected, recommended method one pass of zeros with full verification" width="820">
 </p>
-<p align="center"><em>Wiping a 128 GB USB stick — phase badge, live progress, ETA, and an auto-generated DIN 66399 deletion certificate at the end.</em></p>
+
+**[Deutsche Version weiter unten ↓](#deutsch)**
 
 ---
 
-## Table of Contents
+## Contents
 
-- [What is StickShredder?](#what-is-stickshredder)
-- [Important Disclaimer](#important-disclaimer)
-- [Features](#features)
+- [What it is](#what-it-is)
 - [Screenshots](#screenshots)
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Wipe Methods](#wipe-methods)
-- [Recommendations & Results](#recommendations--results)
-- [DIN 66399 Explained](#din-66399-explained)
-- [SSD Limitations](#ssd-limitations)
+- [Download and install](#download-and-install)
+- [Quick start (GUI)](#quick-start-gui)
+- [CLI reference](#cli-reference)
+- [Wipe methods and verification](#wipe-methods-and-verification)
+- [Recommendations](#recommendations)
+- [Hardware erase (Beta)](#hardware-erase-beta)
+- [What the certificate proves — and what it doesn't](#what-the-certificate-proves--and-what-it-doesnt)
+- [Tested hardware](#tested-hardware)
+- [Limitations](#limitations)
 - [FAQ](#faq)
-- [Contributing](#contributing)
-- [License](#license)
+- [Build from source](#build-from-source)
+- [Licence](#licence)
 - [Deutsch](#deutsch)
 
 ---
 
-## What is StickShredder?
+## What it is
 
-StickShredder is a free, open-source Windows tool for securely wiping USB drives and generating deletion certificates structured according to DIN 66399 / ISO 21964 conventions. It is designed for German IT administrators in small and medium-sized businesses (SMBs) who need to document the secure disposal of data on removable media.
-
-Existing alternatives fall short in this space: **nwipe** is Linux-only and requires booting into a separate environment, **Eraser** does not generate deletion certificates, and **commercial certified tools** such as Blancco often cost EUR 200+ per year in licensing fees. StickShredder fills this gap by providing a straightforward GUI and CLI for secure USB wipes with professional, PDF-based deletion certificates -- all under an MIT license.
-
----
-
-## Important Disclaimer
-
-> **StickShredder is NOT DIN 66399 certified.**
->
-> This software generates deletion reports that are *structured according to* DIN 66399 / ISO 21964 conventions. The deletion certificates reference the standard's terminology (Schutzklassen, Sicherheitsstufen, media types) to provide a useful, standards-aware documentation format.
->
-> However, StickShredder has **not been officially audited or certified** by DEKRA, DIN, BSI, or any other certification body. The certificates it produces do not constitute proof of compliance with DIN 66399 in a legal or regulatory sense.
->
-> This is open-source software provided under the MIT license, without warranty of any kind. For data subject to strict regulatory requirements, consult your data protection officer and consider using certified commercial tools or physical destruction.
-
----
-
-## Features
-
-- **Secure wipe of USB drives** with multiple overwrite methods (Zero-Fill, Random, BSI VSITR, Custom)
-- **DIN 66399 / ISO 21964 structured deletion certificates** as PDF, including device serial number, wipe method, timestamp, and operator information
-- **Modern GUI** built with PySide6 (Qt6) -- intuitive, no training required
-- **CLI mode** for scripting and batch operations
-- **Multiple wipe methods** with configurable pass counts
-- **Real-time progress tracking** with estimated time remaining
-- **Drive detection** via WMI -- automatically identifies connected USB devices
-- **Safety guard** -- refuses to wipe system drives by design, with a fail-safe that never touches the Windows disk
-- **Internal drive support** *(2.0)* -- optionally wipe internal SATA disks (explicit opt-in), including disks without a drive letter
-- **Bad-sector tolerance** *(2.0)* -- unwritable sectors are skipped, counted, and reported on the certificate instead of aborting the wipe
-- **Hidden-area detection** *(2.0)* -- detects HPA/DCO regions an overwrite cannot reach and flags them on the certificate
-- **ATA Secure Erase** *(2.0, experimental)* -- issues the drive's own firmware erase for SSD/flash media (CLI, opt-in, not yet hardware-verified)
-- **Portable** -- no installation required (standalone .exe via PyInstaller)
-- **100% offline** -- no network access, no telemetry, no cloud dependency
-- **Free and open source** under the MIT license
+StickShredder is a free, open-source Windows program (GUI and command line) that overwrites a USB stick, SD card or disk sector by sector, reads every sector back to check the result, and writes a PDF deletion certificate. The certificate is laid out along DIN 66399 / ISO 21964 terms (protection class, security level) and names the NIST SP 800-88 category; it is signed with a key that belongs to your installation, so anyone can check later that it was not changed. It runs on normal Windows — no boot stick, no reboot — and works fully offline. It is built for IT admins in small companies who need to document how data carriers were wiped. **StickShredder is not certified by DEKRA, DIN, BSI or anyone else** — see [what the certificate proves](#what-the-certificate-proves--and-what-it-doesnt).
 
 ---
 
 ## Screenshots
 
-A full wipe walks the operator through **two confirmations, a live progress view, and a success dialog** — with a PDF certificate dropped in the output folder at the end.
+All screenshots show demo data (made-up disks, a demo wipe of a 10 MB file).
 
 <table>
   <tr>
-    <td width="50%" valign="top">
-      <p align="center"><strong>① Confirm destructive action</strong></p>
-      <img src="docs/screenshots/01-confirm-wipe.png" alt="Confirmation dialog with drive details">
-      <p align="center"><sub>Dialog restates the exact drive letter, model, serial, and capacity about to be destroyed.</sub></p>
-    </td>
-    <td width="50%" valign="top">
-      <p align="center"><strong>② Type DELETE to proceed</strong></p>
-      <img src="docs/screenshots/02-type-delete.png" alt="Type DELETE to confirm">
-      <p align="center"><sub>Second confirmation blocks accidental one-click wipes. No DELETE typed &rarr; no wipe.</sub></p>
-    </td>
+    <td width="50%"><img src="docs/screenshots/v2/main-light.png" alt="Disk selection, light theme"><br><sub><b>Löschen</b> — pick a disk; method, verification and classification are pre-set to the recommendation. The Windows disk is locked.</sub></td>
+    <td width="50%"><img src="docs/screenshots/v2/running-dark.png" alt="Wipe running, dark theme"><br><sub><b>Running</b> — overwrite, then every sector is read back. Speed, time left, log.</sub></td>
   </tr>
   <tr>
-    <td width="50%" valign="top">
-      <p align="center"><strong>③ Wipe + verify in progress</strong></p>
-      <img src="docs/screenshots/03-wipe-progress.png" alt="Wipe in progress">
-      <p align="center"><sub>Phase badge, pass counter, throughput, ETA. A stall watchdog warns within 60 seconds if the controller hangs.</sub></p>
-    </td>
-    <td width="50%" valign="top">
-      <p align="center"><strong>④ Success + certificate</strong></p>
-      <img src="docs/screenshots/04-wipe-success.png" alt="Wipe completed successfully">
-      <p align="center"><sub>PDF certificate auto-saved to the configured output folder. Ready for audit.</sub></p>
-    </td>
+    <td><img src="docs/screenshots/v2/result-light.png" alt="Result with signed certificate"><br><sub><b>Result</b> — three-level result and the signed certificate with QR code and key fingerprint.</sub></td>
+    <td><img src="docs/screenshots/v2/certificates-dark.png" alt="Certificates page"><br><sub><b>Zertifikate</b> — wipe history, chain status, and checking a certificate PDF.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/v2/keys-dark.png" alt="Keys page"><br><sub><b>Schlüssel</b> — this PC's signing key, key card, trusted keys of other PCs.</sub></td>
+    <td><img src="docs/screenshots/v2/options-light.png" alt="Options page"><br><sub><b>Optionen</b> — company data for the certificate, wipe defaults, Beta switch, demo mode.</sub></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/v2/hwerase-confirm-dark.png" alt="Hardware erase confirmation"><br><sub><b>Hardware erase (Beta)</b> — extra confirmation before the SSD erases itself.</sub></td>
+    <td><img src="docs/screenshots/v2/hwerase-result-dark.png" alt="Hardware erase result"><br><sub>Result of a hardware erase: the drive's own erase, then one pass of zeros and a full check.</sub></td>
   </tr>
 </table>
 
-Full-resolution images: [`docs/screenshots/`](docs/screenshots/). Example certificates: [`sample-certificate.pdf`](docs/examples/sample-certificate.pdf) and the [2.0 preview sample](docs/examples/sample-certificate-v1.2.pdf) showing the new bad-sector, HPA/DCO, and Secure Erase sections.
+More: [`docs/screenshots/v2/`](docs/screenshots/v2/) (every page in light and dark).
 
 ---
 
-## Installation
+## Download and install
 
-### Option A: Download the Installer
+Download from the [Releases](https://github.com/rctom16-bit/stickshredder/releases) page:
 
-Download the latest release from the [Releases](https://github.com/rctom16-bit/stickshredder/releases) page. Run the installer or extract the portable `.zip` and launch `StickShredder.exe`.
+- **`StickShredder-<version>-Setup.exe`** — installer (needs administrator rights, installs to *Program Files*).
+- **`StickShredder.exe`** — portable, runs without installing.
 
-### Option B: Build from Source
+StickShredder needs **administrator rights** to write to a whole disk. The window asks for elevation (UAC) when started without them; if you decline, it warns you and wiping will not work. The command line does not ask — run it from an elevated terminal.
 
-Requires **Python 3.11+** and **Windows**.
-
-```bash
-# Clone the repository
-git clone https://github.com/rctom16-bit/stickshredder.git
-cd stickshredder
-
-# Install dependencies
-pip install -e ".[dev]"
-
-# Run directly
-python -m src.main
-
-# Build standalone executable
-pyinstaller stickshredder.spec
-```
-
-The built executable will be in the `dist/` folder.
+Your settings, wipe history, audit log, signing key and certificates live in `%USERPROFILE%\.stickshredder\` (certificates in `certificates\` unless you choose another folder).
 
 ---
 
-## Quick Start
+## Quick start (GUI)
 
-### GUI
+The window opens in German; the **EN** button at the bottom left switches to English.
 
-1. Launch `StickShredder.exe` (or `python -m src.main`)
-2. Insert the USB drive you want to wipe
-3. Select the drive from the device list
-4. Choose a wipe method (e.g., "3-Pass Random")
-5. Click **Wipe** and confirm the safety prompt
-6. After completion, the deletion certificate is generated automatically as a PDF
+1. **Once:** open **Optionen** and enter your company name, address and (optionally) a logo — they are printed on every certificate. Then open **Schlüssel** and click **Schlüsselkarte erstellen** (create key card). Print the key card, sign it and file it with your IT documentation (see [below](#what-the-certificate-proves--and-what-it-doesnt)).
+2. Plug in the stick. The disk list refreshes by itself when a USB device is plugged in or removed.
+3. On **Löschen**, pick the disk (**Anderen wählen** / choose another). The Windows disk is shown as *Systemplatte · gesperrt* and cannot be selected. Internal disks only become selectable after ticking **Interne Festplatten erlauben** (allow internal disks).
+4. The tiles show method, verification and classification, pre-set to the [recommendation](#recommendations). **Andere Methode …** changes method, protection class, operator, verification and an optional reformat for this wipe.
+5. Click **Jetzt sicher löschen** and type **LÖSCHEN** (English UI: **DELETE**) to confirm.
+6. When it is done you see the result (*Erfolgreich*, *Mit Einschränkungen* or *Fehlgeschlagen*) and the signed certificate with **Zertifikat öffnen** (open certificate).
 
-### CLI
+**Try it without a disk:** **Optionen → Demo-Modus → Demo starten** runs the whole flow on a small temporary file. Real disks are not touched.
 
-```bash
-# List detected devices (USB + internal)
+---
+
+## CLI reference
+
+The same `StickShredder.exe` is the command-line tool when you pass arguments (from source: `python src\main.py <command>`). Run it in an elevated terminal. `stickshredder <command> --help` shows every option.
+
+| Command | What it does |
+|---|---|
+| `list` | List detected disks with their safety status. |
+| `info --device X [--schutzklasse N]` | Show model, type, drive letters, system/internal status and the recommended procedure. Reads Windows' device information only; the disk is not opened. |
+| `wipe --device X --operator NAME [options]` | Wipe a disk and write a signed certificate. |
+| `unlock --device X --experimental [--allow-internal] [--yes]` | Remove StickShredder's temporary drive password after an interrupted hardware erase (Beta). One try only. |
+| `history [--export FILE] [--verify]` | Show the wipe history, export it as CSV, or check its hash chain. |
+| `verify-cert PDF` | Check a certificate's signature. |
+| `keycard [--output PATH] [--language de\|en\|both]` | Create the key card PDF for this installation's key. |
+| `trust add KEY [--name NAME]` / `trust list` / `trust remove FINGERPRINT` | Manage trusted keys (from a key-card link, key-card PDF or base64url key). |
+| `key export PATH` / `key import PATH` | Move the signing key to another PC (password-protected file; the password is asked for interactively). |
+
+`--device` takes a drive letter (`E:`), a disk number (`2`) or `PhysicalDrive2`. Disks without a drive letter are listed by `list` with their `PhysicalDriveN` name.
+
+**`wipe` options**
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--method zero\|standard\|bsi\|custom\|secure-erase` | the recommendation for the device | `zero` 1 pass of zeros · `standard` 3 random passes · `bsi` BSI-VSITR, 7 passes · `custom` · `secure-erase` = [hardware erase (Beta)](#hardware-erase-beta) |
+| `--verify none\|sample\|full` | `full` | see [verification](#wipe-methods-and-verification) |
+| `--schutzklasse 1\|2\|3` | `2` | DIN 66399 protection class on the certificate |
+| `--operator NAME` | — (required) | operator on the certificate |
+| `--client REF`, `--asset-tag TAG` | empty | client reference, asset tag or ticket number |
+| `--passes N`, `--pattern zero\|ones\|random` | `3`, `random` | for `--method custom` |
+| `--output-dir DIR` | from settings | certificate folder |
+| `--language de\|en\|both` | from settings (`de`) | certificate language |
+| `--reformat none\|fat32\|exfat\|ntfs` | `none` | create a partition and format after the wipe |
+| `--reformat-label LABEL`, `--reformat-partition MBR\|GPT` | `USB`, `MBR` | label and partition style for `--reformat` |
+| `--allow-internal` | off | allow internal (non-removable) disks; the Windows disk is always refused |
+| `--experimental` | off | required for `--method secure-erase` |
+| `--yes`, `-y` | off | skip confirmation prompts (scripting) |
+
+`--enhanced` is still accepted for compatibility; the hardware erase uses the enhanced variant by itself when the drive offers it.
+
+**Exit codes**
+
+| Command | `0` | `1` | `2` | `3` |
+|---|---|---|---|---|
+| `wipe` | successful | failed | — | with limitations |
+| `verify-cert` | genuine, key trusted | signature valid, key unknown | invalid, altered or unsigned | — |
+| `history --verify` | chain unchanged | chain changed | — | — |
+
+**Examples**
+
+```bat
 stickshredder list
-
-# Show a device and the recommended procedure (reads Windows' device info only)
 stickshredder info --device E:
 
-# Wipe drive E: with the recommended procedure (one zero pass + full verify)
-stickshredder wipe --device E: --operator "Your Name"
+rem Recommended procedure: one pass of zeros + full verification
+stickshredder wipe --device E: --operator "Max Mustermann"
 
-# Only if a policy requires it: BSI VSITR (7-pass), Schutzklasse 3, client reference, certificate saved to a specific folder
-stickshredder wipe --device E: --method bsi --schutzklasse 3 --operator "Your Name" --client "ACME GmbH" --output-dir "C:\Certificates"
+rem With client reference, protection class 3, certificate in a given folder
+stickshredder wipe --device E: --operator "Max Mustermann" --schutzklasse 3 --client "ACME GmbH" --output-dir "D:\Certificates"
 
-# Wipe an internal SATA disk (opt-in; the Windows disk is always protected)
-stickshredder wipe --device PhysicalDrive2 --method standard --allow-internal --operator "Your Name"
+rem Internal disk without a drive letter
+stickshredder wipe --device PhysicalDrive2 --allow-internal --operator "Max Mustermann"
 
-# EXPERIMENTAL: ATA Secure Erase (the drive's own firmware erase; directly connected SATA drives only)
-stickshredder wipe --device PhysicalDrive2 --method secure-erase --experimental --allow-internal --operator "Your Name"
+rem Hardware erase (Beta), SATA SSD connected directly
+stickshredder wipe --device PhysicalDrive2 --method secure-erase --experimental --allow-internal --operator "Max Mustermann"
 
-# Show the wipe history
-stickshredder history
+rem Reformat as exFAT afterwards
+stickshredder wipe --device E: --operator "Max Mustermann" --reformat exfat --reformat-label ARCHIV
+
+stickshredder verify-cert SS-000042_EXAMPLE_20261118.pdf
+stickshredder history --verify
+stickshredder keycard --language both
 ```
-
-Methods: `zero` (1 pass), `standard` (3-pass random), `bsi` (BSI VSITR, 7 passes), `custom` (with `--passes` and `--pattern`), `secure-erase` (experimental, needs `--experimental`). Without `--method`, `wipe` uses the recommended method for the device and says so. Run `stickshredder wipe --help` for all options.
-
-> **Note:** Administrator privileges are required. Right-click and select "Run as administrator" or use an elevated terminal.
 
 ---
 
-## Wipe Methods
+## Wipe methods and verification
 
-| Method | Passes | Pattern | DIN 66399 Level | Verify Support | Use Case |
+| Method | CLI | Passes | Pattern | Security level on the certificate |
+|---|---|---|---|---|
+| **Zeros, 1 pass** (recommended) | `zero` | 1 | `0x00` | 1-2 |
+| Random, 3 passes | `standard` | 3 | random data | 3 |
+| BSI-VSITR, 7 passes | `bsi` | 7 | `0x00`/`0xFF` alternating, last pass random | 4+ |
+| Custom | `custom` | your choice | zeros, ones or random | custom |
+
+One pass is enough for today's media. The 3-pass and 7-pass methods are kept because some internal policies still require them; they are never recommended, and choosing them shows a note that they add time, not security.
+
+**Verification** — after the overwrite, StickShredder reads the disk back:
+
+| Mode | What it does | Time |
+|---|---|---|
+| `full` (default) | reads **every** sector and compares it with the expected pattern; lists the first 100 mismatching offsets | roughly doubles the run time |
+| `sample` | checks 100 random sectors | a few seconds |
+| `none` | no check (CLI only; the GUI always checks) | — |
+
+Only full verification catches sectors that "silently fail" (the write reports success, but old data is still there when read back). For methods whose last pass is random, StickShredder adds one pass of zeros when verification is on, so the result can be compared byte by byte; the certificate shows the real number of passes.
+
+**Bad sectors** — a sector that cannot be written because of a media error is skipped, counted and listed on the certificate; the wipe continues and ends *with limitations*. If more than 10 % of the disk cannot be written, the wipe fails. Any other write error (for example "access denied" because Windows mounted the disk again) stops the wipe as failed.
+
+**Hidden areas (HPA/DCO)** — on SATA disks connected directly (Microsoft's own SATA driver), StickShredder asks the disk before wiping whether part of it is hidden from Windows (Host Protected Area, Device Configuration Overlay). Such areas cannot be overwritten. They are reported, never removed, and the result is *with limitations*.
+
+**Reformat** — optionally, after the wipe StickShredder creates one partition over the whole disk and formats it (exFAT, FAT32 up to 32 GB, NTFS). If formatting fails, the wipe result and the certificate stay as they are.
+
+**Three-level result** — the same in the GUI, CLI, history and certificate:
+
+| Result | When | History `result` |
+|---|---|---|
+| **Erfolgreich / Successful** | wipe and verification passed | `OK` |
+| **Mit Einschränkungen / With limitations** (GUI chip: *EINGESCHRÄNKT*) | unwritable sectors, a hidden area (HPA/DCO) that was not removed, or a hardware erase without verification | `LIMITED` |
+| **Fehlgeschlagen / Failed** | the wipe failed, or the verification found differences | `FAILED` |
+
+Older history files with `SUCCESS` / `FAILED` are still read correctly.
+
+---
+
+## Recommendations
+
+StickShredder pre-selects a procedure by device type (Windows' media and bus type; no drive command is sent for this):
+
+| Device | Recommendation | NIST SP 800-88 | Notes shown |
+|---|---|---|---|
+| Hard disk (HDD) | 1 pass of zeros + full verification | Clear | — |
+| SSD | 1 pass of zeros + full verification | Clear | overwriting cannot reach the SSD's spare areas; protection class 3: destroy physically |
+| SATA SSD connected directly, **Beta features on (GUI)** | hardware erase (Beta), then 1 pass of zeros + full verification | Purge | the hardware erase is recommended but you still have to choose and confirm it |
+| USB stick / SD card | 1 pass of zeros + full verification | Clear | protection class 3: destroy physically |
+| Unknown type | 1 pass of zeros + full verification | Clear | residual data possible if it is an SSD or stick |
+
+The protection class (Schutzklasse) is yours to choose — default 2. In the CLI the recommendation never includes the hardware erase; `wipe` without `--method` uses the recommended overwrite and says so.
+
+---
+
+## Hardware erase (Beta)
+
+**What it does.** Instead of only overwriting, StickShredder tells the SSD to erase itself with its built-in ATA Secure Erase command (the *enhanced* variant when the drive offers it). That also reaches spare and remapped flash cells an overwrite cannot address. Afterwards StickShredder writes one pass of zeros and reads back **every** sector — always, whatever verification you usually use — so the result does not rest on the drive's word alone. The certificate names both steps and the NIST category *Purge*.
+
+**Only for SATA SSDs connected directly to the PC** (on Microsoft's own SATA driver). Not offered for:
+- **SSDs in USB enclosures** — the USB bridge would have to pass the erase command through; StickShredder only sends read-only queries over USB bridges, by design.
+- **NVMe SSDs** — NVMe has its own erase command (sanitize/format); it is not built yet.
+- **Disks behind vendor RAID/VMD drivers** (e.g. Intel RST) and the Windows disk — they never receive drive commands. See [docs/hardware-safety.md](docs/hardware-safety.md).
+
+**How to use it**
+- **GUI:** **Optionen → Beta-Funktionen → Beta-Funktionen aktivieren** (off by default). Then a fitting SSD shows a *Hardware-Löschung* card on the Löschen page. An extra dialog explains the risks and needs a tick ("not tested on real hardware") before it can be used.
+- **CLI:** `stickshredder wipe --device PhysicalDriveN --method secure-erase --experimental --allow-internal --operator "…"` (the CLI does not use the Beta switch; `--experimental` is the acknowledgement).
+
+**Before it starts**, StickShredder asks the drive whether its erase is ready and stops — before anything is written — if the drive is *frozen* (many PCs lock SSDs at start-up: put the PC to sleep and wake it, or unplug and replug the SSD, then try again), already has a password, is locked, or does not support the command.
+
+**While it runs:** the drive sets a temporary password, `StickShredder`, which is shown on screen and written to the audit log before it is set. Do not unplug the drive or let the PC sleep (StickShredder keeps it awake); this step cannot be cancelled. The command may take up to two hours, or twice the drive's own estimate.
+
+**Unlock.** If an erase is interrupted, the SSD can stay locked with that password. **SSD entsperren …** (on the result and in the disk selection) or `stickshredder unlock --device X --experimental` removes it (SECURITY UNLOCK + DISABLE PASSWORD) — one try only, because every wrong try uses up one of the drive's few attempts.
+
+> **Not tested on real hardware.** The maintainer has no PC with a SATA port. The procedure is built and tested against simulated drives only. Use it on drives you can afford to lose, and please report results.
+
+---
+
+## What the certificate proves — and what it doesn't
+
+**Signature.** Every certificate is signed (Ed25519) with a key that StickShredder creates for your installation on first use. The private key is stored protected by Windows (DPAPI) and never shown; `key export` / `key import` move it to another PC in a password-protected file. The certificate carries a QR code and a verification code with the signed data (device, serial number, method, result, verification, operator, company, history hash …), and the same data as a PDF attachment (`stickshredder-certificate.json`). A valid signature proves two things: **the certificate has not been changed since it was created, and it was signed with this key.**
+
+**Key card = trust anchor.** A fingerprint printed on a certificate proves nothing on its own — a forger can print their own. The key card is a one-page PDF with your company name, the key's fingerprint and a QR code. Sign it and file it with your IT documentation, or give it to customers and auditors. A certificate is trustworthy when its fingerprint matches the key card.
+
+**Three verify levels** (GUI *Zertifikat prüfen*, `verify-cert`, and the verify page):
+
+| Level | Meaning |
+|---|---|
+| **Genuine, from a trusted key** | signature valid and the key is in the trusted list |
+| **Signature valid, key unknown** | unchanged since it was created, but compare the fingerprint with the key card before trusting it |
+| **Invalid or altered** | do not trust this certificate |
+
+**Verify page:** [`rctom16-bit.github.io/stickshredder/verify/`](https://rctom16-bit.github.io/stickshredder/verify/). Scan the certificate's QR code, paste the verification code, or drop the PDF on it. The check runs **entirely in the browser — nothing is uploaded** (the code sits after the `#` in the link, which browsers never send to the server). Scanning a key card's QR code once adds that key to the browser's trusted list.
+
+**History chain.** Every entry in the wipe history contains a hash over the previous entry, so changing, deleting, inserting or reordering an entry breaks the chain from that point (`history --verify`, or the chain status on the Zertifikate page). The newest hash is also written into each signed certificate, which makes removing entries at the end visible too.
+
+**What it does not prove.** The signature does **not** prove that the disk was physically erased. That is what the wipe log and the read-back verification on the certificate are for — and they are only as good as what the disk reports back to Windows (see [limitations](#limitations)). The certificate is *laid out along* DIN 66399 / ISO 21964 terms; StickShredder is **not certified** by DEKRA, DIN or any other body, and the certificate footer says so. It is documentation for internal audits, not a legal compliance proof.
+
+---
+
+## Tested hardware
+
+Only runs on real hardware are listed. If you test StickShredder on your own device, please open an issue with the results.
+
+| Device | Connection | Method | Version | Date | Result |
 |---|---|---|---|---|---|
-| **Zero-Fill** | 1 | `0x00` | H-1 / H-2 | sample, full | Quick wipe for non-sensitive data, device reuse within the organization |
-| **3-Pass Random** | 3 (+1) | Cryptographic random data | H-3 | sample, full | Standard wipe for normal business data (Schutzklasse 1-2) |
-| **BSI VSITR** | 7 (+1) | Alternating `0x00` / `0xFF` + random final pass | H-4 | sample, full | Enhanced wipe per BSI VSITR standard, recommended for confidential data |
-| **Custom** | User-defined | User-defined pattern and pass count | Varies | sample, full | Flexible configuration for specific organizational requirements |
-
-> **Note on `(+1)`:** When verification is enabled for random-data methods, StickShredder appends one zero-blanking pass after the final random pass so the result can be verified byte-by-byte. Without this extra pass, random data is indistinguishable from corrupted data without storing the PRNG seeds. See [Verification Modes](#verification-modes) below.
-
-> **Note:** For SSDs and flash-based USB drives, overwrite-based methods have inherent limitations due to wear leveling. See [SSD Limitations](#ssd-limitations) and [SECURITY.md](docs/SECURITY.md).
-
-> **Optional reformat:** After any wipe method, StickShredder can automatically create a fresh partition and format the drive (FAT32 / exFAT / NTFS) so it is immediately usable without a trip through Disk Management. See [Reformat After Wipe](#reformat-after-wipe).
-
-> **Internal disks & bad sectors (2.0):** every overwrite method also works on internal SATA disks (opt-in via `--allow-internal`) and tolerates unwritable sectors — both are recorded on the certificate. The drive is also probed for hidden areas (HPA/DCO) and warned about. See the [FAQ](#faq).
-
-> **ATA Secure Erase (2.0, experimental):** a non-overwrite alternative for SSD/flash that issues the drive's own firmware erase. CLI-only, opt-in via `--method secure-erase --experimental`. See [SSD Limitations](#ssd-limitations).
+| SanDisk "3.2Gen1" USB stick, 64 GB | USB | zeros, 1 pass + full verification | 1.1.2 | 18.11.2026 | **passed** — 62 GB in 94 min, verification passed, certificate issued |
+| SATA SSD, connected directly | SATA | hardware erase (Beta) + 1 pass of zeros + full verification | 2.0.0 | — | **not yet tested** |
 
 ---
 
-## Recommendations & Results
+## Limitations
 
-**Recommendation per device type.** `stickshredder info --device E:` shows the device (model, type, drive letters, system/internal status) and the recommended procedure. It only reads Windows' device information — the disk is not opened and no drive command is sent.
+- **SSDs and flash (USB sticks, SD cards) — wear levelling.** The controller decides where data physically goes and keeps spare and remapped cells the host cannot address. Overwriting reaches every *addressable* sector; it cannot reach those reserve areas. Full verification proves what the disk *returns*, not what is in every flash cell. Only a working hardware erase reaches them — and it is Beta, SATA-only and untested.
+- **Protection class 3 (very high protection needs):** physically destroy the data carrier (e.g. a DIN 66399-certified shredding service). StickShredder warns about this for SSDs, sticks and SD cards.
+- **Hidden areas (HPA/DCO)** are detected on directly connected SATA disks only, and never removed. Like every drive command, this check is not yet tested on real hardware.
+- **Drive commands only on Microsoft's in-box drivers** (`storahci`, `stornvme`); disks behind vendor RAID/VMD drivers get overwrite only.
+- **A working disk is needed.** A broken or read-only disk cannot be wiped by software.
+- **Windows only.**
 
-| Device | Recommended | NIST SP 800-88 |
-|---|---|---|
-| Hard disk (HDD) | One pass of zeros + full verification | Clear |
-| SSD | One pass of zeros + full verification, with a warning that spare areas are not reached (hardware erase, Beta, is not chosen automatically) | Clear |
-| USB stick / SD card | One pass of zeros + full verification; for Schutzklasse 3: destroy physically | Clear |
-
-One overwrite pass is enough for today's media. 3-pass and BSI-VSITR stay selectable because some internal policies require them, but they are never recommended: they add time, not security. Choosing them prints that note.
-
-**Three-level result.** Every wipe ends in one of three results — the same in the CLI, the history and the certificate:
-
-| Result | When | CLI exit code | History (`result` column) |
-|---|---|---|---|
-| Erfolgreich / Successful | Wipe and verification passed | `0` | `OK` |
-| Mit Einschränkungen / With limitations | Unwritable sectors remain, or a hidden area (HPA/DCO) was found and not removed | `3` | `LIMITED` |
-| Fehlgeschlagen / Failed | The wipe or the verification failed | `1` | `FAILED` |
-
-History files from older versions (`SUCCESS` / `FAILED`) are still read and shown correctly.
-
-**On the certificate.** Next to the DIN 66399 level, the certificate names the NIST SP 800-88 category of the method actually used: overwriting is „Clear“, a hardware erase is „Purge“. A signed certificate also carries its data as a machine-readable PDF attachment, `stickshredder-certificate.json` (the signed data and the verification code); most PDF readers list it under attachments.
-
----
-
-## Verification Modes
-
-After a wipe finishes, StickShredder can read the drive back to prove the overwrite actually took effect. There are three modes:
-
-| Mode | Runtime Cost | What It Does | When to Use |
-|---|---|---|---|
-| `none` | 0% | Skip verification entirely | You trust the drive and don't need a signed verification record |
-| `sample` | ~1% | Reads 100 random sectors, hashes them, compares to the expected pattern | Quicker check when time matters — catches most large-scale failures |
-| `full` (default) | ~100% (doubles runtime) | Reads **every** sector and compares against the expected pattern; reports the first 100 mismatching byte offsets | Default since 2.0 — audits, silent-sector-failure detection |
-
-**Why full verify matters.** Overwrite-based wipes assume each `WriteFile` that returns success actually committed data to the media. On aging flash or failing USB controllers, some sectors can "silently fail" — writes appear to succeed, but old content is still present when you read it back. Only full verify catches this.
-
-**Zero-blanking pass for random methods.** When verification is enabled (either `sample` or `full`) and the selected method ends on a random pass — **3-Pass Random** or **BSI-VSITR** — StickShredder automatically appends one final zero-blanking pass so the drive can be verified against a known pattern (`0x00`). This is why the methods table shows `3 (+1)` and `7 (+1)`: BSI-VSITR runs 7 nominal passes, plus one zero-pass, for **8 passes total** when verification is on. The appended pass is recorded on the certificate (actual pass count) and in the CSV history.
-
-**CLI:**
-
-```bash
-# Full verify (default since 2.0) — roughly doubles the total runtime
-stickshredder wipe --device E: --method zero --operator "Robin"
-
-# Sample verify — quicker
-stickshredder wipe --device E: --method zero --operator "Robin" --verify sample
-
-# Skip verification entirely
-stickshredder wipe --device E: --method zero --operator "Robin" --verify none
-```
-
-**GUI:** the *"Full verification (doubles runtime)"* checkbox is ticked by default. Untick it for a sample check.
-
----
-
-## Reformat After Wipe
-
-By default, StickShredder leaves the drive in a raw (unpartitioned) state after wiping. Windows will show it as an "Unallocated" drive you cannot use until you format it manually in Disk Management.
-
-For convenience, StickShredder can reformat the drive immediately after a successful wipe+verify:
-
-| Filesystem | Size Limits | Compatibility |
-|---|---|---|
-| **exFAT** (recommended) | Up to 128 PB | Windows, macOS, most Linux, cameras, game consoles |
-| **FAT32** | 32 GB per volume, 4 GB per file | Near-universal, but capped at 32 GB — Windows refuses to create FAT32 above that |
-| **NTFS** | 256 TB | Windows-first; macOS and Linux need plugins for write support |
-
-**CLI:**
-```bash
-stickshredder wipe --device E: --method zero --operator "Robin" --reformat exfat --reformat-label "Archive-2026"
-```
-
-**GUI:** tick **"Nach Löschung formatieren / Reformat after wipe"** in the Wipe Configuration panel and choose the filesystem and volume label.
-
-If reformat fails (e.g., Windows refuses to format FAT32 on a drive >32 GB), the wipe itself is still reported successful and the certificate is still generated — only the reformat step is logged as failed.
-
----
-
-## DIN 66399 Explained
-
-DIN 66399 (also published as ISO 21964) is the German/international standard for the destruction of data carriers. It defines:
-
-- **Schutzklassen (Protection Classes)** 1-3: How sensitive is the data?
-- **Sicherheitsstufen (Security Levels)** 1-7: How thoroughly must the data be destroyed?
-- **Media types** (P, F, O, T, H, E): What kind of data carrier is it?
-
-StickShredder operates on media type **H** (hard drives / digital storage) and maps its wipe methods to the corresponding security levels.
-
-For a detailed explanation, see [docs/DIN66399-INFO.md](docs/DIN66399-INFO.md).
-
----
-
-## SSD Limitations
-
-Modern USB drives and SSDs use **wear leveling**, **over-provisioning**, and **controller-managed block remapping**. These techniques mean that a software-based overwrite may not reach every physical memory cell on the device. Residual data may persist in remapped or reserved blocks that are inaccessible to the host operating system.
-
-**For high-sensitivity data on SSD/flash media**, consider:
-
-- **ATA Secure Erase** *(2.0, experimental)* — available via the CLI:
-  `stickshredder wipe --device PhysicalDrive2 --method secure-erase --experimental --allow-internal --operator "..."`.
-  It issues the drive's own firmware erase, which reaches wear-levelled cells a
-  host overwrite cannot. **Untested on real hardware** — treat results as
-  unverified until you can confirm on your own drive.
-- **Physical destruction** (shredding per DIN 66399 media type E) — still the
-  only guaranteed method for HPA/DCO regions and failed-but-unreported sectors.
-
-For a detailed discussion, see [docs/SECURITY.md](docs/SECURITY.md).
+More detail: [docs/SECURITY.md](docs/SECURITY.md), [docs/DIN66399-INFO.md](docs/DIN66399-INFO.md), [docs/hardware-safety.md](docs/hardware-safety.md).
 
 ---
 
 ## FAQ
 
-### Is this really DIN 66399 certified?
-
-**No.** StickShredder is not certified by DEKRA, DIN, BSI, or any other body. The deletion certificates it generates are *structured according to* DIN 66399 / ISO 21964 terminology and conventions, but they do not constitute official DIN 66399 compliance. If your organization requires a certified tool, you will need a commercially certified solution.
+### Can I wipe the Windows disk by accident?
+No. StickShredder refuses the physical disk Windows is installed on — including every other partition on it (e.g. a `D:` next to `C:`) — and every disk Windows reports as boot or system disk. If it cannot tell which disk that is, it refuses all internal disks. Right before writing it reads the disk again and refuses if serial number, model or size changed (e.g. a stick was swapped). It dismounts and locks the target disk's volumes and keeps them locked until the wipe and verification are done. A bootable USB installer stick is not a system disk and stays wipeable.
 
 ### Do I need administrator rights?
+Yes — writing to a whole disk needs them. The window asks for elevation (UAC) at start. The CLI does not ask; `wipe` stops with a clear message if the terminal is not elevated.
 
-**Yes.** Writing raw data to an entire drive requires elevated privileges on Windows. StickShredder will prompt for a UAC elevation if not already running as administrator.
+### What about BitLocker?
+The disk list marks BitLocker-encrypted volumes with a *BitLocker* chip. The CLI refuses to wipe them ("Decrypt or remove BitLocker protection before wiping"). Detection is best effort (Windows' BitLocker interface, falling back to `manage-bde`) and only works for volumes with a drive letter.
 
-### Can I wipe my system drive?
+### Why does a wipe say "EINGESCHRÄNKT" (with limitations)?
+The wipe ran, but something could not be fully covered: sectors that could not be written (media errors), a hidden area (HPA/DCO) on the disk, or a hardware erase without verification. The certificate lists which. The CLI exits with code `3`.
 
-**No, by design.** StickShredder refuses to wipe the physical disk that holds the active Windows installation — including every other partition on that disk (e.g. a `D:` data partition next to `C:`) — and every disk Windows reports as its boot or system disk (e.g. a second disk with the EFI partition the PC started from). An MBR "active" partition alone does not count, so bootable USB installer sticks stay wipeable. If it cannot tell which disk Windows is on or boots from, it blocks all internal disks. Right before writing, it re-checks that the disk is still the one you selected and dismounts every volume on it.
+### Can I wipe internal disks?
+Yes, but only after opting in: GUI **Interne Festplatten erlauben**, CLI `--allow-internal`. Disks without a drive letter are addressed as `PhysicalDriveN`.
 
-### Can I wipe internal (non-USB) drives?
+### Is one pass really enough?
+For today's hard disks, yes — and multi-pass overwriting does not help SSDs and flash either, because the problem there is cells overwriting cannot reach, not how often it overwrites. That is why one pass plus full verification is the recommendation.
 
-**Yes, from 2.0 — but it is off by default.** Pass `--allow-internal` on the CLI (or tick "Allow internal drives" in the GUI). Internal disks without a drive letter are addressed as `PhysicalDriveN` (shown by `stickshredder list`). The system and boot disks remain hard-blocked.
-
-### What is ATA Secure Erase — and is it safe to use?
-
-It is the drive's own built-in erase command (firmware-level), which can reach wear-levelled flash cells a host overwrite cannot. It is available from 2.0 as an **experimental, opt-in CLI feature** for SATA drives connected directly (not through a USB enclosure) (`--method secure-erase --experimental`). It is **not yet verified on real hardware** and, like any firmware erase, can leave a drive temporarily locked or unusable if interrupted. Treat it as experimental until you have confirmed it on your own hardware.
-
-### What happens if my drive has bad sectors?
-
-From 2.0, an unwritable sector no longer aborts the wipe. StickShredder skips it, counts it, and lists the affected regions on the certificate. If a large share of the drive is unwritable (default >10%), the wipe is reported as **failed** rather than "successful" — a dying drive cannot be trusted.
-
-### My drive is an SSD — isn't a quick format plus TRIM enough?
-
-Often it is *practically* enough: after a quick format the OS issues TRIM and the SSD controller's garbage collection erases the underlying cells within minutes, so the data is no longer readable by normal means. But it is **not guaranteed or auditable** — TRIM timing is controller-dependent, it does not cover reallocated or over-provisioned cells, and it leaves no record. For documented, audit-ready disposal use a full wipe (with verification) or ATA Secure Erase; for the highest assurance, physical destruction.
-
-### Which file systems are supported?
-
-StickShredder performs a raw, sector-level overwrite of the entire drive. The existing file system is irrelevant -- it will be destroyed during the wipe. You can reformat the drive with any file system afterwards.
-
-### Can I use this for GDPR / DSGVO compliance?
-
-StickShredder can be a useful part of your data disposal process, but it is not a complete GDPR compliance solution on its own. Consult your data protection officer (Datenschutzbeauftragter) to determine whether software-based wiping meets your specific regulatory obligations.
-
-### Is the deletion certificate legally binding?
-
-The certificate is a documentation tool. Its legal standing depends on your jurisdiction and the specific requirements of your regulatory framework. It is not a substitute for professional legal advice.
+### Is the certificate legally binding / enough for GDPR?
+It is documentation. Whether it is enough depends on your policies and jurisdiction — ask your data protection officer. StickShredder is not certified.
 
 ---
 
-## Contributing
+## Build from source
 
-Contributions are welcome! To get started:
+Needs **Windows** and **Python 3.11+**.
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Install development dependencies: `pip install -e ".[dev]"`
-4. Make your changes and add tests
-5. Run the test suite: `pytest`
-6. Submit a pull request
+```bat
+git clone https://github.com/rctom16-bit/stickshredder.git
+cd stickshredder
+pip install -e ".[dev]"
 
-Please follow the existing code style and include tests for any new functionality. For larger changes, open an issue first to discuss the approach.
+rem Start the GUI (or pass a CLI command)
+python src\main.py
 
-### Reporting Bugs
+rem Tests (the verify page has its own tests, run with Node)
+pytest
+node --test docs/verify/test
 
-Open an issue on GitHub with:
-- Your Windows version
-- Python version (if running from source)
-- Steps to reproduce
-- Expected vs. actual behavior
+rem Standalone executable in dist\
+pyinstaller stickshredder.spec
+```
+
+The installer is built with Inno Setup from `installer/stickshredder.iss`.
+
+Bug reports: open an issue with your Windows version, the StickShredder version, steps and what you expected. Security issues: see [docs/SECURITY.md](docs/SECURITY.md).
 
 ---
 
-## License
+## Licence
 
-StickShredder is licensed under the [MIT License](LICENSE).
+[MIT](LICENSE). Bundled fonts (Space Grotesk, Inter, JetBrains Mono) are under the SIL Open Font License.
 
 ---
 ---
 
 ## Deutsch
 
-# StickShredder
+**USB-Sticks und Festplatten unter Windows löschen — mit einem signierten, prüfbaren Löschzertifikat**
 
-**Sicheres USB-Löschtool mit DIN 66399 / ISO 21964 Löschzertifikaten**
-
-<!-- Badges -->
-[![Lizenz: MIT](https://img.shields.io/badge/Lizenz-MIT-blue.svg)](LICENSE)
-![Plattform: Windows](https://img.shields.io/badge/Plattform-Windows-0078D6?logo=windows)
-![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
-
----
-
-### Inhaltsverzeichnis
+### Inhalt
 
 - [Was ist StickShredder?](#was-ist-stickshredder)
-- [Wichtiger Hinweis](#wichtiger-hinweis)
-- [Funktionen](#funktionen)
-- [Screenshots](#screenshots-1)
-- [Installation](#installation-1)
-- [Schnellstart](#schnellstart)
-- [Löschmethoden](#löschmethoden)
-- [Empfehlungen & Ergebnis](#empfehlungen--ergebnis)
-- [DIN 66399 erklärt](#din-66399-erklärt)
-- [SSD-Einschränkungen](#ssd-einschränkungen)
-- [Häufige Fragen (FAQ)](#häufige-fragen-faq)
-- [Mitwirken](#mitwirken)
-- [Lizenz](#lizenz-1)
+- [Download und Installation](#download-und-installation)
+- [Schnellstart (Oberfläche)](#schnellstart-oberfläche)
+- [Kommandozeile](#kommandozeile)
+- [Löschverfahren und Prüfung](#löschverfahren-und-prüfung)
+- [Empfehlungen](#empfehlungen)
+- [Hardware-Löschung (Beta)](#hardware-löschung-beta)
+- [Was das Zertifikat beweist — und was nicht](#was-das-zertifikat-beweist--und-was-nicht)
+- [Getestete Hardware](#getestete-hardware)
+- [Grenzen](#grenzen)
+- [Häufige Fragen](#häufige-fragen)
+- [Aus dem Quellcode bauen](#aus-dem-quellcode-bauen)
+- [Lizenz](#lizenz)
+
+Screenshots: siehe [oben](#screenshots) und [`docs/screenshots/v2/`](docs/screenshots/v2/) (alle mit Demodaten).
 
 ---
 
 ### Was ist StickShredder?
 
-StickShredder ist ein kostenloses, quelloffenes Windows-Tool zum sicheren Löschen von USB-Datenträgern mit anschließender Erstellung von Löschzertifikaten nach DIN 66399 / ISO 21964. Es richtet sich an IT-Administratoren in kleinen und mittleren Unternehmen (KMU), die die datenschutzkonforme Entsorgung von Daten auf Wechseldatenträgern dokumentieren müssen.
-
-Bestehende Alternativen decken diesen Bedarf nur unzureichend ab: **nwipe** ist Linux-basiert und erfordert das Booten einer separaten Umgebung, **Eraser** erstellt keine Löschzertifikate, und **kommerzielle zertifizierte Tools** wie Blancco kosten häufig 200+ EUR pro Jahr an Lizenzgebühren. StickShredder schließt diese Lücke mit einer intuitiven GUI und CLI für sicheres USB-Löschen und professionellen PDF-Löschzertifikaten -- alles unter der MIT-Lizenz.
+StickShredder ist ein kostenloses, quelloffenes Windows-Programm (Oberfläche und Kommandozeile). Es überschreibt einen USB-Stick, eine SD-Karte oder eine Festplatte Sektor für Sektor, liest danach jeden Sektor zurück und erstellt ein Löschzertifikat als PDF. Das Zertifikat ist nach den Begriffen der DIN 66399 / ISO 21964 aufgebaut (Schutzklasse, Sicherheitsstufe), nennt die NIST-SP-800-88-Kategorie und ist mit einem Schlüssel Ihrer Installation signiert — so lässt sich später prüfen, dass es nicht verändert wurde. Es läuft unter normalem Windows, ohne Boot-Stick und Neustart, komplett offline. Gedacht ist es für IT-Administratoren in kleinen und mittleren Unternehmen, die das Löschen von Datenträgern dokumentieren müssen. **StickShredder ist nicht von DEKRA, DIN, BSI oder einer anderen Stelle zertifiziert** — siehe [was das Zertifikat beweist](#was-das-zertifikat-beweist--und-was-nicht).
 
 ---
 
-### Wichtiger Hinweis
+### Download und Installation
 
-> **StickShredder ist NICHT DIN 66399 zertifiziert.**
->
-> Diese Software erstellt Löschberichte, die *nach den Konventionen* der DIN 66399 / ISO 21964 strukturiert sind. Die Löschzertifikate verwenden die Terminologie des Standards (Schutzklassen, Sicherheitsstufen, Datenträgertypen), um ein nützliches, standardnahes Dokumentationsformat bereitzustellen.
->
-> StickShredder wurde jedoch **nicht offiziell von DEKRA, DIN, BSI oder einer anderen Zertifizierungsstelle geprüft oder zertifiziert**. Die erstellten Zertifikate stellen keinen Nachweis der Konformität mit DIN 66399 im rechtlichen oder regulatorischen Sinne dar.
->
-> Dies ist quelloffene Software unter der MIT-Lizenz, ohne jegliche Gewährleistung. Für Daten, die strengen regulatorischen Anforderungen unterliegen, wenden Sie sich an Ihren Datenschutzbeauftragten und ziehen Sie den Einsatz zertifizierter kommerzieller Tools oder die physische Vernichtung in Betracht.
+Download auf der [Releases](https://github.com/rctom16-bit/stickshredder/releases)-Seite:
 
----
+- **`StickShredder-<Version>-Setup.exe`** — Installer (braucht Administratorrechte, installiert nach *Programme*).
+- **`StickShredder.exe`** — portabel, läuft ohne Installation.
 
-### Funktionen
+Zum Beschreiben einer ganzen Platte braucht StickShredder **Administratorrechte**. Das Programmfenster fragt ohne sie beim Start nach (UAC); lehnen Sie ab, erscheint eine Warnung und Löschen funktioniert nicht. Die Kommandozeile fragt nicht — starten Sie sie in einem Terminal mit Administratorrechten.
 
-- **Sicheres Löschen von USB-Datenträgern** mit mehreren Überschreibmethoden (Zero-Fill, Random, BSI VSITR, Benutzerdefiniert)
-- **Löschzertifikate nach DIN 66399 / ISO 21964** als PDF, inkl. Geräteseriennummer, Löschmethode, Zeitstempel und Bedienerinformationen
-- **Moderne GUI** mit PySide6 (Qt6) -- intuitiv, ohne Schulung nutzbar
-- **CLI-Modus** für Skripte und Stapelverarbeitung
-- **Mehrere Löschmethoden** mit konfigurierbarer Durchlaufanzahl
-- **Echtzeit-Fortschrittsanzeige** mit geschätzter Restdauer
-- **Laufwerkserkennung** via WMI -- erkennt automatisch angeschlossene USB-Geräte
-- **Sicherheitssperre** -- verweigert das Löschen von Systemlaufwerken (by Design), mit Fail-safe, das die Windows-Platte niemals anfasst
-- **Interne Festplatten** *(2.0)* -- optionales Löschen interner SATA-Platten (ausdrückliches Opt-in), auch ohne Laufwerksbuchstaben
-- **Defekt-Sektor-Toleranz** *(2.0)* -- nicht beschreibbare Sektoren werden übersprungen, gezählt und im Zertifikat ausgewiesen, statt den Vorgang abzubrechen
-- **Erkennung versteckter Bereiche** *(2.0)* -- erkennt HPA/DCO-Bereiche, die ein Überschreiben nicht erreicht, und vermerkt sie im Zertifikat
-- **ATA Secure Erase** *(2.0, experimentell)* -- nutzt den Firmware-Löschbefehl der Platte für SSD/Flash (CLI, Opt-in, noch nicht auf Hardware verifiziert)
-- **Portabel** -- keine Installation erforderlich (eigenständige .exe via PyInstaller)
-- **100% offline** -- kein Netzwerkzugriff, keine Telemetrie, keine Cloud-Abhängigkeit
-- **Kostenlos und quelloffen** unter der MIT-Lizenz
+Einstellungen, Löschverlauf, Audit-Log, Signaturschlüssel und Zertifikate liegen in `%USERPROFILE%\.stickshredder\` (Zertifikate in `certificates\`, sofern Sie keinen anderen Ordner wählen).
 
 ---
 
-### Screenshots
+### Schnellstart (Oberfläche)
 
-Ein vollständiger Löschvorgang führt den Bediener durch **zwei Bestätigungen, eine Live-Fortschrittsanzeige und einen Erfolgsdialog** — und erzeugt am Ende ein PDF-Zertifikat im Ausgabeordner.
+1. **Einmalig:** Unter **Optionen** Firmenname, Adresse und optional ein Logo eintragen — sie stehen auf jedem Zertifikat. Unter **Schlüssel** auf **Schlüsselkarte erstellen** klicken, die Karte ausdrucken, unterschreiben und zur IT-Dokumentation legen (siehe [unten](#was-das-zertifikat-beweist--und-was-nicht)).
+2. Stick anstecken. Die Liste aktualisiert sich von selbst, wenn ein USB-Gerät angesteckt oder abgezogen wird.
+3. Auf **Löschen** die Platte wählen (**Anderen wählen**). Die Windows-Platte erscheint als *Systemplatte · gesperrt* und ist nicht wählbar. Interne Platten werden erst nach dem Häkchen **Interne Festplatten erlauben** wählbar.
+4. Die Kacheln zeigen Methode, Prüfung und Einordnung, voreingestellt nach der [Empfehlung](#empfehlungen). **Andere Methode …** ändert für diesen Löschvorgang Methode, Schutzklasse, Bediener, Prüfung und optional das Formatieren.
+5. **Jetzt sicher löschen** klicken und zur Bestätigung **LÖSCHEN** eintippen.
+6. Am Ende stehen das Ergebnis (*Erfolgreich*, *Mit Einschränkungen* oder *Fehlgeschlagen*) und das signierte Zertifikat mit **Zertifikat öffnen**.
 
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <p align="center"><strong>① Zerstörerische Aktion bestätigen</strong></p>
-      <img src="docs/screenshots/01-confirm-wipe.png" alt="Bestätigungsdialog mit Laufwerksdetails">
-      <p align="center"><sub>Der Dialog nennt Laufwerksbuchstaben, Modell, Seriennummer und Kapazität des Ziels noch einmal ausdrücklich.</sub></p>
-    </td>
-    <td width="50%" valign="top">
-      <p align="center"><strong>② DELETE eingeben</strong></p>
-      <img src="docs/screenshots/02-type-delete.png" alt="DELETE zum Bestätigen eingeben">
-      <p align="center"><sub>Die zweite Bestätigung verhindert versehentliche Ein-Klick-Löschungen. Ohne „DELETE" kein Löschvorgang.</sub></p>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%" valign="top">
-      <p align="center"><strong>③ Löschen + Verifikation</strong></p>
-      <img src="docs/screenshots/03-wipe-progress.png" alt="Löschvorgang läuft">
-      <p align="center"><sub>Phasen-Anzeige, Durchlaufzähler, Durchsatz, Restdauer. Ein Stall-Watchdog meldet innerhalb von 60 Sekunden, wenn der Controller hängt.</sub></p>
-    </td>
-    <td width="50%" valign="top">
-      <p align="center"><strong>④ Erfolg + Zertifikat</strong></p>
-      <img src="docs/screenshots/04-wipe-success.png" alt="Löschvorgang erfolgreich abgeschlossen">
-      <p align="center"><sub>Das PDF-Zertifikat wird automatisch im konfigurierten Ausgabeordner gespeichert. Bereit für die Prüfung.</sub></p>
-    </td>
-  </tr>
-</table>
-
-Bilder in voller Auflösung: [`docs/screenshots/`](docs/screenshots/). Beispielzertifikat: [`docs/examples/sample-certificate.pdf`](docs/examples/sample-certificate.pdf).
+**Ohne Datenträger ausprobieren:** **Optionen → Demo-Modus → Demo starten** spielt den ganzen Ablauf an einer kleinen temporären Datei durch. Echte Datenträger werden nicht berührt.
 
 ---
 
-### Installation
+### Kommandozeile
 
-#### Variante A: Installer herunterladen
+Dieselbe `StickShredder.exe` arbeitet als Kommandozeilenwerkzeug, wenn Sie Argumente übergeben (aus dem Quellcode: `python src\main.py <Befehl>`). In einem Terminal mit Administratorrechten ausführen. `stickshredder <Befehl> --help` zeigt alle Optionen.
 
-Laden Sie die aktuelle Version von der [Releases](https://github.com/rctom16-bit/stickshredder/releases)-Seite herunter. Führen Sie den Installer aus oder entpacken Sie die portable `.zip`-Datei und starten Sie `StickShredder.exe`.
+| Befehl | Was er tut |
+|---|---|
+| `list` | Erkannte Platten mit Sicherheitsstatus auflisten. |
+| `info --device X [--schutzklasse N]` | Modell, Typ, Laufwerksbuchstaben, System-/Intern-Status und empfohlenes Verfahren anzeigen. Liest nur die Geräteinformationen von Windows, die Platte wird nicht geöffnet. |
+| `wipe --device X --operator NAME [Optionen]` | Platte löschen und signiertes Zertifikat erstellen. |
+| `unlock --device X --experimental [--allow-internal] [--yes]` | Temporäres Platten-Passwort nach einer abgebrochenen Hardware-Löschung (Beta) entfernen. Nur ein Versuch. |
+| `history [--export DATEI] [--verify]` | Löschverlauf anzeigen, als CSV exportieren oder die Hash-Kette prüfen. |
+| `verify-cert PDF` | Signatur eines Zertifikats prüfen. |
+| `keycard [--output PFAD] [--language de\|en\|both]` | Schlüsselkarte (PDF) für den Schlüssel dieser Installation erstellen. |
+| `trust add KEY [--name NAME]` / `trust list` / `trust remove FINGERABDRUCK` | Vertraute Schlüssel verwalten (aus Schlüsselkarten-Link, Schlüsselkarten-PDF oder base64url-Schlüssel). |
+| `key export PFAD` / `key import PFAD` | Signaturschlüssel auf einen anderen PC übertragen (passwortgeschützte Datei; das Passwort wird interaktiv abgefragt). |
 
-#### Variante B: Aus dem Quellcode erstellen
+`--device` nimmt einen Laufwerksbuchstaben (`E:`), eine Plattennummer (`2`) oder `PhysicalDrive2`. Platten ohne Laufwerksbuchstaben zeigt `list` mit ihrem Namen `PhysicalDriveN`.
 
-Erfordert **Python 3.11+** und **Windows**.
+**Optionen von `wipe`**
 
-```bash
-# Repository klonen
+| Option | Standard | Bedeutung |
+|---|---|---|
+| `--method zero\|standard\|bsi\|custom\|secure-erase` | Empfehlung für das Gerät | `zero` 1× Nullen · `standard` 3× Zufall · `bsi` BSI-VSITR, 7 Durchgänge · `custom` · `secure-erase` = [Hardware-Löschung (Beta)](#hardware-löschung-beta) |
+| `--verify none\|sample\|full` | `full` | siehe [Prüfung](#löschverfahren-und-prüfung) |
+| `--schutzklasse 1\|2\|3` | `2` | Schutzklasse nach DIN 66399 auf dem Zertifikat |
+| `--operator NAME` | — (Pflicht) | Bediener auf dem Zertifikat |
+| `--client REF`, `--asset-tag TAG` | leer | Auftraggeber, Inventar- oder Ticketnummer |
+| `--passes N`, `--pattern zero\|ones\|random` | `3`, `random` | für `--method custom` |
+| `--output-dir ORDNER` | aus den Einstellungen | Zertifikatsordner |
+| `--language de\|en\|both` | aus den Einstellungen (`de`) | Sprache des Zertifikats |
+| `--reformat none\|fat32\|exfat\|ntfs` | `none` | nach dem Löschen Partition anlegen und formatieren |
+| `--reformat-label NAME`, `--reformat-partition MBR\|GPT` | `USB`, `MBR` | Bezeichnung und Partitionsstil für `--reformat` |
+| `--allow-internal` | aus | interne (nicht wechselbare) Platten erlauben; die Windows-Platte wird immer abgelehnt |
+| `--experimental` | aus | nötig für `--method secure-erase` |
+| `--yes`, `-y` | aus | Rückfragen überspringen (Skripte) |
+
+`--enhanced` wird aus Kompatibilitätsgründen noch angenommen; die Hardware-Löschung nimmt die erweiterte Variante von selbst, wenn die Platte sie anbietet.
+
+**Exitcodes**
+
+| Befehl | `0` | `1` | `2` | `3` |
+|---|---|---|---|---|
+| `wipe` | erfolgreich | fehlgeschlagen | — | mit Einschränkungen |
+| `verify-cert` | echt, Schlüssel vertraut | Signatur gültig, Schlüssel unbekannt | ungültig, verändert oder unsigniert | — |
+| `history --verify` | Kette unverändert | Kette verändert | — | — |
+
+**Beispiele**
+
+```bat
+stickshredder list
+stickshredder info --device E:
+
+rem Empfohlenes Verfahren: 1x Nullen + vollständige Prüfung
+stickshredder wipe --device E: --operator "Max Mustermann"
+
+rem Mit Auftraggeber, Schutzklasse 3, Zertifikat in einen bestimmten Ordner
+stickshredder wipe --device E: --operator "Max Mustermann" --schutzklasse 3 --client "ACME GmbH" --output-dir "D:\Zertifikate"
+
+rem Interne Platte ohne Laufwerksbuchstaben
+stickshredder wipe --device PhysicalDrive2 --allow-internal --operator "Max Mustermann"
+
+rem Hardware-Löschung (Beta), SATA-SSD direkt angeschlossen
+stickshredder wipe --device PhysicalDrive2 --method secure-erase --experimental --allow-internal --operator "Max Mustermann"
+
+rem Danach als exFAT formatieren
+stickshredder wipe --device E: --operator "Max Mustermann" --reformat exfat --reformat-label ARCHIV
+
+stickshredder verify-cert SS-000042_BEISPIEL_20261118.pdf
+stickshredder history --verify
+stickshredder keycard --language both
+```
+
+---
+
+### Löschverfahren und Prüfung
+
+| Verfahren | CLI | Durchgänge | Muster | Sicherheitsstufe auf dem Zertifikat |
+|---|---|---|---|---|
+| **Nullen, 1 Durchgang** (empfohlen) | `zero` | 1 | `0x00` | 1-2 |
+| Zufall, 3 Durchgänge | `standard` | 3 | Zufallsdaten | 3 |
+| BSI-VSITR, 7 Durchgänge | `bsi` | 7 | `0x00`/`0xFF` abwechselnd, letzter Durchgang Zufall | 4+ |
+| Benutzerdefiniert | `custom` | frei | Nullen, Einsen oder Zufall | custom |
+
+Ein Durchgang genügt bei heutigen Datenträgern. 3 und 7 Durchgänge bleiben wählbar, weil manche internen Vorgaben sie verlangen; empfohlen werden sie nie, und wer sie wählt, sieht den Hinweis, dass sie Zeit kosten, aber keine Sicherheit bringen.
+
+**Prüfung** — nach dem Überschreiben liest StickShredder die Platte zurück:
+
+| Modus | Was er tut | Zeit |
+|---|---|---|
+| `full` (Standard) | liest **jeden** Sektor und vergleicht mit dem erwarteten Muster; nennt die ersten 100 abweichenden Stellen | verdoppelt ungefähr die Laufzeit |
+| `sample` | prüft 100 zufällige Sektoren | wenige Sekunden |
+| `none` | keine Prüfung (nur Kommandozeile; die Oberfläche prüft immer) | — |
+
+Nur die vollständige Prüfung findet Sektoren, die „still versagen“ (das Schreiben meldet Erfolg, beim Zurücklesen stehen aber noch alte Daten da). Endet ein Verfahren mit einem Zufallsdurchgang, hängt StickShredder bei eingeschalteter Prüfung einen Durchgang Nullen an, damit byte-genau verglichen werden kann; das Zertifikat nennt die tatsächliche Zahl der Durchgänge.
+
+**Defekte Sektoren** — ein Sektor, der wegen eines Medienfehlers nicht beschreibbar ist, wird übersprungen, gezählt und auf dem Zertifikat aufgeführt; das Löschen läuft weiter und endet *mit Einschränkungen*. Sind mehr als 10 % der Platte nicht beschreibbar, schlägt es fehl. Jeder andere Schreibfehler (z. B. „Zugriff verweigert“, weil Windows die Platte wieder eingebunden hat) bricht als fehlgeschlagen ab.
+
+**Versteckte Bereiche (HPA/DCO)** — bei direkt angeschlossenen SATA-Platten (Microsofts eigener SATA-Treiber) fragt StickShredder vor dem Löschen, ob ein Teil der Platte vor Windows versteckt ist (Host Protected Area, Device Configuration Overlay). Solche Bereiche lassen sich nicht überschreiben. Sie werden gemeldet, nie entfernt, und das Ergebnis lautet *mit Einschränkungen*.
+
+**Formatieren** — optional legt StickShredder nach dem Löschen eine Partition über die ganze Platte an und formatiert sie (exFAT, FAT32 bis 32 GB, NTFS). Schlägt das Formatieren fehl, bleiben Ergebnis und Zertifikat des Löschens unverändert.
+
+**Dreistufiges Ergebnis** — gleich in Oberfläche, Kommandozeile, Verlauf und Zertifikat:
+
+| Ergebnis | Wann | Verlauf `result` |
+|---|---|---|
+| **Erfolgreich** | Löschen und Prüfung bestanden | `OK` |
+| **Mit Einschränkungen** (Kennzeichen in der Oberfläche: *EINGESCHRÄNKT*) | nicht beschreibbare Sektoren, ein versteckter Bereich (HPA/DCO), der nicht entfernt wurde, oder eine Hardware-Löschung ohne Prüfung | `LIMITED` |
+| **Fehlgeschlagen** | Löschen fehlgeschlagen oder die Prüfung fand Abweichungen | `FAILED` |
+
+Ältere Verlaufsdateien mit `SUCCESS` / `FAILED` werden weiter richtig gelesen.
+
+---
+
+### Empfehlungen
+
+StickShredder wählt das Verfahren nach Gerätetyp vor (Medien- und Bustyp laut Windows; dafür wird kein Laufwerksbefehl gesendet):
+
+| Gerät | Empfehlung | NIST SP 800-88 | Hinweise |
+|---|---|---|---|
+| Festplatte (HDD) | 1× Nullen + vollständige Prüfung | Clear | — |
+| SSD | 1× Nullen + vollständige Prüfung | Clear | Überschreiben erreicht die Reserve-Bereiche der SSD nicht; Schutzklasse 3: physisch vernichten |
+| SATA-SSD direkt angeschlossen, **Beta-Funktionen an (Oberfläche)** | Hardware-Löschung (Beta), danach 1× Nullen + vollständige Prüfung | Purge | empfohlen, aber Sie müssen sie selbst wählen und bestätigen |
+| USB-Stick / SD-Karte | 1× Nullen + vollständige Prüfung | Clear | Schutzklasse 3: physisch vernichten |
+| Typ unbekannt | 1× Nullen + vollständige Prüfung | Clear | bei einer SSD oder einem Stick sind Restdaten möglich |
+
+Die Schutzklasse legen Sie fest — Standard ist 2. In der Kommandozeile enthält die Empfehlung nie die Hardware-Löschung; `wipe` ohne `--method` nimmt das empfohlene Überschreiben und sagt das an.
+
+---
+
+### Hardware-Löschung (Beta)
+
+**Was sie tut.** Statt nur zu überschreiben, weist StickShredder die SSD an, sich mit ihrem eingebauten Befehl ATA Secure Erase selbst zu löschen (in der erweiterten Variante, wenn die Platte sie anbietet). Das erreicht auch Reserve- und umgelagerte Flash-Zellen, an die Überschreiben nicht herankommt. Danach schreibt StickShredder einen Durchgang Nullen und liest **jeden** Sektor zurück — immer, unabhängig von der sonst gewählten Prüfung —, damit das Ergebnis nicht allein auf der Auskunft der Platte beruht. Das Zertifikat nennt beide Schritte und die NIST-Kategorie *Purge*.
+
+**Nur für SATA-SSDs, die direkt im PC angeschlossen sind** (an Microsofts eigenem SATA-Treiber). Nicht angeboten für:
+- **SSDs im USB-Gehäuse** — die USB-Brücke müsste den Löschbefehl durchreichen; über USB-Brücken sendet StickShredder absichtlich nur lesende Abfragen.
+- **NVMe-SSDs** — NVMe hat einen eigenen Löschbefehl (Sanitize/Format); der ist noch nicht eingebaut.
+- **Platten hinter RAID-/VMD-Treibern von Herstellern** (z. B. Intel RST) und die Windows-Platte — sie bekommen nie Laufwerksbefehle. Siehe [docs/hardware-safety.md](docs/hardware-safety.md).
+
+**So nutzen Sie sie**
+- **Oberfläche:** **Optionen → Beta-Funktionen → Beta-Funktionen aktivieren** (standardmäßig aus). Dann zeigt eine passende SSD auf der Seite Löschen die Karte *Hardware-Löschung*. Ein zusätzlicher Dialog erklärt die Risiken und verlangt ein Häkchen („noch nicht auf echter Hardware getestet“).
+- **Kommandozeile:** `stickshredder wipe --device PhysicalDriveN --method secure-erase --experimental --allow-internal --operator "…"` (die Kommandozeile nutzt den Beta-Schalter nicht; `--experimental` ist die Bestätigung).
+
+**Vor dem Start** fragt StickShredder die Platte, ob ihr Löschbefehl bereit ist, und bricht ab — bevor etwas geschrieben wird —, wenn sie *frozen* ist (viele PCs sperren SSDs beim Start: PC in den Standby schicken und wieder aufwecken oder die SSD ab- und wieder anstecken, dann erneut versuchen), schon ein Passwort hat, gesperrt ist oder den Befehl nicht kann.
+
+**Während sie läuft,** setzt die Platte das temporäre Passwort `StickShredder`; es wird angezeigt und vor dem Setzen ins Audit-Log geschrieben. Platte nicht abstecken und den PC nicht in den Standby schicken (StickShredder hält ihn wach); abbrechen geht in diesem Schritt nicht. Der Befehl darf bis zu zwei Stunden dauern oder doppelt so lange wie die Schätzung der Platte.
+
+**Entsperren.** Wird die Löschung unterbrochen, kann die SSD mit diesem Passwort gesperrt bleiben. **SSD entsperren …** (im Ergebnis und in der Plattenauswahl) oder `stickshredder unlock --device X --experimental` entfernt es (SECURITY UNLOCK + DISABLE PASSWORD) — nur ein Versuch, denn jeder Fehlversuch verbraucht einen der wenigen Versuche der Platte.
+
+> **Nicht auf echter Hardware getestet.** Der Entwickler hat keinen PC mit SATA-Anschluss. Das Verfahren ist nur gegen simulierte Platten gebaut und getestet. Nutzen Sie es an Platten, auf die Sie verzichten können, und melden Sie bitte Ihre Ergebnisse.
+
+---
+
+### Was das Zertifikat beweist — und was nicht
+
+**Signatur.** Jedes Zertifikat ist signiert (Ed25519), mit einem Schlüssel, den StickShredder beim ersten Gebrauch für Ihre Installation erzeugt. Der private Schlüssel liegt von Windows geschützt (DPAPI) und wird nie angezeigt; `key export` / `key import` übertragen ihn in einer passwortgeschützten Datei auf einen anderen PC. Das Zertifikat trägt einen QR-Code und einen Prüfcode mit den signierten Daten (Gerät, Seriennummer, Verfahren, Ergebnis, Prüfung, Bediener, Firma, Verlaufs-Hash …) und dieselben Daten als PDF-Anlage (`stickshredder-certificate.json`). Eine gültige Signatur beweist zweierlei: **Das Zertifikat ist seit seiner Erstellung unverändert, und es wurde mit diesem Schlüssel signiert.**
+
+**Schlüsselkarte = Vertrauensanker.** Ein Fingerabdruck auf dem Zertifikat beweist allein nichts — ein Fälscher kann seinen eigenen aufdrucken. Die Schlüsselkarte ist eine PDF-Seite mit Firmenname, Fingerabdruck des Schlüssels und QR-Code. Unterschreiben Sie sie und legen Sie sie zur IT-Dokumentation oder geben Sie sie Kunden und Prüfern. Vertrauenswürdig ist ein Zertifikat, dessen Fingerabdruck mit der Schlüsselkarte übereinstimmt.
+
+**Drei Prüfstufen** (Oberfläche *Zertifikat prüfen*, `verify-cert` und die Prüfseite):
+
+| Stufe | Bedeutung |
+|---|---|
+| **Echt, von einem vertrauten Schlüssel** | Signatur gültig, Schlüssel in der Liste der vertrauten Schlüssel |
+| **Signatur gültig, Schlüssel unbekannt** | seit der Erstellung unverändert — vor dem Vertrauen den Fingerabdruck mit der Schlüsselkarte vergleichen |
+| **Ungültig oder verändert** | diesem Zertifikat nicht vertrauen |
+
+**Prüfseite:** [`rctom16-bit.github.io/stickshredder/verify/`](https://rctom16-bit.github.io/stickshredder/verify/). QR-Code des Zertifikats scannen, Prüfcode einfügen oder das PDF darauf ziehen. Die Prüfung läuft **vollständig im Browser — es wird nichts hochgeladen** (der Prüfcode steht im Link hinter dem `#`, und diesen Teil senden Browser nie an den Server). Einmal den QR-Code einer Schlüsselkarte scannen, und der Browser merkt sich den Schlüssel als vertraut.
+
+**Verlaufskette.** Jeder Eintrag im Löschverlauf enthält einen Hash über den vorigen. Wird ein Eintrag geändert, gelöscht, eingefügt oder umsortiert, bricht die Kette ab dieser Stelle (`history --verify` oder der Kettenstatus auf der Seite Zertifikate). Der neueste Hash steht außerdem in jedem signierten Zertifikat, so fällt auch das Entfernen von Einträgen am Ende auf.
+
+**Was es nicht beweist.** Die Signatur beweist **nicht**, dass die Platte physisch gelöscht wurde. Dafür stehen das Löschprotokoll und die Rückleseprüfung auf dem Zertifikat — und die sind nur so gut wie das, was die Platte an Windows zurückmeldet (siehe [Grenzen](#grenzen)). Das Zertifikat ist *nach den Begriffen* der DIN 66399 / ISO 21964 aufgebaut; StickShredder ist **nicht zertifiziert** (weder von DEKRA noch von DIN oder einer anderen Stelle), und das steht auch in der Fußzeile des Zertifikats. Es ist eine Dokumentation für interne Prüfungen, kein rechtlicher Konformitätsnachweis.
+
+---
+
+### Getestete Hardware
+
+Hier stehen nur Läufe auf echter Hardware. Wenn Sie StickShredder an Ihrem eigenen Gerät testen, eröffnen Sie bitte ein Issue mit dem Ergebnis.
+
+| Gerät | Anschluss | Verfahren | Version | Datum | Ergebnis |
+|---|---|---|---|---|---|
+| SanDisk „3.2Gen1“ USB-Stick, 64 GB | USB | 1× Nullen + vollständige Prüfung | 1.1.2 | 18.11.2026 | **bestanden** — 62 GB in 94 Min., Prüfung bestanden, Zertifikat erstellt |
+| SATA-SSD, direkt angeschlossen | SATA | Hardware-Löschung (Beta) + 1× Nullen + vollständige Prüfung | 2.0.0 | — | **noch nicht getestet** |
+
+---
+
+### Grenzen
+
+- **SSDs und Flash (USB-Sticks, SD-Karten) — Wear Leveling.** Der Controller entscheidet, wo Daten physisch landen, und hält Reserve- und umgelagerte Zellen vor, die der PC nicht ansprechen kann. Überschreiben erreicht jeden *adressierbaren* Sektor, diese Reserve-Bereiche aber nicht. Die vollständige Prüfung belegt, was die Platte *zurückliefert*, nicht den Inhalt jeder Flash-Zelle. Nur eine funktionierende Hardware-Löschung erreicht sie — und die ist Beta, nur SATA und ungetestet.
+- **Schutzklasse 3 (sehr hoher Schutzbedarf):** Datenträger physisch vernichten (z. B. über einen nach DIN 66399 zertifizierten Vernichtungsdienst). StickShredder weist bei SSDs, Sticks und SD-Karten darauf hin.
+- **Versteckte Bereiche (HPA/DCO)** werden nur bei direkt angeschlossenen SATA-Platten erkannt und nie entfernt. Wie alle Laufwerksbefehle ist diese Abfrage noch nicht auf echter Hardware getestet.
+- **Laufwerksbefehle nur über Microsofts eingebaute Treiber** (`storahci`, `stornvme`); Platten hinter RAID-/VMD-Treibern von Herstellern werden nur überschrieben.
+- **Die Platte muss funktionieren.** Eine defekte oder schreibgeschützte Platte kann Software nicht löschen.
+- **Nur Windows.**
+
+Mehr dazu: [docs/SECURITY.md](docs/SECURITY.md), [docs/DIN66399-INFO.md](docs/DIN66399-INFO.md), [docs/hardware-safety.md](docs/hardware-safety.md).
+
+---
+
+### Häufige Fragen
+
+#### Kann ich versehentlich die Windows-Platte löschen?
+Nein. StickShredder verweigert die physische Platte, auf der Windows installiert ist — samt aller weiteren Partitionen darauf (z. B. ein `D:` neben `C:`) — und jede Platte, die Windows als Boot- oder Systemplatte meldet. Kann es das nicht feststellen, verweigert es alle internen Platten. Unmittelbar vor dem Schreiben liest es die Platte erneut und bricht ab, wenn sich Seriennummer, Modell oder Größe geändert haben (z. B. Stick getauscht). Es hängt die Volumes der Zielplatte aus, sperrt sie und hält sie gesperrt, bis Löschen und Prüfung fertig sind. Ein bootfähiger USB-Installationsstick ist keine Systemplatte und bleibt löschbar.
+
+#### Brauche ich Administratorrechte?
+Ja, ohne sie lässt sich keine ganze Platte beschreiben. Das Programmfenster fragt beim Start nach (UAC). Die Kommandozeile fragt nicht; `wipe` bricht in einem Terminal ohne Administratorrechte mit einer klaren Meldung ab.
+
+#### Was ist mit BitLocker?
+Die Plattenliste kennzeichnet BitLocker-verschlüsselte Volumes mit *BitLocker*. Die Kommandozeile verweigert das Löschen („Decrypt or remove BitLocker protection before wiping“). Die Erkennung ist nach bestem Bemühen (BitLocker-Schnittstelle von Windows, ersatzweise `manage-bde`) und klappt nur bei Volumes mit Laufwerksbuchstaben.
+
+#### Warum steht bei einer Löschung „EINGESCHRÄNKT“?
+Das Löschen lief, aber etwas ließ sich nicht vollständig abdecken: nicht beschreibbare Sektoren (Medienfehler), ein versteckter Bereich (HPA/DCO) oder eine Hardware-Löschung ohne Prüfung. Was genau, steht auf dem Zertifikat. Die Kommandozeile endet mit Exitcode `3`.
+
+#### Kann ich interne Platten löschen?
+Ja, nach ausdrücklicher Freigabe: Oberfläche **Interne Festplatten erlauben**, Kommandozeile `--allow-internal`. Platten ohne Laufwerksbuchstaben heißen `PhysicalDriveN`.
+
+#### Reicht ein Durchgang wirklich?
+Bei heutigen Festplatten ja — und bei SSDs und Flash helfen mehr Durchgänge auch nicht, denn das Problem dort sind Zellen, die Überschreiben gar nicht erreicht, nicht die Zahl der Durchgänge. Deshalb lautet die Empfehlung: ein Durchgang plus vollständige Prüfung.
+
+#### Ist das Zertifikat rechtsverbindlich / reicht es für die DSGVO?
+Es ist eine Dokumentation. Ob sie genügt, hängt von Ihren Vorgaben ab — fragen Sie Ihren Datenschutzbeauftragten. StickShredder ist nicht zertifiziert.
+
+---
+
+### Aus dem Quellcode bauen
+
+Erfordert **Windows** und **Python 3.11+**.
+
+```bat
 git clone https://github.com/rctom16-bit/stickshredder.git
 cd stickshredder
-
-# Abhängigkeiten installieren
 pip install -e ".[dev]"
 
-# Direkt ausführen
-python -m src.main
+rem Oberfläche starten (oder einen Kommandozeilenbefehl anhängen)
+python src\main.py
 
-# Eigenständige .exe erstellen
+rem Tests (die Prüfseite hat eigene Tests für Node)
+pytest
+node --test docs/verify/test
+
+rem Eigenständige .exe in dist\
 pyinstaller stickshredder.spec
 ```
 
-Die erstellte Datei befindet sich im Ordner `dist/`.
+Der Installer entsteht mit Inno Setup aus `installer/stickshredder.iss`.
 
----
-
-### Schnellstart
-
-#### GUI
-
-1. Starten Sie `StickShredder.exe` (oder `python -m src.main`)
-2. Schließen Sie den zu löschenden USB-Datenträger an
-3. Wählen Sie das Laufwerk aus der Geräteliste
-4. Wählen Sie eine Löschmethode (z.B. "3-Pass Random")
-5. Klicken Sie auf **Löschen** und bestätigen Sie die Sicherheitsabfrage
-6. Nach Abschluss wird das Löschzertifikat automatisch als PDF erstellt
-
-#### CLI
-
-```bash
-# Erkannte Geräte auflisten (USB + intern)
-stickshredder list
-
-# Gerät und empfohlenes Verfahren anzeigen (liest nur die Geräteinformationen von Windows)
-stickshredder info --device E:
-
-# Laufwerk E: mit dem empfohlenen Verfahren löschen (ein Durchgang Nullen + vollständige Prüfung)
-stickshredder wipe --device E: --operator "Ihr Name"
-
-# Nur wenn eine Vorgabe es verlangt: BSI VSITR (7 Durchgänge), Schutzklasse 3, mit Auftraggeber, Zertifikat in einem bestimmten Ordner speichern
-stickshredder wipe --device E: --method bsi --schutzklasse 3 --operator "Ihr Name" --client "ACME GmbH" --output-dir "C:\Zertifikate"
-
-# Interne SATA-Platte löschen (Opt-in; die Windows-Platte ist immer geschützt)
-stickshredder wipe --device PhysicalDrive2 --method standard --allow-internal --operator "Ihr Name"
-
-# EXPERIMENTELL: ATA Secure Erase (Firmware-Befehl der Platte; nur direkt angeschlossene SATA-Platten)
-stickshredder wipe --device PhysicalDrive2 --method secure-erase --experimental --allow-internal --operator "Ihr Name"
-
-# Löschverlauf anzeigen
-stickshredder history
-```
-
-Methoden: `zero` (1 Durchgang), `standard` (3-Pass Random), `bsi` (BSI VSITR, 7 Durchgänge), `custom` (mit `--passes` und `--pattern`), `secure-erase` (experimentell, braucht `--experimental`). Ohne `--method` nimmt `wipe` das empfohlene Verfahren für das Gerät und sagt das an. Alle Optionen: `stickshredder wipe --help`.
-
-> **Hinweis:** Administratorrechte sind erforderlich. Klicken Sie mit der rechten Maustaste und wählen Sie "Als Administrator ausführen" oder verwenden Sie ein Terminal mit erhöhten Rechten.
-
----
-
-### Löschmethoden
-
-| Methode | Durchläufe | Muster | DIN 66399 Stufe | Verifikation | Einsatzzweck |
-|---|---|---|---|---|---|
-| **Zero-Fill** | 1 | `0x00` | H-1 / H-2 | Probe, Vollständig | Schnelles Löschen für nicht-sensible Daten, Geräteweitergabe innerhalb der Organisation |
-| **3-Pass Random** | 3 (+1) | Kryptographische Zufallsdaten | H-3 | Probe, Vollständig | Standardlöschung für normale Geschäftsdaten (Schutzklasse 1-2) |
-| **BSI VSITR** | 7 (+1) | Abwechselnd `0x00` / `0xFF` + zufälliger letzter Durchlauf | H-4 | Probe, Vollständig | Erweiterte Löschung nach BSI VSITR-Standard, empfohlen für vertrauliche Daten |
-| **Benutzerdefiniert** | Frei wählbar | Frei wählbares Muster und Durchlaufanzahl | Variiert | Probe, Vollständig | Flexible Konfiguration für spezifische Organisationsanforderungen |
-
-> **Hinweis zu `(+1)`:** Bei aktivierter Verifikation hängt StickShredder an Methoden mit zufälligem letzten Durchlauf einen zusätzlichen Null-Durchlauf an, damit das Ergebnis byte-genau überprüft werden kann. Ohne diesen zusätzlichen Durchlauf sind Zufallsdaten ohne gespeicherte PRNG-Seeds nicht von beschädigten Daten zu unterscheiden. Siehe [Verifikationsmodi](#verifikationsmodi) unten.
-
-> **Hinweis:** Für SSDs und Flash-basierte USB-Datenträger haben überschreibbasierte Methoden systembedingte Einschränkungen aufgrund von Wear Leveling. Siehe [SSD-Einschränkungen](#ssd-einschränkungen) und [SECURITY.md](docs/SECURITY.md).
-
-> **Optionale Neuformatierung:** Nach jeder Löschmethode kann StickShredder automatisch eine frische Partition erstellen und das Laufwerk formatieren (FAT32 / exFAT / NTFS), sodass es sofort ohne Umweg über die Datenträgerverwaltung nutzbar ist. Siehe [Nach dem Löschen neu formatieren](#nach-dem-löschen-neu-formatieren).
-
----
-
-### Empfehlungen & Ergebnis
-
-**Empfehlung je Gerätetyp.** `stickshredder info --device E:` zeigt das Gerät (Modell, Typ, Laufwerksbuchstaben, System-/Intern-Status) und das empfohlene Verfahren. Es liest nur die Geräteinformationen von Windows — der Datenträger wird nicht geöffnet, es wird kein Laufwerksbefehl gesendet.
-
-| Gerät | Empfehlung | NIST SP 800-88 |
-|---|---|---|
-| Festplatte (HDD) | Ein Durchgang Nullen + vollständige Prüfung | Clear |
-| SSD | Ein Durchgang Nullen + vollständige Prüfung, mit Hinweis, dass Reserve-Bereiche nicht erreicht werden (Hardware-Löschen, Beta, wird nicht automatisch gewählt) | Clear |
-| USB-Stick / SD-Karte | Ein Durchgang Nullen + vollständige Prüfung; für Schutzklasse 3: physisch vernichten | Clear |
-
-Ein Durchgang genügt bei heutigen Datenträgern. 3-Pass und BSI-VSITR bleiben wählbar, weil manche internen Vorgaben sie verlangen, werden aber nie empfohlen: Sie kosten Zeit und bringen keinen Sicherheitsgewinn. Wer sie wählt, bekommt diesen Hinweis angezeigt.
-
-**Dreistufiges Ergebnis.** Jede Löschung endet mit einem von drei Ergebnissen — gleich in CLI, Verlauf und Zertifikat:
-
-| Ergebnis | Wann | CLI-Exitcode | Verlauf (Spalte `result`) |
-|---|---|---|---|
-| Erfolgreich | Löschen und Prüfung bestanden | `0` | `OK` |
-| Mit Einschränkungen | Nicht beschreibbare Sektoren, oder ein versteckter Bereich (HPA/DCO) wurde gefunden und nicht entfernt | `3` | `LIMITED` |
-| Fehlgeschlagen | Löschen oder Prüfung fehlgeschlagen | `1` | `FAILED` |
-
-Verlaufsdateien älterer Versionen (`SUCCESS` / `FAILED`) werden weiterhin gelesen und richtig angezeigt.
-
-**Auf dem Zertifikat.** Neben der DIN-66399-Stufe nennt das Zertifikat die NIST-SP-800-88-Kategorie des tatsächlich verwendeten Verfahrens: Überschreiben ist „Clear“, Hardware-Löschen „Purge“. Ein signiertes Zertifikat enthält seine Daten außerdem als maschinenlesbaren PDF-Anhang `stickshredder-certificate.json` (signierte Daten und Prüfcode); die meisten PDF-Programme zeigen ihn unter „Anlagen“.
-
----
-
-### Verifikationsmodi
-
-Nach Abschluss des Löschvorgangs kann StickShredder den Datenträger erneut auslesen, um nachzuweisen, dass das Überschreiben tatsächlich wirksam war. Es gibt drei Modi:
-
-| Modus | Laufzeitkosten | Beschreibung | Einsatz |
-|---|---|---|---|
-| `none` | 0% | Keine Verifikation | Wenn dem Datenträger vertraut wird und kein signierter Nachweis erforderlich ist |
-| `sample` | ca. 1% | Liest 100 zufällige Sektoren, hasht sie und vergleicht mit dem erwarteten Muster | Schnellere Prüfung, wenn es eilt — erkennt großflächige Fehler |
-| `full` (Standard) | ca. 100% (verdoppelt Laufzeit) | Liest **jeden** Sektor und vergleicht byte-genau mit dem erwarteten Muster; meldet die ersten 100 Fehler-Offsets | Standard seit 2.0 — Audits, Erkennung still fehlschlagender Sektoren |
-
-**Warum vollständige Verifikation zählt.** Überschreibbasierte Löschungen gehen davon aus, dass jeder erfolgreich zurückgekehrte `WriteFile`-Aufruf Daten tatsächlich auf das Medium geschrieben hat. Auf alternden Flash-Speichern oder ausfallenden USB-Controllern können einzelne Sektoren "still fehlschlagen" — das Schreiben scheint erfolgreich, aber beim erneuten Lesen sind die alten Daten noch vorhanden. Nur die vollständige Verifikation erkennt das.
-
-**CLI:**
-
-```bash
-# Vollständige Verifikation (Standard seit 2.0) — verdoppelt ungefähr die Gesamtlaufzeit
-stickshredder wipe --device E: --method zero --operator "Robin"
-
-# Probe-Verifikation — schneller
-stickshredder wipe --device E: --method zero --operator "Robin" --verify sample
-
-# Verifikation überspringen
-stickshredder wipe --device E: --method zero --operator "Robin" --verify none
-```
-
-**GUI:** Die Checkbox *"Vollständige Verifikation (verdoppelt Laufzeit)"* ist standardmäßig angehakt. Ohne Häkchen wird eine Stichprobe geprüft.
-
----
-
-### Nach dem Löschen neu formatieren
-
-Standardmäßig hinterlässt StickShredder das Laufwerk nach der Löschung im unpartitionierten Rohzustand. Windows zeigt es als "Nicht zugeordnet" an und das Laufwerk muss erst manuell in der Datenträgerverwaltung formatiert werden, bevor es wieder nutzbar ist.
-
-StickShredder kann das Laufwerk direkt nach erfolgreicher Löschung + Verifikation automatisch neu formatieren:
-
-| Dateisystem | Größenlimits | Kompatibilität |
-|---|---|---|
-| **exFAT** (empfohlen) | bis 128 PB | Windows, macOS, die meisten Linux, Kameras, Spielkonsolen |
-| **FAT32** | 32 GB pro Volume, 4 GB pro Datei | Nahezu universell, aber auf 32 GB begrenzt — Windows verweigert FAT32 darüber |
-| **NTFS** | 256 TB | Windows-zentriert; macOS und Linux benötigen Zusatzsoftware zum Schreiben |
-
-**CLI:**
-```bash
-stickshredder wipe --device E: --method zero --operator "Robin" --reformat exfat --reformat-label "Archiv-2026"
-```
-
-**GUI:** Aktivieren Sie die Checkbox **"Nach Löschung formatieren"** im Löschkonfigurationsbereich und wählen Sie Dateisystem und Volumenbezeichnung.
-
-Schlägt die Formatierung fehl (z. B. weil Windows FAT32 auf Laufwerken >32 GB verweigert), wird die Löschung trotzdem als erfolgreich gemeldet und das Zertifikat erstellt — nur der Formatierungsschritt wird als fehlgeschlagen im Audit-Log vermerkt.
-
----
-
-### DIN 66399 erklärt
-
-DIN 66399 (auch als ISO 21964 veröffentlicht) ist die deutsche/internationale Norm für die Vernichtung von Datenträgern. Sie definiert:
-
-- **Schutzklassen** 1-3: Wie sensibel sind die Daten?
-- **Sicherheitsstufen** 1-7: Wie gründlich müssen die Daten vernichtet werden?
-- **Datenträgertypen** (P, F, O, T, H, E): Um welche Art von Datenträger handelt es sich?
-
-StickShredder arbeitet mit dem Datenträgertyp **H** (Festplatten / digitale Speichermedien) und ordnet seine Löschmethoden den entsprechenden Sicherheitsstufen zu.
-
-Eine ausführliche Erklärung finden Sie in [docs/DIN66399-INFO.md](docs/DIN66399-INFO.md).
-
----
-
-### SSD-Einschränkungen
-
-Moderne USB-Datenträger und SSDs verwenden **Wear Leveling**, **Over-Provisioning** und **Controller-gesteuertes Block-Remapping**. Diese Techniken bedeuten, dass eine softwarebasierte Überschreibung möglicherweise nicht jede physische Speicherzelle des Geräts erreicht. Restdaten können in umgemappten oder reservierten Blöcken verbleiben, die für das Host-Betriebssystem nicht zugänglich sind.
-
-**Für hochsensible Daten auf SSD-/Flash-Medien** empfehlen wir:
-
-- **ATA Secure Erase** *(2.0, experimentell)* — über die CLI verfügbar:
-  `stickshredder wipe --device PhysicalDrive2 --method secure-erase --experimental --allow-internal --operator "..."`.
-  Nutzt den Firmware-Löschbefehl der Platte und erreicht damit auch
-  Wear-Leveling-Zellen, die ein Überschreiben nicht erreicht. **Auf echter
-  Hardware ungetestet** — Ergebnisse bis zur eigenen Prüfung als unbestätigt
-  behandeln.
-- **Physische Vernichtung** (Schreddern nach DIN 66399 Datenträgertyp E) —
-  weiterhin die einzige garantierte Methode für HPA/DCO-Bereiche und defekte,
-  aber nicht gemeldete Sektoren.
-
-Eine ausführliche Erläuterung finden Sie in [docs/SECURITY.md](docs/SECURITY.md).
-
----
-
-### Häufige Fragen (FAQ)
-
-#### Ist das wirklich DIN 66399 zertifiziert?
-
-**Nein.** StickShredder ist nicht von DEKRA, DIN, BSI oder einer anderen Stelle zertifiziert. Die erstellten Löschzertifikate sind *nach der Terminologie und den Konventionen* der DIN 66399 / ISO 21964 strukturiert, stellen aber keine offizielle DIN 66399-Konformität dar. Wenn Ihre Organisation ein zertifiziertes Tool benötigt, ist eine kommerziell zertifizierte Lösung erforderlich.
-
-#### Brauche ich Administratorrechte?
-
-**Ja.** Das Schreiben von Rohdaten auf ein gesamtes Laufwerk erfordert unter Windows erhöhte Rechte. StickShredder fordert eine UAC-Erhöhung an, wenn es nicht bereits als Administrator ausgeführt wird.
-
-#### Kann ich mein Systemlaufwerk löschen?
-
-**Nein, absichtlich nicht.** StickShredder verweigert das Löschen der physischen Platte, auf der die aktive Windows-Installation liegt — einschließlich aller weiteren Partitionen dieser Platte (z. B. eine Datenpartition `D:` neben `C:`) — und jeder Platte, die Windows als Boot- oder Systemplatte meldet (z. B. eine zweite Platte mit der EFI-Partition, von der der PC gestartet ist). Eine „aktive“ MBR-Partition allein zählt nicht; bootfähige USB-Installationssticks bleiben löschbar. Kann es nicht feststellen, auf welcher Platte Windows liegt oder von welcher der PC startet, sperrt es alle internen Platten. Unmittelbar vor dem Schreiben prüft es erneut, ob die Platte noch die ausgewählte ist, und hängt alle ihre Volumes aus.
-
-#### Kann ich interne (Nicht-USB-)Platten löschen?
-
-**Ja, ab 2.0 — aber standardmäßig aus.** Geben Sie `--allow-internal` an der CLI an (oder setzen Sie das Häkchen „Interne Festplatten erlauben" in der GUI). Interne Platten ohne Laufwerksbuchstaben werden als `PhysicalDriveN` angesprochen (zeigt `stickshredder list`). System- und Boot-Platten bleiben hart gesperrt.
-
-#### Was ist ATA Secure Erase — und ist es sicher?
-
-Es ist der eingebaute Löschbefehl der Platte (Firmware-Ebene) und erreicht damit auch Wear-Leveling-Zellen, die ein Überschreiben nicht erreicht. Ab 2.0 als **experimentelle, ausdrücklich zu aktivierende CLI-Funktion** für direkt angeschlossene SATA-Platten (nicht im USB-Gehäuse) verfügbar (`--method secure-erase --experimental`). Es ist **auf echter Hardware noch nicht verifiziert** und kann — wie jeder Firmware-Löschvorgang — eine Platte vorübergehend sperren oder unbrauchbar machen, wenn er unterbrochen wird. Bis zur eigenen Prüfung als experimentell behandeln.
-
-#### Was passiert bei defekten Sektoren?
-
-Ab 2.0 bricht ein nicht beschreibbarer Sektor den Löschvorgang nicht mehr ab. StickShredder überspringt ihn, zählt ihn und führt die betroffenen Bereiche auf dem Zertifikat auf. Ist ein großer Teil der Platte nicht beschreibbar (Standard >10 %), wird der Vorgang als **fehlgeschlagen** statt „erfolgreich" gemeldet — einer sterbenden Platte ist nicht zu trauen.
-
-#### Meine Platte ist eine SSD — reicht da nicht Schnellformatierung + TRIM?
-
-Oft reicht es *praktisch*: Nach einer Schnellformatierung sendet das System TRIM, und die Garbage Collection des SSD-Controllers löscht die zugrunde liegenden Zellen binnen Minuten, sodass die Daten mit normalen Mitteln nicht mehr lesbar sind. Aber es ist **nicht garantiert und nicht nachweisbar** — das TRIM-Timing hängt vom Controller ab, es erfasst keine umgemappten oder Over-Provisioning-Zellen, und es hinterlässt keinen Nachweis. Für dokumentierte, prüffähige Entsorgung eine vollständige Löschung (mit Verifikation) oder ATA Secure Erase verwenden; für höchste Sicherheit die physische Vernichtung.
-
-#### Welche Dateisysteme werden unterstützt?
-
-StickShredder führt eine rohe, sektorbasierte Überschreibung des gesamten Laufwerks durch. Das vorhandene Dateisystem ist irrelevant -- es wird beim Löschen zerstört. Sie können das Laufwerk anschließend mit einem beliebigen Dateisystem neu formatieren.
-
-#### Kann ich dies für die DSGVO-Konformität verwenden?
-
-StickShredder kann ein nützlicher Bestandteil Ihres Datenentsorgungsprozesses sein, ist aber allein keine vollständige DSGVO-Lösung. Wenden Sie sich an Ihren Datenschutzbeauftragten, um festzustellen, ob softwarebasiertes Löschen Ihre spezifischen regulatorischen Pflichten erfüllt.
-
-#### Ist das Löschzertifikat rechtlich bindend?
-
-Das Zertifikat ist ein Dokumentationswerkzeug. Seine rechtliche Gültigkeit hängt von Ihrer Rechtsordnung und den spezifischen Anforderungen Ihres regulatorischen Rahmens ab. Es ersetzt keine professionelle Rechtsberatung.
-
----
-
-### Mitwirken
-
-Beiträge sind willkommen! So starten Sie:
-
-1. Forken Sie das Repository
-2. Erstellen Sie einen Feature-Branch (`git checkout -b feature/mein-feature`)
-3. Installieren Sie die Entwicklungsabhängigkeiten: `pip install -e ".[dev]"`
-4. Nehmen Sie Ihre Änderungen vor und fügen Sie Tests hinzu
-5. Führen Sie die Testsuite aus: `pytest`
-6. Erstellen Sie einen Pull Request
-
-Bitte halten Sie sich an den bestehenden Codestil und fügen Sie Tests für neue Funktionalitäten hinzu. Für größere Änderungen eröffnen Sie bitte zunächst ein Issue, um den Ansatz zu besprechen.
-
-#### Fehler melden
-
-Eröffnen Sie ein Issue auf GitHub mit:
-- Ihrer Windows-Version
-- Python-Version (bei Ausführung aus dem Quellcode)
-- Schritten zur Reproduktion
-- Erwartetem vs. tatsächlichem Verhalten
+Fehler melden: Issue mit Windows-Version, StickShredder-Version, Schritten und erwartetem Verhalten eröffnen. Sicherheitslücken: siehe [docs/SECURITY.md](docs/SECURITY.md).
 
 ---
 
 ### Lizenz
 
-StickShredder ist lizenziert unter der [MIT-Lizenz](LICENSE).
+[MIT](LICENSE). Die mitgelieferten Schriften (Space Grotesk, Inter, JetBrains Mono) stehen unter der SIL Open Font License.

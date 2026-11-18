@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tools"))
 
-from screenshots_v2 import _isolate_profile, _sample_disks  # noqa: E402
+from screenshots_v2 import DEMO_OPERATOR, _isolate_profile, _sample_disks  # noqa: E402
 
 
 def main() -> int:
@@ -63,7 +63,7 @@ def main() -> int:
     app.setStyle("Fusion")
     config = AppConfig()
     config.cert_output_dir = str(Path(tempfile.mkdtemp(prefix="stickshredder_certs_")))
-    config.operator_name = "Robin"
+    config.operator_name = DEMO_OPERATOR
     config.beta_features = True  # „Beta-Funktionen aktivieren“: the hardware erase is Beta
     theme = ThemeManager(app, "dark", load_fonts())
     theme.apply()

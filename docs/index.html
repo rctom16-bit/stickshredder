@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<title>StickShredder</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f3f5f9; --card: #ffffff; --text: #0b1020; --muted: #4a5568;
+    --line: #dbe1ea; --accent: #0f9f7a; --accent-text: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0a0f1e; --card: #121a2c; --text: #eef2f8; --muted: #a3adc2;
+      --line: #24304a; --accent: #2dd4a7; --accent-text: #0a0f1e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 640px; margin: 0 auto; padding: 48px 16px; }
+  h1 { font-size: 28px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 32px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+    padding: 20px 22px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 18px; margin: 0 0 6px; }
+  .card p { margin: 0 0 14px; color: var(--muted); }
+  a.btn {
+    display: inline-block; padding: 10px 18px; border-radius: 10px; font-weight: 600;
+    background: var(--accent); color: var(--accent-text); text-decoration: none;
+  }
+  a.link { color: var(--accent); font-weight: 600; text-decoration: none; }
+  a:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+  footer { color: var(--muted); font-size: 14px; margin-top: 32px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>StickShredder</h1>
+  <p class="sub">Free Windows tool for wiping USB sticks and disks, with signed deletion certificates.
+    <span lang="de">Kostenloses Windows-Tool zum Löschen von USB-Sticks und Festplatten, mit signierten Löschzertifikaten.</span></p>
+
+  <section class="card">
+    <h2>Zertifikat prüfen · Check a certificate</h2>
+    <p>Checks the signature of a StickShredder deletion certificate. Runs entirely in your browser; nothing is uploaded.
+      <span lang="de">Prüft die Signatur eines Löschzertifikats. Läuft komplett im Browser, nichts wird hochgeladen.</span></p>
+    <a class="btn" href="verify/">Open the verify page</a>
+  </section>
+
+  <section class="card">
+    <h2>Source code, download, documentation</h2>
+    <p>Releases, README (English and German) and the issue tracker are on GitHub.</p>
+    <a class="link" href="https://github.com/rctom16-bit/stickshredder">github.com/rctom16-bit/stickshredder</a>
+  </section>
+
+  <footer>MIT licence · no tracking, no cookies, no external scripts.</footer>
+</main>
+</body>
+</html>
