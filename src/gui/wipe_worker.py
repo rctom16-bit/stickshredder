@@ -534,8 +534,8 @@ class WipeWorker(QThread):
                     # Clear-Disk needs the disk free.
                     locks, volume_locks = volume_locks, []
                     release_volumes(locks)
-                    close_drive(handle)
-                    handle = None
+                    closing, handle = handle, None   # never closed twice
+                    close_drive(closing)
 
                     if not wipe_result.success:
                         raise RuntimeError(
@@ -801,7 +801,10 @@ class WipeWorker(QThread):
                 )
             finally:
                 if handle is not None:
-                    close_drive(handle)
+                    try:
+                        close_drive(handle)
+                    except Exception:  # noqa: BLE001 — the locks must still be released
+                        pass
                 locks, volume_locks = volume_locks, []
                 release_volumes(locks)
                 # Clean up demo temp file

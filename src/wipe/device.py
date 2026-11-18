@@ -865,7 +865,10 @@ def open_physical_drive(device_id: str) -> int:
 def close_drive(handle: int) -> None:
     if not _handle_is_invalid(handle):
         kernel32.CloseHandle(handle)
-        audit_log(f"Closed drive handle {handle}")
+        try:
+            audit_log(f"Closed drive handle {handle}")
+        except Exception:  # noqa: BLE001 — a locked/full log must not break cleanup
+            pass
 
 
 def get_drive_size(handle: int) -> int:
@@ -1091,8 +1094,12 @@ def _volume_at(mount_point: str) -> str | None:
 def _unlettered_volumes_on_disk(index: int, letters: list[str]) -> list[str]:
     """Volumes on disk ``index`` that none of ``letters`` reaches.
 
-    Raises UnsafeTargetError when the volumes cannot be listed or when the
-    Windows volume lies on this disk (fail closed).
+    Fails closed (UnsafeTargetError) before anything is locked when the
+    volumes cannot be listed, when the Windows volume cannot be found or lies
+    on this disk, when a letter cannot be matched to its volume (that volume
+    would be dismounted twice), or when a volume of this disk also lies on
+    another disk (a spanned volume: wiping one of its disks destroys the
+    data on the others).
     """
     try:
         names = _volume_names()
@@ -1101,25 +1108,43 @@ def _unlettered_volumes_on_disk(index: int, letters: list[str]) -> list[str]:
             "Volumes konnten nicht gelesen werden / could not list the volumes: "
             f"{exc}"
         ) from exc
-    on_disk: list[str] = []
+    on_disk: dict[str, set[int]] = {}
     for name in names:
         disks = _volume_disks(name)
         if disks is None:
             audit_log(f"Volume {name}: disks not readable (no media?), skipped")
         elif index in disks:
-            on_disk.append(name)
+            on_disk[name] = disks
     if not on_disk:
         return []
-    windows = _volume_at(_system_drive_letter() + "\\")
-    if windows is not None and windows.lower() in {n.lower() for n in on_disk}:
+    system_root = _system_drive_letter() + "\\"
+    windows = _volume_at(system_root)
+    if windows is None:
+        raise UnsafeTargetError(
+            f"Windows-Volume ({system_root}) nicht gefunden / "
+            f"could not find the Windows volume ({system_root})"
+        )
+    if windows.lower() in {n.lower() for n in on_disk}:
         raise UnsafeTargetError(
             f"PhysicalDrive{index} trägt das Windows-Volume / holds the Windows volume"
         )
-    covered = {
-        volume.lower() for volume in (_volume_at(f"{letter}\\") for letter in letters)
-        if volume
-    }
-    return [name for name in on_disk if name.lower() not in covered]
+    letter_of: dict[str, str] = {}   # volume name (lower case) -> "E:"
+    for letter in letters:
+        volume = _volume_at(f"{letter}\\")
+        if not volume:
+            raise UnsafeTargetError(
+                f"Laufwerk {letter} konnte keinem Volume zugeordnet werden / "
+                f"could not match drive {letter} to its volume"
+            )
+        letter_of[volume.lower()] = letter
+    for name, disks in on_disk.items():
+        others = ", ".join(f"PhysicalDrive{n}" for n in sorted(disks - {index}))
+        if others:
+            label = letter_of.get(name.lower(), f"Volume {name}")
+            raise UnsafeTargetError(
+                f"{label} liegt auch auf {others} / also lies on {others}"
+            )
+    return [name for name in on_disk if name.lower() not in letter_of]
 
 
 # ── Safety gate before writing ─────────────────────────────────────────
@@ -1154,8 +1179,10 @@ def prepare_target(device: DeviceInfo) -> list[int]:
 
     Re-reads the disk behind ``device.device_id`` and refuses if it is no
     longer the disk the user selected (serial, size or model changed — e.g.
-    stick swapped), if it is (or might be) the Windows disk, or if any of
-    its volumes cannot be dismounted. Raises UnsafeTargetError.
+    stick swapped), if it is (or might be) the Windows disk, if one of its
+    volumes also lies on another disk, or if any of its volumes cannot be
+    dismounted. The disk is checked once more after every volume is locked.
+    Raises UnsafeTargetError; on any failure no lock is kept.
 
     Returns the locked volume handles. The caller keeps them for the whole
     wipe and verification and then passes them to release_volumes().
@@ -1165,22 +1192,77 @@ def prepare_target(device: DeviceInfo) -> list[int]:
             f"{device.device_id} ist die Systemplatte / is the system disk"
         )
     index = _physical_index(device.device_id)
+    c = _check_still_selected(device, index)
+    try:
+        # Re-read the letters now: one added since listing must be
+        # dismounted too, one that moved to another disk must not be.
+        letters = _letters_on_disk(c, index)
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        raise UnsafeTargetError(_RECHECK_FAILED + str(exc)) from exc
+    # Volumes without a letter or mounted in a folder: looked up before
+    # anything is locked, dismounted and kept locked like the letters.
+    unlettered = _unlettered_volumes_on_disk(index, letters)
+
+    locks: list[int] = []
+    try:
+        for volume in [*letters, *unlettered]:
+            try:
+                locks.append(dismount_volume(volume))
+            except OSError as exc:
+                raise UnsafeTargetError(
+                    _dismount_refusal(volume, letters, exc)
+                ) from exc
+        # Locking can take a while (forced dismounts): by now the number may
+        # belong to another disk (stick pulled, another plugged in). Check
+        # again with every volume locked; nothing can change them any more.
+        _check_still_selected(device, index)
+    except BaseException:
+        release_volumes(locks)
+        raise
+    try:
+        audit_log(
+            f"Target verified, dismounted and locked: {device.device_id} "
+            f"({len(letters)} letter(s), {len(unlettered)} volume(s) without one)"
+        )
+    except Exception:  # noqa: BLE001 — a locked/full log must not lose the locks
+        pass
+    return locks
+
+
+_RECHECK_FAILED = (
+    "Laufwerk konnte nicht erneut geprüft werden / could not re-check the drive: "
+)
+
+
+def _dismount_refusal(volume: str, letters: list[str], exc: OSError) -> str:
+    """The message when ``volume`` cannot be dismounted and locked."""
+    name = volume if volume in letters else (
+        f"Volume ohne Laufwerksbuchstaben / volume without a drive letter {volume}"
+    )
+    admin = (
+        "Administratorrechte erforderlich / administrator rights required — "
+        if getattr(exc, "winerror", None) == ERROR_ACCESS_DENIED else ""
+    )
+    return f"{admin}{name} konnte nicht ausgehängt werden / could not be dismounted: {exc}"
+
+
+def _check_still_selected(device: DeviceInfo, index: int) -> wmi.WMI:
+    """Re-read disk ``index``; refuse unless it is still ``device``.
+
+    Serial, model and size must match what the user selected (a USB
+    enclosure that reports 0000000000000000 as its serial still has to
+    match model and size), and the disk must not be (or possibly be) the
+    system disk. Returns the WMI connection. Raises UnsafeTargetError, also
+    when WMI cannot be read (fail closed).
+    """
     try:
         c = _get_wmi_connection()
         disk = next(
             (d for d in c.Win32_DiskDrive() if int(d.Index) == index), None
         )
         sys_indices = _system_disk_indices(c)
-        # Re-read the letters now: one added since listing must be
-        # dismounted too, one that moved to another disk must not be.
-        letters = _letters_on_disk(c, index)
-    except UnsafeTargetError:
-        raise
     except Exception as exc:  # noqa: BLE001 — fail closed
-        raise UnsafeTargetError(
-            f"Laufwerk konnte nicht erneut geprüft werden / "
-            f"could not re-check the drive: {exc}"
-        ) from exc
+        raise UnsafeTargetError(_RECHECK_FAILED + str(exc)) from exc
 
     if disk is None:
         raise UnsafeTargetError(
@@ -1200,33 +1282,4 @@ def prepare_target(device: DeviceInfo) -> list[int]:
         raise UnsafeTargetError(
             f"{device.device_id} ist die Systemplatte / is the system disk"
         )
-    # Volumes without a letter or mounted in a folder: looked up before
-    # anything is locked, dismounted and kept locked like the letters.
-    unlettered = _unlettered_volumes_on_disk(index, letters)
-
-    locks: list[int] = []
-    for volume in [*letters, *unlettered]:
-        name = volume if volume in letters else (
-            f"Volume ohne Laufwerksbuchstaben / volume without a drive letter {volume}"
-        )
-        try:
-            locks.append(dismount_volume(volume))
-        except OSError as exc:
-            release_volumes(locks)
-            admin = (
-                "Administratorrechte erforderlich / administrator rights "
-                "required — "
-                if getattr(exc, "winerror", None) == ERROR_ACCESS_DENIED else ""
-            )
-            raise UnsafeTargetError(
-                f"{admin}{name} konnte nicht ausgehängt werden / "
-                f"could not be dismounted: {exc}"
-            ) from exc
-        except BaseException:
-            release_volumes(locks)
-            raise
-    audit_log(
-        f"Target verified, dismounted and locked: {device.device_id} "
-        f"({len(letters)} letter(s), {len(unlettered)} volume(s) without one)"
-    )
-    return locks
+    return c

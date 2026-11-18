@@ -26,6 +26,8 @@ VOL_HIDDEN = "\\\\?\\Volume{a0000000-0000-0000-0000-000000000003}\\"
 VOL_FOLDER = "\\\\?\\Volume{b0000000-0000-0000-0000-000000000004}\\"
 VOL_C = "\\\\?\\Volume{c0000000-0000-0000-0000-000000000005}\\"
 VOL_CD = "\\\\?\\Volume{d0000000-0000-0000-0000-000000000006}\\"
+VOL_UEFI = "\\\\?\\Volume{f0000000-0000-0000-0000-000000000007}\\"
+VOL_SPAN = "\\\\?\\Volume{50000000-0000-0000-0000-000000000008}\\"
 
 
 @pytest.fixture
@@ -43,7 +45,7 @@ def volumes(monkeypatch):
         disks={VOL_C: {0}, VOL_E: {1}, VOL_G: {1}, VOL_HIDDEN: {1}, VOL_FOLDER: {1},
                VOL_CD: None},
         mounts={"C:\\": VOL_C, "E:\\": VOL_E, "G:\\": VOL_G},
-        dismounted=[], released=[], fail=set(),
+        dismounted=[], released=[], fail=set(), wmi=c,
     )
 
     def names():
@@ -67,10 +69,11 @@ def volumes(monkeypatch):
     return state
 
 
-def _target():
-    return _make_device(device_id=r"\\.\PhysicalDrive1", model="Disk1",
-                        serial_number="SN1", capacity_bytes=64 * 1024**3,
-                        disk_letters=["E:", "G:"])
+def _target(**overrides):
+    base = dict(device_id=r"\\.\PhysicalDrive1", model="Disk1", serial_number="SN1",
+                capacity_bytes=64 * 1024**3, disk_letters=["E:", "G:"])
+    base.update(overrides)
+    return _make_device(**base)
 
 
 def test_volumes_without_a_letter_are_dismounted_and_kept_locked(volumes):
@@ -137,6 +140,176 @@ def test_system_disk_is_refused_before_the_volume_scan(volumes):
     volumes.names = OSError("must not be read")
     with pytest.raises(UnsafeTargetError, match="Systemplatte"):
         prepare_target(_make_device(is_system_drive=True))
+
+
+# ── Review fixes: fail closed before anything is locked ────────────────
+
+def test_rufus_gpt_stick_uefi_ntfs_volume_is_dismounted_and_locked(volumes, monkeypatch):
+    """Real case: Rufus writes a GPT stick with the data partition (E:) and a
+    letterless 1 MiB FAT partition "UEFI_NTFS" at the very end of the disk."""
+    c = _fake_wmi({0: ("SCSI", ["C:"]), 1: ("USB", ["E:"])})
+    monkeypatch.setattr(device_mod, "_get_wmi_connection", lambda: c)
+    volumes.names = [VOL_C, VOL_E, VOL_UEFI]
+    volumes.disks[VOL_UEFI] = {1}
+    locks = prepare_target(_target(disk_letters=["E:"]))
+    assert volumes.dismounted == ["E:", VOL_UEFI]
+    assert locks == [101, 102]
+    assert volumes.released == []
+
+
+def test_refuses_a_volume_that_also_lies_on_another_disk(volumes):
+    """A spanned volume with one extent on the target: dismounting it and
+    wiping one of its disks would destroy the data on the other disk."""
+    volumes.names = [VOL_C, VOL_E, VOL_G, VOL_SPAN]
+    volumes.disks[VOL_SPAN] = {1, 3}
+    with pytest.raises(UnsafeTargetError) as info:
+        prepare_target(_target())
+    msg = str(info.value)
+    assert VOL_SPAN in msg
+    assert "PhysicalDrive3" in msg
+    assert volumes.dismounted == []
+    assert volumes.released == []
+
+
+def test_refuses_a_lettered_volume_that_also_lies_on_other_disks(volumes):
+    volumes.disks[VOL_G] = {4, 1, 2}
+    with pytest.raises(UnsafeTargetError) as info:
+        prepare_target(_target())
+    msg = str(info.value)
+    assert "G:" in msg
+    assert "PhysicalDrive2, PhysicalDrive4" in msg
+    assert volumes.dismounted == []
+
+
+def test_refuses_when_the_windows_volume_cannot_be_found(volumes):
+    """The Windows-volume guard must not be skipped silently (fail closed)."""
+    del volumes.mounts["C:\\"]
+    with pytest.raises(UnsafeTargetError, match="Windows") as info:
+        prepare_target(_target())
+    assert "C:\\" in str(info.value)
+    assert volumes.dismounted == []
+
+
+def test_refuses_when_a_letter_cannot_be_matched_to_its_volume(volumes):
+    """Unmatched, G:'s volume would be dismounted a second time by its name —
+    while our own lock from dismounting G: holds it."""
+    del volumes.mounts["G:\\"]
+    with pytest.raises(UnsafeTargetError) as info:
+        prepare_target(_target())
+    msg = str(info.value)
+    assert "G:" in msg
+    assert "Volume" in msg
+    assert volumes.dismounted == []
+
+
+# ── Review fixes: the disk is checked again once its volumes are locked ─
+
+def _after_lock(volumes, **changes):
+    """From the first dismount on, WMI reports disk 1 with ``changes``."""
+    before = list(volumes.wmi.Win32_DiskDrive.return_value)
+
+    def changed(d):
+        if int(d.Index) != 1:
+            return d
+        fields = dict(Index=1, SerialNumber=d.SerialNumber, Model=d.Model,
+                      Size=d.Size, InterfaceType=d.InterfaceType,
+                      MediaType=d.MediaType)
+        fields.update(changes)
+        return SimpleNamespace(**fields)
+
+    after = [changed(d) for d in before]
+    if changes.get("gone"):
+        after = [d for d in before if int(d.Index) != 1]
+    volumes.wmi.Win32_DiskDrive.side_effect = (
+        lambda: after if volumes.dismounted else before
+    )
+
+
+def test_swap_while_locking_is_refused_and_every_lock_released(volumes):
+    _after_lock(volumes, SerialNumber="OTHER")
+    with pytest.raises(UnsafeTargetError, match="nicht mehr das ausgewählte"):
+        prepare_target(_target())
+    assert volumes.dismounted == ["E:", "G:", VOL_HIDDEN, VOL_FOLDER]
+    assert volumes.released == [101, 102, 103, 104]
+
+
+@pytest.mark.parametrize("changes", [
+    {"Model": "Other stick"}, {"Size": str(32 * 1024**3)},
+])
+def test_model_or_size_change_while_locking_is_refused(volumes, changes):
+    _after_lock(volumes, **changes)
+    with pytest.raises(UnsafeTargetError):
+        prepare_target(_target())
+    assert volumes.released == [101, 102, 103, 104]
+
+
+def test_disk_gone_after_locking_is_refused(volumes):
+    _after_lock(volumes, gone=True)
+    with pytest.raises(UnsafeTargetError, match="nicht mehr vorhanden"):
+        prepare_target(_target())
+    assert volumes.released == [101, 102, 103, 104]
+
+
+def test_disk_reported_as_system_disk_after_locking_is_refused(volumes, monkeypatch):
+    monkeypatch.setattr(device_mod, "_storage_system_disks",
+                        lambda: {1} if volumes.dismounted else set())
+    with pytest.raises(UnsafeTargetError, match="Systemplatte"):
+        prepare_target(_target())
+    assert volumes.released == [101, 102, 103, 104]
+
+
+def test_wmi_failure_after_locking_refuses_and_releases(volumes):
+    def disks():
+        if volumes.dismounted:
+            raise RuntimeError("RPC server unavailable")
+        return volumes.wmi.Win32_DiskDrive.return_value
+    volumes.wmi.Win32_DiskDrive.side_effect = disks
+    with pytest.raises(UnsafeTargetError, match="could not re-check"):
+        prepare_target(_target())
+    assert volumes.released == [101, 102, 103, 104]
+
+
+def test_all_zero_serial_of_a_usb_enclosure_passes_both_checks(volumes):
+    """Some USB enclosures report 0000000000000000: still the same disk."""
+    disk1 = next(d for d in volumes.wmi.Win32_DiskDrive.return_value if d.Index == 1)
+    disk1.SerialNumber = "0000000000000000"
+    locks = prepare_target(_target(serial_number="0000000000000000"))
+    assert locks == [101, 102, 103, 104]
+    assert volumes.released == []
+
+
+def test_all_zero_serial_still_catches_another_model_after_locking(volumes):
+    disk1 = next(d for d in volumes.wmi.Win32_DiskDrive.return_value if d.Index == 1)
+    disk1.SerialNumber = "0000000000000000"
+    _after_lock(volumes, Model="Other enclosure")
+    with pytest.raises(UnsafeTargetError, match="Other enclosure"):
+        prepare_target(_target(serial_number="0000000000000000"))
+    assert volumes.released == [101, 102, 103, 104]
+
+
+# ── Review fixes: a failing audit log never loses a lock ──────────────
+
+def test_failing_log_after_locking_still_returns_the_locks(volumes, monkeypatch):
+    def log(message, *_a, **_k):
+        if message.startswith("Target verified"):
+            raise OSError("log file locked")
+    monkeypatch.setattr(device_mod, "audit_log", log)
+    locks = prepare_target(_target())
+    assert locks == [101, 102, 103, 104]
+    assert volumes.released == []
+
+
+def test_close_drive_survives_a_failing_log(monkeypatch):
+    closed = []
+
+    def broken_log(*_a, **_k):
+        raise OSError("log file locked")
+
+    monkeypatch.setattr(device_mod, "audit_log", broken_log)
+    monkeypatch.setattr(device_mod.kernel32, "CloseHandle",
+                        lambda h: closed.append(h) or True)
+    device_mod.close_drive(42)  # must not raise
+    assert closed == [42]
 
 
 # ── The Windows calls behind it (faked kernel32) ───────────────────────
