@@ -79,12 +79,27 @@ def app_config(tmp_path, isolated_profile):
 
 @pytest.fixture()
 def gui_reset(qapp):
-    """Undo app-wide theme and language changes after a test."""
+    """Undo app-wide theme and language changes after a test.
+
+    Also frees the test's windows right away. A window kept alive by a
+    reference cycle (signal → bound method → window) would otherwise be
+    freed by Python's garbage collector at some random later moment — for
+    example while the next test's ``setStyleSheet`` walks every widget, which
+    crashes Qt (access violation).
+    """
+    import gc
+
+    from PySide6.QtCore import QCoreApplication, QEvent
+
     from gui import i18n
 
     palette = qapp.palette()
     sheet = qapp.styleSheet()
     yield qapp
     i18n.set_language("de")
+    for widget in qapp.topLevelWidgets():
+        widget.close()
+    gc.collect()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     qapp.setStyleSheet(sheet)
     qapp.setPalette(palette)

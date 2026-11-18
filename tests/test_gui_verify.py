@@ -1,10 +1,14 @@
-"""GUI tests for the v1.1 Full-Verification feature.
+"""Worker tests for verification, reformatting, the stall watchdog and the
+volume locks (gui.wipe_worker.WipeWorker).
 
 These tests cover:
-    * Default state of the "Full verification" checkbox in MainWindow
-    * The checkbox propagates to WipeWorker.verify_mode
+    * WipeWorker keeps the verify mode and reformat choice it is given
     * WipeWorker emits phase_changed signals in the expected sequence when
       WipeMethod.execute() is mocked
+    * the stall watchdog and the target re-checks before writing/reformatting
+
+The window-level checks of the old main window moved to the page tests
+(test_gui_delete_page.py, test_gui_wipe_defaults.py).
 
 They use pytest-qt, which is already a dev dependency of the project. If the
 Qt environment cannot start (no QApplication platform available), the tests
@@ -52,158 +56,10 @@ def app_config(tmp_path):
 
 @pytest.fixture()
 def demo_device():
-    """A virtual demo device so MainWindow has something selectable."""
+    """A virtual demo device (a temp file, never a real disk)."""
     from wipe.demo import create_demo_device
 
     return create_demo_device()
-
-
-@pytest.fixture()
-def main_window(qtbot, app_config):
-    """Build a MainWindow without running the deferred device scan."""
-    from gui.main_window import MainWindow
-
-    window = MainWindow(app_config)
-    qtbot.addWidget(window)
-    return window
-
-
-# -- Phase-label helper tests (pure, no Qt event loop needed) -----------------
-
-
-def test_phase_label_helper_returns_dual_language_strings():
-    """Plain unit test for the static phase_text helper."""
-    from gui.main_window import MainWindow
-
-    assert "Bereit" in MainWindow._phase_text("idle")
-    assert "Ready" in MainWindow._phase_text("idle")
-    assert "Wiping" in MainWindow._phase_text("wiping")
-    assert "\u00dcberschreiben" in MainWindow._phase_text("wiping")
-    assert "Verifying" in MainWindow._phase_text("verifying")
-    assert "Verifikation" in MainWindow._phase_text("verifying")
-    assert "Complete" in MainWindow._phase_text("done")
-    assert "Fertig" in MainWindow._phase_text("done")
-
-
-def test_phase_style_helper_returns_different_colors_per_phase():
-    """Each phase should have a visually distinct stylesheet."""
-    from gui.main_window import MainWindow
-
-    styles = {p: MainWindow._phase_style(p) for p in ("idle", "wiping", "verifying", "done")}
-    # Sanity: all four are non-empty and distinct.
-    assert all(styles.values())
-    assert len(set(styles.values())) == 4
-
-
-# -- MainWindow checkbox + wiring --------------------------------------------
-
-
-def test_checkbox_default_checked(main_window):
-    """The Full-Verification checkbox exists and starts ticked (default: full, spec G6)."""
-    assert hasattr(main_window, "full_verify_cb")
-    assert main_window.full_verify_cb.isChecked() is True
-
-
-# -- v1.2: internal-drive safety gate ----------------------------------------
-
-
-def _internal_device():
-    from wipe.device import DeviceInfo
-    return DeviceInfo(
-        drive_letter="",
-        device_id=r"\\.\PhysicalDrive2",
-        model="Seagate Internal 2TB",
-        serial_number="INT-DISK-1",
-        capacity_bytes=2 * 1024 ** 4,
-        filesystem="RAW",
-        connection_type="SATA",
-        is_removable=False,
-        is_system_drive=False,
-        is_internal=True,
-    )
-
-
-def test_allow_internal_checkbox_default_unchecked(main_window):
-    """The 'allow internal drives' opt-in must exist and start off."""
-    assert hasattr(main_window, "allow_internal_cb")
-    assert main_window.allow_internal_cb.isChecked() is False
-
-
-def test_internal_device_checkbox_disabled_without_optin(main_window):
-    """An internal drive is unselectable until the opt-in is ticked."""
-    main_window.devices = [_internal_device()]
-    main_window._populate_device_table()
-    assert len(main_window._device_checkboxes) == 1
-    assert main_window._device_checkboxes[0].isEnabled() is False
-
-    # Opt in -> the table re-renders and the checkbox becomes enabled.
-    main_window.allow_internal_cb.setChecked(True)
-    assert main_window._device_checkboxes[0].isEnabled() is True
-
-
-def test_wipe_refused_for_internal_without_optin(main_window):
-    """The safety gate must refuse an internal wipe when not opted in."""
-    main_window.devices = [_internal_device()]
-    main_window._populate_device_table()
-    # Programmatically select the (disabled) internal device.
-    main_window._device_checkboxes[0].setChecked(True)
-
-    with patch("gui.main_window.QMessageBox") as mock_box:
-        main_window._on_wipe_clicked()
-
-    assert mock_box.critical.called
-    assert main_window.worker is None
-
-
-def test_checkbox_has_bilingual_label_and_tooltip(main_window):
-    """Label and tooltip must cover both DE and EN."""
-    cb = main_window.full_verify_cb
-    text = cb.text()
-    assert "Vollst\u00e4ndige Verifikation" in text
-    assert "Full verification" in text
-
-    tooltip = cb.toolTip()
-    assert "jeden Sektor" in tooltip
-    assert "every sector" in tooltip
-
-
-def test_verify_progress_bar_hidden_until_verify_phase(main_window):
-    """The verify progress bar must start hidden."""
-    assert not main_window.verify_progress_bar.isVisible()
-
-
-def test_set_phase_updates_badge_text(main_window):
-    """_set_phase should mutate the phase badge label text."""
-    main_window._set_phase("wiping")
-    assert "Wiping" in main_window.phase_label.text()
-    main_window._set_phase("verifying")
-    assert "Verifying" in main_window.phase_label.text()
-    main_window._set_phase("done")
-    assert "Complete" in main_window.phase_label.text()
-
-
-def test_time_estimate_doubles_with_full_verify(main_window, demo_device):
-    """Ticking the full-verify box should lengthen the ETA string."""
-    from PySide6.QtWidgets import QCheckBox
-
-    # Inject a device and a matching checked checkbox so _selected_devices()
-    # returns it.
-    main_window.devices = [demo_device]
-    main_window._device_checkboxes = []
-    cb = QCheckBox()
-    cb.setChecked(True)
-    main_window._device_checkboxes.append(cb)
-
-    main_window.full_verify_cb.setChecked(False)
-    main_window._update_time_estimate()
-    text_sample = main_window.estimate_label.text()
-
-    main_window.full_verify_cb.setChecked(True)
-    main_window._update_time_estimate()
-    text_full = main_window.estimate_label.text()
-
-    assert "full verify" in text_full
-    assert "full verify" not in text_sample
 
 
 # -- Worker-level tests -------------------------------------------------------
@@ -244,112 +100,6 @@ def test_worker_falls_back_to_full_on_bad_verify_mode(app_config):
     )
     assert worker.verify_mode == "full"
 
-
-
-def test_checkbox_changes_verify_mode(qtbot, main_window, demo_device, monkeypatch):
-    """When the checkbox is checked, _start_wipe must build a worker with
-    verify_mode="full". Unchecked should yield "sample"."""
-    from gui import main_window as mw_module
-
-    captured: dict = {}
-
-    class FakeWorker:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            # Fake signals that accept .connect without doing anything.
-            for name in (
-                "progress_updated",
-                "verify_progress",
-                "phase_changed",
-                "device_completed",
-                "all_completed",
-                "error",
-                "status_message",
-                "stall_detected",
-            ):
-                setattr(self, name, MagicMock())
-
-        def start(self):
-            pass
-
-        def isRunning(self):  # noqa: N802 — Qt API name
-            return False
-
-        def cancel(self):
-            pass
-
-        def wait(self, timeout=0):
-            return True
-
-    monkeypatch.setattr(mw_module, "WipeWorker", FakeWorker)
-
-    # Case 1: unchecked -> sample
-    main_window.full_verify_cb.setChecked(False)
-    main_window._start_wipe([demo_device])
-    assert captured["verify_mode"] == "sample"
-
-    captured.clear()
-
-    # Case 2: checked -> full
-    main_window.full_verify_cb.setChecked(True)
-    main_window._start_wipe([demo_device])
-    assert captured["verify_mode"] == "full"
-
-
-def test_reformat_checkbox_propagates_to_worker(qtbot, main_window, demo_device, monkeypatch):
-    """Ticking the Reformat checkbox + choosing a filesystem + label must make
-    _start_wipe construct the worker with the matching reformat kwargs. A
-    regression test for the silent bug where the reformat UI existed but its
-    value was never read into the WipeWorker.
-    """
-    from gui import main_window as mw_module
-
-    captured: dict = {}
-
-    class FakeWorker:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            for name in (
-                "progress_updated", "verify_progress", "phase_changed",
-                "device_completed", "all_completed", "error",
-                "status_message", "stall_detected",
-            ):
-                setattr(self, name, MagicMock())
-
-        def start(self): pass
-        def isRunning(self): return False  # noqa: N802
-        def cancel(self): pass
-        def wait(self, timeout=0): return True
-
-    monkeypatch.setattr(mw_module, "WipeWorker", FakeWorker)
-
-    # Case 1: checkbox unchecked -> reformat should be "none"
-    main_window.reformat_cb.setChecked(False)
-    main_window._start_wipe([demo_device])
-    assert captured["reformat"] == "none"
-    captured.clear()
-
-    # Case 2: checkbox checked + exFAT + custom label
-    main_window.reformat_cb.setChecked(True)
-    # Find and select the exFAT item (userData "exfat")
-    for i in range(main_window.reformat_fs_combo.count()):
-        if main_window.reformat_fs_combo.itemData(i) == "exfat":
-            main_window.reformat_fs_combo.setCurrentIndex(i)
-            break
-    main_window.reformat_label_edit.setText("MYSTICK")
-    main_window._start_wipe([demo_device])
-    assert captured["reformat"] == "exfat"
-    assert captured["reformat_label"] == "MYSTICK"
-
-    captured.clear()
-
-    # Case 3: checked + NTFS selection
-    for i in range(main_window.reformat_fs_combo.count()):
-        if main_window.reformat_fs_combo.itemData(i) == "ntfs":
-            main_window.reformat_fs_combo.setCurrentIndex(i)
-            break
-    main_window._start_wipe([demo_device])
-    assert captured["reformat"] == "ntfs"
 
 
 def test_stall_watchdog_fires_when_no_progress(qtbot, app_config, demo_device):
@@ -646,99 +396,7 @@ def test_worker_emits_reformatting_phase_when_requested(
         assert wiping_idx < reformatting_idx < done_idx
 
 
-# -- v1.1: progress regression tests -----------------------------------------
-
-
-def test_progress_bar_updates_when_on_progress_fires(qtbot, main_window):
-    """Regression: a direct call to _on_progress with valid byte counts must
-    move the device progress bar off zero and replace 'Calculating...' with
-    a real ETA. Catches a v1.1 regression where progress stayed stuck at 0%."""
-    # Half-way through a single-pass wipe of a 100 MB chunk.
-    main_window._on_progress(0, 1, 1, 50_000_000, 100_000_000, 100.0)
-    assert main_window.device_progress.value() == 50
-    assert "calculating" not in main_window.eta_label.text().lower()
-
-
-def test_progress_bar_handles_signal_int_overflow(qtbot, main_window):
-    """PySide6 Signal(int, ...) marshals through C int (signed 32-bit), so
-    drives larger than 2 GiB arrive here as negative two's-complement values.
-    _on_progress must re-interpret negatives as their unsigned 32-bit form
-    so the percentage math stays correct on real USB sticks."""
-    total_bytes_real = 3 * 1024 * 1024 * 1024  # 3 GiB
-    bytes_written_real = total_bytes_real // 2
-
-    # Replicate PySide6's int-overflow wrap so the test reflects what the
-    # slot actually receives when the signal carries a >2 GiB value.
-    def wrap_int32(v: int) -> int:
-        v &= 0xFFFFFFFF
-        return v - (1 << 32) if v & 0x80000000 else v
-
-    main_window._on_progress(
-        0, 1, 1,
-        wrap_int32(bytes_written_real),
-        wrap_int32(total_bytes_real),
-        100.0,
-    )
-    assert main_window.device_progress.value() == 50
-    assert "calculating" not in main_window.eta_label.text().lower()
-
-
-# -- v1.1: reformat UI tests --------------------------------------------------
-
-
-def test_reformat_checkbox_default_unchecked(main_window):
-    """The Reformat checkbox must exist and start off."""
-    assert hasattr(main_window, "reformat_cb")
-    assert main_window.reformat_cb.isChecked() is False
-
-
-def test_reformat_controls_disabled_by_default(main_window):
-    """Filesystem combo and label edit must be disabled when checkbox is off."""
-    assert main_window.reformat_fs_combo.isEnabled() is False
-    assert main_window.reformat_label_edit.isEnabled() is False
-
-
-def test_reformat_controls_enable_when_checkbox_toggled(qtbot, main_window):
-    """Toggling the reformat checkbox must enable/disable the dependent
-    filesystem combo and label edit together."""
-    main_window.reformat_cb.setChecked(True)
-    assert main_window.reformat_fs_combo.isEnabled() is True
-    assert main_window.reformat_label_edit.isEnabled() is True
-
-    main_window.reformat_cb.setChecked(False)
-    assert main_window.reformat_fs_combo.isEnabled() is False
-    assert main_window.reformat_label_edit.isEnabled() is False
-
-
-def test_reformat_filesystem_options_and_default(main_window):
-    """The filesystem dropdown must offer exFAT, FAT32, NTFS with userData
-    keys 'exfat'/'fat32'/'ntfs', defaulting to exFAT."""
-    combo = main_window.reformat_fs_combo
-    assert combo.count() == 3
-    keys = [combo.itemData(i) for i in range(combo.count())]
-    assert keys == ["exfat", "fat32", "ntfs"]
-    # Default selection is exFAT.
-    assert combo.currentData() == "exfat"
-
-
-def test_reformat_label_default_and_max_length(main_window):
-    """Volume label defaults to 'USB' and is capped at 32 characters."""
-    edit = main_window.reformat_label_edit
-    assert edit.text() == "USB"
-    assert edit.placeholderText() == "Volume label"
-    assert edit.maxLength() == 32
-
-
-def test_reformat_checkbox_has_bilingual_label_and_tooltip(main_window):
-    """Reformat checkbox label and tooltip must cover both DE and EN."""
-    cb = main_window.reformat_cb
-    text = cb.text()
-    assert "Nach L\u00f6schung formatieren" in text
-    assert "Reformat after wipe" in text
-
-    tooltip = cb.toolTip()
-    assert "fresh partition" in tooltip
-    assert "Windows Explorer" in tooltip
+# -- 1.1.1: target re-checks ----------------------------------------------------
 
 
 def test_worker_refuses_real_device_when_target_unsafe(qtbot, app_config):

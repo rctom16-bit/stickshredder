@@ -455,16 +455,14 @@ def test_history_table_shows_new_and_legacy_results(capsys):
     assert "SUCCESS" not in table
 
 
-def test_history_dialog_result_cell():
-    from gui.history_dialog import result_cell
+def test_certificates_page_result_chip():
+    from gui.pages.certificates_page import result_chip
 
-    assert result_cell("OK")[0] == "Erfolgreich / Successful"
-    assert result_cell("SUCCESS")[0] == "Erfolgreich / Successful"
-    assert result_cell("LIMITED")[0] == "Mit Einschränkungen / With limitations"
-    assert result_cell("FAILED")[0] == "Fehlgeschlagen / Failed"
-    assert result_cell("odd") == ("odd", None)
-    colours = {result_cell(v)[1].name() for v in ("OK", "LIMITED", "FAILED")}
-    assert len(colours) == 3
+    assert result_chip("OK") == ("OK", "accent")
+    assert result_chip("SUCCESS") == ("OK", "accent")
+    assert result_chip("LIMITED") == ("EINGESCHRÄNKT", "warning")
+    assert result_chip("FAILED") == ("FEHLGESCHLAGEN", "danger")
+    assert result_chip("odd") == ("odd", "neutral")
 
 
 def test_recommendation_dataclass_is_what_info_uses():
