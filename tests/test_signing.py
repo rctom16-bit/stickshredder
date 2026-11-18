@@ -23,12 +23,12 @@ SEED = bytes(range(1, 33))
 PUBKEY_B64 = "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ"
 FINGERPRINT = "65B6-0673-D6ED-884B-F01C-2C22-2D82-ADA0"
 TOKEN = (
-    "eyJicyI6MCwiY28iOiJCZWlzcGllbCBHbWJIIiwiZGMiOjYxOTUzNjU0Nzg0LCJkbSI6IlNhbkRpc2sgMy4yR2VuMSIs"
-    "ImRzIjoiMDkwMUMzRjIiLCJkdCI6IlVTQiIsImgiOiIiLCJocGEiOiJuL2EiLCJrIjoiZWJWV0xvX21WUGxBZUxFUzZL"
-    "bUxwNUFmaFRybWxiN1g0T09SQzYwRWxtUSIsIm0iOiJaZXJvRmlsbCIsIm4iOjQyLCJvcCI6Ik1heCBNdXN0ZXJtYW5u"
-    "IiwicCI6MSwiciI6Im9rIiwic2siOjIsInNsIjoiSC0yIiwic3ciOiIyLjAuMCIsInQiOiIyMDI2LTExLTE3VDEwOjAw"
-    "OjAwWiIsInYiOjEsInZlIjowLCJ2bSI6ImZ1bGwifQ"
-    ".XR2XsL_KAfkdyOTIduvuAletZ4CSwL-TmNYHY4UqFanWmkaTnpj_O7sHe1CJIY8L3zkiQEZh_jCIBtCbBc4gBA"
+    "eyJicyI6MCwiY28iOiJCZWlzcGllbCBHbWJIIiwiZGMiOjYxOTUzNjU0Nzg0LCJkbSI6IlNhbkRpc2sgMy4yR2VuMSIsIm"
+    "RzIjoiREVNTzAwMDAwMDAxIiwiZHQiOiJVU0IiLCJoIjoiIiwiaHBhIjoibi9hIiwiayI6ImViVldMb19tVlBsQWVMRVM2"
+    "S21McDVBZmhUcm1sYjdYNE9PUkM2MEVsbVEiLCJtIjoiWmVyb0ZpbGwiLCJuIjo0Miwib3AiOiJNYXggTXVzdGVybWFubi"
+    "IsInAiOjEsInIiOiJvayIsInNrIjoyLCJzbCI6IkgtMiIsInN3IjoiMi4wLjAiLCJ0IjoiMjAyNi0xMS0xN1QxMDowMDow"
+    "MFoiLCJ2IjoxLCJ2ZSI6MCwidm0iOiJmdWxsIn0"
+    ".rV-EP-MR02TXztjCkndxD5DbghFtKCPI36ZfSz2TeHGs8Vye1Vv4qpbJZ4CaD71wMJtKGqOIDtgVIJa5wdezCg"
 )
 
 
@@ -41,7 +41,7 @@ def vector_payload() -> dict:
         "op": "Max Mustermann",
         "co": "Beispiel GmbH",
         "dm": "SanDisk 3.2Gen1",
-        "ds": "0901C3F2",
+        "ds": "DEMO00000001",
         "dc": 61953654784,
         "dt": "USB",
         "m": "ZeroFill",

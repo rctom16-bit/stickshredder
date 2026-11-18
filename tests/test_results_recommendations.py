@@ -52,7 +52,7 @@ def _cert_data(**overrides) -> CertificateData:
     values = dict(
         cert_number=7, date=datetime(2026, 11, 17, 10, 0, 0), operator="Max Mustermann",
         client_reference="", asset_tag="", device_model="SanDisk 3.2Gen1",
-        device_manufacturer="", serial_number="0901C3F2", capacity_bytes=61953654784,
+        device_manufacturer="", serial_number="DEMO00000001", capacity_bytes=61953654784,
         filesystem="FAT32", connection_type="USB", wipe_method="ZeroFill",
         sicherheitsstufe="H-2", schutzklasse=2, passes=1,
         start_time=datetime(2026, 11, 17, 9, 0, 0), end_time=datetime(2026, 11, 17, 9, 50, 0),
@@ -547,3 +547,20 @@ def test_info_on_ssd_class_3_says_destruction_is_required(app_config, capsys):
     out = capsys.readouterr().out
     assert "Reserve-Bereiche der SSD nicht" in out
     assert "physically destroying the SSD" in out
+
+
+# ── BitLocker: wiped like in the GUI, with a warning (2.0 polish) ─────
+
+def test_wipe_of_a_bitlocker_disk_runs_with_a_warning(app_config, capsys):
+    dev = _fake_device(has_bitlocker=True)
+    run = _wipe(["--method", "zero"], extra=[patch.object(cli, "list_devices", return_value=[dev])])
+    out = capsys.readouterr().out
+    assert run.code == 0
+    assert "BitLocker-verschlüsselt: alle Daten werden unwiderruflich gelöscht." in out
+    assert "BitLocker-encrypted: all data will be irrevocably deleted." in out
+    run.method.execute.assert_called_once()
+
+
+def test_wipe_without_bitlocker_has_no_bitlocker_warning(app_config, capsys):
+    _wipe(["--method", "zero"])
+    assert "BitLocker" not in capsys.readouterr().out

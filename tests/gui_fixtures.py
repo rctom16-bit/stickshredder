@@ -21,7 +21,7 @@ def make_device(
     letter: str = "E:",
     index: int = 1,
     model: str = "SanDisk 3.2Gen1",
-    serial: str = "0901C3F2CFA4",
+    serial: str = "DEMO00000001",
     size: int = 61_933_428_736,
     connection: str = "USB",
     removable: bool = True,

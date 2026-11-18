@@ -57,6 +57,10 @@ STRINGS: dict[str, tuple[str, str]] = {
         "Interne Festplatte: Prüfe Modell und Seriennummer, bevor du löschst.",
         "Internal disk: check the model and serial number before you wipe it.",
     ),
+    "select.bitlocker_warning": (
+        "BitLocker-verschlüsselt: alle Daten werden unwiderruflich gelöscht.",
+        "BitLocker-encrypted: all data will be irrevocably deleted.",
+    ),
     "tile.method": ("Methode", "Method"),
     "tile.verify": ("Prüfung", "Verification"),
     "tile.class": ("Einordnung", "Classification"),

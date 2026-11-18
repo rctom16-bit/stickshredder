@@ -39,7 +39,7 @@ def test_first_removable_disk_is_selected(page):
     page.set_devices([system, stick])
     assert page.selected_device is stick
     assert page.hero_letter.text() == "F:"
-    assert "SN 0901C3F2CFA4" in page.hero_subtitle.text()
+    assert "SN DEMO00000001" in page.hero_subtitle.text()
     assert page.delete_button.isEnabled()
 
 
@@ -227,7 +227,7 @@ def test_confirmation_names_every_letter_model_serial_and_size(qtbot, gui_reset)
     dlg = ConfirmWipeDialog([disk])
     qtbot.addWidget(dlg)
     text = dlg.summary_text()
-    for part in ("E:", "G:", "SanDisk 3.2Gen1", "0901C3F2CFA4", "57,7 GB"):
+    for part in ("E:", "G:", "SanDisk 3.2Gen1", "DEMO00000001", "57,7 GB"):
         assert part in text
 
 
@@ -392,7 +392,7 @@ def test_result_shows_three_levels(page, status, eyebrow, tone):
         device=make_device("F:", 1), status=status, cert_path="",
         payload={"n": 15, "r": status, "p": 1, "vm": "full", "ve": 0, "bs": 0,
                  "dc": 61_933_428_736, "sl": "1-2", "op": "Robin",
-                 "dm": "SanDisk 3.2Gen1", "ds": "0901C3F2CFA4", "m": "ZeroFill"},
+                 "dm": "SanDisk 3.2Gen1", "ds": "DEMO00000001", "m": "ZeroFill"},
         token="", fingerprint="65B6-0673-D6ED-884B-0000-0000-0000-0000",
         duration_seconds=1062, method_key="zero", verify_mode="full",
         reformat="exfat", reformat_label="SANDISK",
@@ -418,3 +418,44 @@ def test_qr_matrix_matches_the_certificate_qr():
     # Finder pattern: the top-left 7x7 ring is dark.
     assert all(matrix[0][c] for c in range(7))
     assert all(matrix[r][0] for r in range(7))
+
+
+# -- 2.0 polish: demo title, BitLocker warning ----------------------------------
+
+
+def test_demo_result_title_names_the_model_not_the_pretend_letter(page):
+    from wipe.demo import create_demo_device
+    from gui.pages.wipe_views import WipeOutcome
+
+    demo = create_demo_device()
+    page.show_result(WipeOutcome(
+        device=demo, status="ok", cert_path="",
+        payload={"n": 1, "r": "ok", "p": 1, "vm": "full", "ve": 0, "bs": 0,
+                 "dc": demo.capacity_bytes, "sl": "1-2", "op": "Robin",
+                 "dm": demo.model, "ds": demo.serial_number, "m": "ZeroFill"},
+        token="", fingerprint="", duration_seconds=3, method_key="zero",
+        verify_mode="full", reformat="none", reformat_label="USB",
+    ))
+    title = page.result_view.title_label.text()
+    assert title == "StickShredder Demo Drive ist sicher gelöscht"
+    assert "DEMO:" not in title
+
+
+def test_real_disk_title_still_names_its_letters():
+    from gui.pages.wipe_views import target_name
+
+    assert target_name(make_device("F:", 1)) == "F:"
+
+
+def test_bitlocker_disk_warns_on_the_page_and_in_the_confirmation(page, monkeypatch):
+    import gui.pages.delete_page as delete_page
+
+    asked = []
+    monkeypatch.setattr(delete_page, "ask_confirmation",
+                        lambda parent, devices, warnings: asked.append(warnings) or False)
+    page.set_devices([make_device("F:", 1, bitlocker=True)])
+    text = "BitLocker-verschlüsselt: alle Daten werden unwiderruflich gelöscht."
+    assert text in page.warning_label.text()
+    assert page.delete_button.isEnabled()
+    page.delete_button.click()
+    assert asked and text in asked[0]

@@ -33,7 +33,7 @@ def _data(**overrides) -> CertificateData:
         asset_tag="",
         device_model="SanDisk 3.2Gen1",
         device_manufacturer="",
-        serial_number="0901C3F2",
+        serial_number="DEMO00000001",
         capacity_bytes=61953654784,
         filesystem="FAT32",
         connection_type="USB",

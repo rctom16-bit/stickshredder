@@ -38,7 +38,7 @@ def _row(n: int, model: str, serial: str, result: str, date: str) -> dict:
 def history(isolated_profile):
     from core.log import log_wipe_to_csv
 
-    log_wipe_to_csv(_row(1, "SanDisk 3.2Gen1", "0901C3F2CFA4", "OK", "2026-11-16 09:10:00"))
+    log_wipe_to_csv(_row(1, "SanDisk 3.2Gen1", "DEMO00000001", "OK", "2026-11-16 09:10:00"))
     log_wipe_to_csv(_row(2, "Samsung SSD 870 EVO", "S6PNNS0T123456", "LIMITED",
                          "2026-11-17 10:20:00"))
     log_wipe_to_csv(_row(3, "Intenso Basic", "AA11BB22", "FAILED", "2026-11-18 11:30:00"))
@@ -195,7 +195,7 @@ def test_export_csv_writes_the_visible_rows(page, history, tmp_path):
     with open(target, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     assert list(rows[0].keys()) == CSV_HEADERS
-    assert [r["serial_number"] for r in rows] == ["0901C3F2CFA4"]
+    assert [r["serial_number"] for r in rows] == ["DEMO00000001"]
     assert "1" in page.status_label.text()
 
 
@@ -206,7 +206,7 @@ def _outcome(status: str):
     from cert.verify_cert import VerifyOutcome
 
     payload = {"n": 42, "t": "2026-11-18T10:00:00Z", "dm": "SanDisk 3.2Gen1",
-               "ds": "0901C3F2CFA4", "r": "ok"}
+               "ds": "DEMO00000001", "r": "ok"}
     reasons = {
         "trusted": "Echt — Schlüssel bekannt (ACME) / Genuine — key known (ACME)",
         "unknown_key": "Signatur gültig, Schlüssel unbekannt / Signature valid, key unknown",

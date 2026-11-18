@@ -703,12 +703,6 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     if not safe:
         _die(reason)
 
-    if device.has_bitlocker:
-        _die(
-            f"Device {device.drive_letter} is BitLocker-encrypted. "
-            "Decrypt or remove BitLocker protection before wiping."
-        )
-
     # -- Resolve method and parameters --------------------------------------
     schutzklasse: int = getattr(args, "schutzklasse", 2) or 2
     # Media type (WMI, read-only): drives the recommendation, the hardware
@@ -831,6 +825,15 @@ def cmd_wipe(args: argparse.Namespace) -> None:
             if resp not in ("y", "yes"):
                 print("  Aborted.")
                 sys.exit(0)
+
+    # -- BitLocker ------------------------------------------------------------
+    # Wiped like any other disk (as in the GUI); the prompt says what it means.
+    if device.has_bitlocker:
+        _warn(
+            "BitLocker-verschlüsselt: alle Daten werden unwiderruflich gelöscht. / "
+            "BitLocker-encrypted: all data will be irrevocably deleted."
+        )
+        print()
 
     # -- Confirmation 1 -----------------------------------------------------
     if not auto_yes:
@@ -1627,7 +1630,7 @@ def build_parser() -> argparse.ArgumentParser:
             '  stickshredder history\n'
             '  stickshredder history --export out.csv\n'
             '  stickshredder history --verify\n'
-            '  stickshredder verify-cert SS-000042_0901C3F2_20261117.pdf\n'
+            '  stickshredder verify-cert SS-000042_DEMO00000001_20261117.pdf\n'
             '  stickshredder keycard --language both\n'
             '  stickshredder trust add "https://rctom16-bit.github.io/stickshredder/verify/#key=...&name=..."\n'
             '  stickshredder trust list\n'
