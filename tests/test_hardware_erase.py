@@ -78,8 +78,16 @@ def drive(monkeypatch):
             raise state.erase
         return state.erase
 
+    state.clear_ok = True
+
+    def clear(handle):
+        assert handle == HANDLE
+        state.events.append("clear")
+        return state.clear_ok
+
     monkeypatch.setattr(se, "secure_erase_supported", supported)
     monkeypatch.setattr(se, "secure_erase", erase)
+    monkeypatch.setattr(hw, "clear_partition_table", clear)
     monkeypatch.setattr(hw, "_set_execution_state",
                         lambda flags: state.power.append(flags))
     monkeypatch.setattr(hw, "audit_log", lambda msg: state.logs.append(msg))
@@ -160,7 +168,8 @@ def test_ready_drive_erases_itself_then_gets_zeros_and_verification(drive):
         on_erase_finished=lambda report: seen.append(("finished", report.status)),
     )
 
-    assert drive.events == ["probe", "erase", "overwrite"]
+    # The partition table goes after the drive's erase, right before the zeros.
+    assert drive.events == ["probe", "erase", "clear", "overwrite"]
     assert drive.erase_kwargs["enhanced"] is True
     assert drive.erase_kwargs["password"] == hw.TEMP_PASSWORD
     assert seen == [("started", "ata-enhanced", 2), ("finished", "erased")]
@@ -178,6 +187,13 @@ def test_ready_drive_erases_itself_then_gets_zeros_and_verification(drive):
     assert result.verify_result.method == "full"
     assert (result.bad_sector_count, result.bad_sector_offsets) == (2, [0, 512])
     assert outcome.erase.method == "ata-enhanced"
+
+
+def test_zeros_still_run_when_the_partition_table_cannot_be_removed(drive):
+    drive.clear_ok = False
+    outcome = hw.run(HANDLE, SIZE, FakeZeroFill(drive.events))
+    assert drive.events == ["probe", "erase", "clear", "overwrite"]
+    assert outcome.wipe_result.success is True
 
 
 def test_drive_without_enhanced_erase_gets_the_normal_erase(drive):
@@ -233,6 +249,7 @@ def test_failed_erase_stops_before_the_overwrite_and_warns_about_the_password(dr
     zero = FakeZeroFill(drive.events)
     outcome = hw.run(HANDLE, SIZE, zero)
     assert "overwrite" not in drive.events
+    assert "clear" not in drive.events  # the layout stays when nothing is written
     assert outcome.report.status == "failed"
     assert outcome.report.password_may_be_set is True
     assert "SECURITY ERASE UNIT failed" in outcome.report.detail
@@ -247,6 +264,7 @@ def test_drive_that_refuses_at_erase_time_is_refused_without_password_risk(drive
     assert outcome.report.reason == "frozen"
     assert outcome.report.password_may_be_set is False
     assert "overwrite" not in drive.events
+    assert "clear" not in drive.events
 
 
 def test_exception_in_the_erase_is_a_failure_and_the_pc_may_sleep_again(drive):

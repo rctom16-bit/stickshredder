@@ -28,7 +28,8 @@ from core.log import (
 )
 from wipe.device import (
     DeviceInfo, UnsafeTargetError, list_devices, open_physical_drive, close_drive,
-    get_drive_size, is_safe_to_wipe, prepare_target, release_volumes, unique_disks,
+    clear_partition_table, get_drive_size, is_safe_to_wipe, prepare_target,
+    release_volumes, unique_disks,
 )
 from wipe.methods import ZeroFill, RandomThreePass, BsiVsitr, CustomWipe, WipeResult
 from wipe.verify import VerifyResult
@@ -949,6 +950,11 @@ def cmd_wipe(args: argparse.Namespace) -> None:
                 f"operator={args.operator}"
             )
 
+            # A read-only partition (Rufus' UEFI_NTFS) blocks raw writes even
+            # with its volume locked; removing the partition table lifts that.
+            # A failure is logged and the wipe goes on. (The hardware erase
+            # does this itself once the drive has erased.)
+            clear_partition_table(handle)
             verify_cb = _verify_progress_bar if verify_mode == "full" else None
             wipe_result = wipe_method.execute(
                 handle=handle,

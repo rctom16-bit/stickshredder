@@ -12,7 +12,8 @@ same certificate fields (spec G2):
      going to sleep, and let the drive run its ATA Secure Erase (the enhanced
      variant when the drive offers it). The command may take up to two hours,
      or twice the drive's own estimate if that is longer.
-  3. One pass of zeros plus a full verification — always, whatever the
+  3. Remove the partition table (``device.clear_partition_table``), then one
+     pass of zeros plus a full verification — always, whatever the
      caller's usual verification: that makes the result checkable byte by
      byte, and the drive's own report alone never makes a wipe "ok".
 
@@ -30,6 +31,7 @@ from typing import Callable
 
 from core.log import audit_log
 from wipe import secure_erase
+from wipe.device import clear_partition_table
 from wipe.methods import WipeMethod, WipeResult
 
 # The ATA user password set for the erase. Shown to the user and logged
@@ -225,6 +227,10 @@ def run(
     if report.status != "erased":
         return HardwareEraseOutcome(report, erase)
 
+    # Windows may still hold the old layout (a read-only partition blocks the
+    # zeros): remove it now, never before the drive has said yes. A failure
+    # is logged and the zeros run anyway.
+    clear_partition_table(handle)
     wipe = overwrite.execute(
         handle=handle,
         drive_size=drive_size,

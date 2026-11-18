@@ -1068,3 +1068,85 @@ def test_list_footer_counts_disks_not_letters(capsys):
     out = capsys.readouterr().out
     assert "Found 3 removable disk(s) ready for wiping." in out
     assert "1 internal disk(s) detected" in out
+
+
+# ─────────────────────────────────────────────────────────────────────
+# The partition table goes right before the first write (Rufus disks)
+# ─────────────────────────────────────────────────────────────────────
+
+def _plain_wipe_events(*, clear_ok=True):
+    """cmd_wipe (overwrite) on a fake disk; returns the recorded steps."""
+    events: list = []
+    args = cli.build_parser().parse_args(_REQUIRED_WIPE_ARGS + ["--verify", "full", "--yes"])
+    method = _zero_pass_method()
+    method.execute.side_effect = (
+        lambda **kw: events.append(("write", kw["handle"])) or _fake_wipe_result()
+    )
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[_fake_device()]),
+        patch.object(cli, "_resolve_wipe_method", return_value=method),
+        patch.object(cli, "prepare_target",
+                     side_effect=lambda d: events.append("gate") or [3]),
+        patch.object(cli, "release_volumes",
+                     side_effect=lambda locks: events.append(("release", list(locks)))),
+        patch.object(cli, "open_physical_drive",
+                     side_effect=lambda d: events.append("open") or 12345),
+        patch.object(cli, "clear_partition_table",
+                     side_effect=lambda h: events.append(("clear", h)) or clear_ok),
+        patch.object(cli, "close_drive"),
+        patch.object(cli, "get_drive_size", return_value=1024 * 1024),
+        patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()),
+        patch.object(cli, "get_next_cert_number", return_value=1),
+        patch.object(cli, "generate_certificate", return_value="C:/tmp/fake.pdf"),
+        patch.object(cli, "log_wipe_to_csv"),
+        patch.object(cli, "audit_log"),
+    ):
+        cli.cmd_wipe(args)
+    return events
+
+
+def test_cli_removes_the_partition_table_after_the_gate_and_before_writing():
+    events = _plain_wipe_events()
+    assert events[:4] == ["gate", "open", ("clear", 12345), ("write", 12345)]
+    assert ("release", [3]) in events[4:]
+
+
+def test_cli_wipes_on_when_the_partition_table_cannot_be_removed():
+    events = _plain_wipe_events(clear_ok=False)
+    assert events[:4] == ["gate", "open", ("clear", 12345), ("write", 12345)]
+
+
+def test_cli_hardware_erase_removes_the_partition_table_once_after_the_erase():
+    """The hardware procedure removes the layout itself (after the drive's
+    erase, before the zeros); the CLI must not remove it before the drive
+    has said yes."""
+    args = cli.build_parser().parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    seen: list = []
+    with _hardware_wipe() as m:
+        def hw_clear(handle):
+            seen.append(("hw", handle, m.erase.called, m.zero.execute.called))
+            return True
+
+        with (
+            patch.object(cli, "clear_partition_table",
+                         side_effect=lambda h: seen.append(("cli", h))),
+            patch.object(hardware_erase, "clear_partition_table", side_effect=hw_clear),
+        ):
+            cli.cmd_wipe(args)
+
+    assert seen == [("hw", 12345, True, False)]
+    m.zero.execute.assert_called_once()
+
+
+def test_cli_hardware_refusal_keeps_the_partition_table():
+    args = cli.build_parser().parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    cleared = MagicMock()
+    with _hardware_wipe(status=_drive_status("frozen", frozen=True)):
+        with (
+            patch.object(cli, "clear_partition_table", cleared),
+            patch.object(hardware_erase, "clear_partition_table", cleared),
+        ):
+            with pytest.raises(SystemExit):
+                cli.cmd_wipe(args)
+    cleared.assert_not_called()

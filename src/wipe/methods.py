@@ -61,6 +61,14 @@ REMOUNTED_MESSAGE = (
     "Zugriff verweigert — Datenträger wurde während des Löschens wieder "
     "eingebunden / access denied — the drive was remounted during the wipe"
 )
+# ERROR_INVALID_FUNCTION (a read-only partition, e.g. Rufus' UEFI_NTFS, whose
+# partition table could not be removed) and ERROR_WRITE_PROTECT.
+WRITE_BLOCKED_CODES = frozenset({1, 19})
+WRITE_BLOCKED_MESSAGE = (
+    "Windows blockiert das Schreiben in eine schreibgeschützte Partition "
+    "(oder der Datenträger ist schreibgeschützt) / Windows blocks writing into "
+    "a read-only partition (or the drive is write-protected)"
+)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -167,6 +175,8 @@ def _fatal_write_error(exc: OSError, offset: int) -> OSError | None:
               f"not a media error, wipe aborted")
     if code == ERROR_ACCESS_DENIED:
         return OSError(f"{REMOUNTED_MESSAGE} (WriteFile error 5 at byte {offset})")
+    if code in WRITE_BLOCKED_CODES:
+        return OSError(f"{WRITE_BLOCKED_MESSAGE} (WriteFile error {code} at byte {offset})")
     return OSError(f"WriteFile failed at byte {offset} with error code {code} "
                    f"(not a bad sector, wipe aborted)")
 

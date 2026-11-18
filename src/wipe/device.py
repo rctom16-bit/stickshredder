@@ -26,6 +26,9 @@ OPEN_EXISTING = 3
 INVALID_HANDLE_VALUE = -1
 
 IOCTL_DISK_GET_LENGTH_INFO = 0x0007405C
+# Remove the partition table / make Windows re-read it (disk handle).
+IOCTL_DISK_DELETE_DRIVE_LAYOUT = 0x0007C100
+IOCTL_DISK_UPDATE_PROPERTIES = 0x00070140
 FSCTL_LOCK_VOLUME = 0x00090018
 FSCTL_DISMOUNT_VOLUME = 0x00090020
 # Answered by the volume manager (which disks a volume lies on); never
@@ -915,6 +918,51 @@ def _ioctl_no_data(handle: int, control_code: int, label: str) -> None:
     if not success:
         raise _win_os_error(f"{label} failed", ctypes.get_last_error())
     audit_log(f"{label} succeeded (handle={handle})")
+
+
+def clear_partition_table(handle: int) -> bool:
+    """Remove the partition table of the open disk right before the first write.
+
+    A disk made with Rufus carries a small "UEFI_NTFS" partition whose GPT
+    attributes say read-only: Windows refuses every raw write into it
+    (error 1), even with all of its volumes locked. Deleting the drive layout
+    on the physical handle and letting Windows re-read the disk lifts that
+    block. Only for a handle from open_physical_drive() after prepare_target();
+    the volumes vanish with the layout and releasing their locks afterwards
+    stays harmless.
+
+    Never raises. Returns False (and logs why) when Windows refuses; the wipe
+    goes on and its write loop reports a block that is still there.
+    """
+    steps = (
+        (IOCTL_DISK_DELETE_DRIVE_LAYOUT, "IOCTL_DISK_DELETE_DRIVE_LAYOUT"),
+        (IOCTL_DISK_UPDATE_PROPERTIES, "IOCTL_DISK_UPDATE_PROPERTIES"),
+    )
+    for code, label in steps:
+        try:
+            returned = wintypes.DWORD(0)
+            ok = kernel32.DeviceIoControl(
+                handle, code, None, 0, None, 0, ctypes.byref(returned), None,
+            )
+            problem = None if ok else f"error {ctypes.get_last_error()}"
+        except Exception as exc:  # noqa: BLE001 — must never stop the wipe
+            problem = str(exc) or type(exc).__name__
+        if problem is not None:
+            _log_quietly(
+                f"Partition table not removed ({label} failed: {problem}, "
+                f"handle={handle}) — the wipe goes on"
+            )
+            return False
+    _log_quietly(f"Partition table removed before writing (handle={handle})")
+    return True
+
+
+def _log_quietly(message: str) -> None:
+    """Audit log that never raises (a locked or full log must not stop a wipe)."""
+    try:
+        audit_log(message)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 ERROR_ACCESS_DENIED = 5

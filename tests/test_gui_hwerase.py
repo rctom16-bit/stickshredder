@@ -418,6 +418,10 @@ def fake_disk(monkeypatch):
     monkeypatch.setattr(wipe_worker, "close_drive", lambda handle: state.closed.append(handle))
     monkeypatch.setattr(secure_erase, "secure_erase_supported", supported)
     monkeypatch.setattr(secure_erase, "secure_erase", erase)
+    monkeypatch.setattr(hardware_erase, "clear_partition_table",
+                        lambda handle: state.events.append(("clear", handle)) or True)
+    monkeypatch.setattr(wipe_worker, "clear_partition_table",
+                        lambda handle: state.events.append(("clear", handle)) or True)
     monkeypatch.setattr(hardware_erase, "_set_execution_state",
                         lambda flags: state.power.append(flags))
     monkeypatch.setattr(wipe_worker, "generate_certificate", generate)
@@ -471,7 +475,9 @@ def test_worker_hardware_erase_then_zeros_fill_the_certificate(qtbot, app_config
 
     signals = run_worker(qtbot, app_config, fake_disk)
 
-    assert fake_disk.events == ["gate", "probe", ("erase", True, True), ("zero", True, "full")]
+    # One removal of the partition table: after the drive's erase, before the zeros.
+    assert fake_disk.events == ["gate", "probe", ("erase", True, True), ("clear", 777),
+                                ("zero", True, "full")]
     assert fake_disk.released == [11, 12]
     assert signals["started"] == [(0, "ata-enhanced", 2)]
     [(_, report)] = signals["finished"]
