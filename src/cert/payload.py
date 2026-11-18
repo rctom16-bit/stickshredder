@@ -80,6 +80,15 @@ def result_status(data: CertificateData) -> ResultStatus:
     return "ok"
 
 
+def nist_category(data: CertificateData) -> str:
+    """NIST SP 800-88 category of the method actually used.
+
+    Overwriting (any pass count or pattern) is "Clear"; a hardware erase
+    (ATA Secure Erase) reaches spare areas too and is "Purge" (spec G6).
+    """
+    return "Purge" if data.secure_erase_used else "Clear"
+
+
 def _utc_text(moment) -> str:
     # A naive datetime is local time (``datetime.now()``); ``astimezone``
     # interprets it that way.

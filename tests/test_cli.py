@@ -31,11 +31,11 @@ _REQUIRED_WIPE_ARGS = [
 ]
 
 
-def test_verify_flag_defaults_to_sample():
-    """When --verify is omitted, default is 'sample'."""
+def test_verify_flag_defaults_to_full():
+    """When --verify is omitted, default is 'full' (spec G6)."""
     parser = cli.build_parser()
     args = parser.parse_args(_REQUIRED_WIPE_ARGS)
-    assert args.verify == "sample"
+    assert args.verify == "full"
 
 
 def test_verify_flag_accepts_full():
@@ -276,7 +276,10 @@ def test_hpa_detection_flows_to_certificate():
         patch.object(cli, "log_wipe_to_csv"),
         patch.object(cli, "audit_log"),
     ):
-        cli.cmd_wipe(args)
+        # A hidden area that was not removed limits the result: exit code 3.
+        with pytest.raises(SystemExit) as exc_info:
+            cli.cmd_wipe(args)
+    assert exc_info.value.code == 3
 
     cert = captured["cert"]
     assert cert.hidden_area_probed is True

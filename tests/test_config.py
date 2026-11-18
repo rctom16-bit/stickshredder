@@ -12,7 +12,8 @@ from core.config import AppConfig, CompanyInfo, get_next_cert_number, APP_NAME, 
 def test_appconfig_default_values():
     cfg = AppConfig()
     assert cfg.operator_name == ""
-    assert cfg.default_wipe_method == "standard"
+    assert cfg.default_wipe_method == "quick"
+    assert cfg.default_verify_mode == "full"
     assert cfg.default_schutzklasse == 2
     assert cfg.cert_language == "de"
     assert cfg.show_ssd_warning is True
@@ -75,7 +76,7 @@ def test_appconfig_load_corrupted_json(tmp_path, monkeypatch):
     loaded = AppConfig.load()
     # Should fall back to defaults
     assert loaded.operator_name == ""
-    assert loaded.default_wipe_method == "standard"
+    assert loaded.default_wipe_method == "quick"
 
 
 def test_appconfig_load_invalid_keys(tmp_path, monkeypatch):

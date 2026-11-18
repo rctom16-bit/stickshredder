@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING, Any
 from PySide6.QtCore import QThread, Signal
 
 from core.config import AppConfig, get_next_cert_number, load_signing_key
-from core.log import audit_log, log_wipe_to_csv
+from core.log import audit_log, history_result_value, log_wipe_to_csv
+from cert.payload import result_status
 from cert.generator import CertificateData, generate_certificate, format_capacity
 from cert.signing import SigningKeyError
 from wipe.device import (
@@ -101,7 +102,7 @@ class WipeWorker(QThread):
         config: AppConfig,
         schutzklasse: int = 2,
         operator: str = "",
-        verify_mode: str = "sample",
+        verify_mode: str = "full",
         reformat: str = "none",
         reformat_label: str = "USB",
         reformat_partition: str = "MBR",
@@ -116,9 +117,9 @@ class WipeWorker(QThread):
         if verify_mode not in VERIFY_MODES:
             audit_log(
                 f"WipeWorker: unknown verify_mode={verify_mode!r}, "
-                f"falling back to 'sample'"
+                f"falling back to 'full'"
             )
-            verify_mode = "sample"
+            verify_mode = "full"
         self.verify_mode = verify_mode
         if reformat not in REFORMAT_MODES:
             audit_log(
@@ -627,7 +628,7 @@ class WipeWorker(QThread):
                     "start_time": wipe_result.start_time.isoformat(),
                     "end_time": wipe_result.end_time.isoformat(),
                     "duration_seconds": int(duration),
-                    "result": "SUCCESS" if wipe_result.success else "FAILED",
+                    "result": history_result_value(result_status(cert_data)),
                     "verification": verification_text,
                     "cert_number": cert_number,
                     "bad_sectors": wipe_result.bad_sector_count,

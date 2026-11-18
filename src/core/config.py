@@ -51,8 +51,11 @@ class CompanyInfo:
 class AppConfig:
     company: CompanyInfo = field(default_factory=CompanyInfo)
     operator_name: str = ""
-    default_wipe_method: str = "standard"
+    # One zero pass + full verify is the recommendation for today's media
+    # (spec G6); "quick" is the GUI's key for the one-pass zero fill.
+    default_wipe_method: str = "quick"
     default_schutzklasse: int = 2
+    default_verify_mode: str = "full"  # "full" | "sample"
     cert_output_dir: str = str(DEFAULT_CERT_OUTPUT)
     cert_language: str = "de"
     show_ssd_warning: bool = True

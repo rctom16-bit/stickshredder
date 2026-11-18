@@ -98,10 +98,10 @@ def test_phase_style_helper_returns_different_colors_per_phase():
 # -- MainWindow checkbox + wiring --------------------------------------------
 
 
-def test_checkbox_default_unchecked(main_window):
-    """The Full-Verification checkbox must exist and start off."""
+def test_checkbox_default_checked(main_window):
+    """The Full-Verification checkbox exists and starts ticked (default: full, spec G6)."""
     assert hasattr(main_window, "full_verify_cb")
-    assert main_window.full_verify_cb.isChecked() is False
+    assert main_window.full_verify_cb.isChecked() is True
 
 
 # -- v1.2: internal-drive safety gate ----------------------------------------
@@ -231,8 +231,8 @@ def test_worker_accepts_verify_mode_kwarg(app_config):
     assert worker_sample.verify_mode == "sample"
 
 
-def test_worker_falls_back_to_sample_on_bad_verify_mode(app_config):
-    """An invalid verify_mode string must fall back to 'sample'."""
+def test_worker_falls_back_to_full_on_bad_verify_mode(app_config):
+    """An invalid verify_mode string must fall back to 'full' (the default)."""
     from gui.wipe_worker import WipeWorker
     from wipe.methods import ZeroFill
 
@@ -242,7 +242,8 @@ def test_worker_falls_back_to_sample_on_bad_verify_mode(app_config):
         config=app_config,
         verify_mode="bogus",
     )
-    assert worker.verify_mode == "sample"
+    assert worker.verify_mode == "full"
+
 
 
 def test_checkbox_changes_verify_mode(qtbot, main_window, demo_device, monkeypatch):

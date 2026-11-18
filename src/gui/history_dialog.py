@@ -26,7 +26,8 @@ from PySide6.QtWidgets import (
 )
 
 from core.config import AppConfig
-from core.log import read_wipe_history
+from cert.payload import RESULT_LABELS
+from core.log import history_result_status, read_wipe_history
 
 # Display column headers (order matches CSV_HEADERS in core.log)
 _DISPLAY_HEADERS = [
@@ -60,6 +61,26 @@ _CSV_KEYS = [
     "verification",
     "cert_number",
 ]
+
+
+_RESULT_COLOURS = {
+    "ok": QColor("#c6f6d5"),
+    "limited": QColor("#fefcbf"),
+    "failed": QColor("#fed7d7"),
+}
+
+
+def result_cell(raw) -> tuple[str, QColor | None]:
+    """Display text and background for a history ``result`` value.
+
+    Accepts the three-level values (OK/LIMITED/FAILED) and the pre-2.0
+    SUCCESS/FAILED; anything else is shown as stored, uncoloured.
+    """
+    status = history_result_status(raw)
+    if status is None:
+        return str(raw or ""), None
+    de, en = RESULT_LABELS[status]
+    return f"{de} / {en}", _RESULT_COLOURS[status]
 
 
 class HistoryDialog(QDialog):
@@ -184,7 +205,12 @@ class HistoryDialog(QDialog):
                 )
 
                 # Color-code result and verification columns
-                if col_idx in (self._COL_RESULT, self._COL_VERIFICATION):
+                if col_idx == self._COL_RESULT:
+                    text, colour = result_cell(value)
+                    item.setText(text)
+                    if colour is not None:
+                        item.setBackground(QBrush(colour))
+                elif col_idx == self._COL_VERIFICATION:
                     lower = str(value).lower().strip()
                     if lower in ("success", "passed", "pass", "ok"):
                         item.setBackground(QBrush(self._GREEN_BG))

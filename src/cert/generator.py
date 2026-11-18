@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -26,7 +27,7 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from cert.payload import RESULT_LABELS, build_payload, result_status
+from cert.payload import RESULT_LABELS, build_payload, nist_category, result_status
 from core.config import APP_VERSION
 from core.log import audit_log
 
@@ -35,6 +36,10 @@ if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
 
 # PDF Keywords marker the verify page and ``cert.verify_cert`` look for.
 TOKEN_MARKER = "stickshredder-token:"
+
+# Signed certificates carry their data as a machine-readable PDF attachment.
+ATTACHMENT_NAME = "stickshredder-certificate.json"
+ATTACHMENT_FORMAT = "stickshredder-certificate"
 
 # ---------------------------------------------------------------------------
 # Colours
@@ -766,6 +771,51 @@ def _build_authenticity_elements(
 # ---------------------------------------------------------------------------
 # PDF generation
 # ---------------------------------------------------------------------------
+def attachment_bytes(payload: dict, token: str) -> bytes:
+    """Content of the PDF attachment: the signed payload (incl. ``k``) and its token."""
+    return json.dumps(
+        {"format": ATTACHMENT_FORMAT, "version": 1, "payload": payload, "token": token},
+        indent=2, sort_keys=True, ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def _embed_file(canvas, name: str, content: bytes) -> None:
+    """Attach ``content`` to the PDF as an embedded file (PDF 1.7 §7.11.4).
+
+    reportlab has no high-level API for attachments; its PDF object layer
+    builds the EmbeddedFile stream, the file specification and the catalog's
+    ``/Names /EmbeddedFiles`` entry. Called from the first page's callback.
+    """
+    from reportlab.pdfbase.pdfdoc import (
+        PDFArray, PDFDictionary, PDFStream, PDFString, PDFZCompress,
+    )
+
+    document = canvas._doc
+    stream = PDFStream(
+        PDFDictionary({
+            "Type": "/EmbeddedFile",
+            "Subtype": "/application#2Fjson",  # MIME type "application/json"
+            "Params": PDFDictionary({"Size": len(content)}),
+        }),
+        content,
+        filters=[PDFZCompress],
+    )
+    filespec = PDFDictionary({
+        "Type": "/Filespec",
+        "F": PDFString(name),
+        "UF": PDFString(name),
+        "Desc": PDFString("StickShredder: signierte Zertifikatsdaten / signed certificate data"),
+        "AFRelationship": "/Data",
+        "EF": PDFDictionary({"F": document.Reference(stream)}),
+    })
+    names = PDFDictionary({
+        "EmbeddedFiles": PDFDictionary({
+            "Names": PDFArray([PDFString(name), document.Reference(filespec)]),
+        }),
+    })
+    document.Catalog.Names = names
+
+
 def generate_certificate(
     data: CertificateData,
     output_path: str,
@@ -797,8 +847,10 @@ def generate_certificate(
     elements: list = []
 
     token = ""
+    payload: dict = {}
     if signing_key is not None:
-        token = signing_key.sign_payload(build_payload(data, history_hash))
+        payload = build_payload(data, history_hash)
+        token = signing_key.sign_payload(payload)
 
     # Ensure output directory exists
     out = Path(output_path)
@@ -947,6 +999,7 @@ def generate_certificate(
             _label("DIN 66399 Sicherheitsstufe", "DIN 66399 Security Level", lang),
             _safe(data.sicherheitsstufe),
         ),
+        ("NIST SP 800-88", nist_category(data)),
         (
             _label("Schutzklasse", "Protection Class", lang),
             schutzklasse_display,
@@ -1149,7 +1202,14 @@ def generate_certificate(
         subject="DIN 66399 / ISO 21964 Deletion Certificate",
         **doc_kwargs,
     )
-    doc.build(elements)
+    if token:
+        attachment = attachment_bytes(payload, token)
+        doc.build(
+            elements,
+            onFirstPage=lambda canvas, _doc: _embed_file(canvas, ATTACHMENT_NAME, attachment),
+        )
+    else:
+        doc.build(elements)
 
     abs_path = str(out.resolve())
     signed = f" signed={signing_key.fingerprint()}" if token else " unsigned"

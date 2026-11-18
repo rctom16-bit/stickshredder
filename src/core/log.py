@@ -79,6 +79,25 @@ CSV_HEADERS = [
 ]
 
 HASH_COLUMNS = ("prev_hash", "entry_hash")
+
+# ``result`` column (v2.0): the three-level result of ``cert.payload.result_status``.
+# Entries written before 2.0 say SUCCESS / FAILED; readers accept both.
+_RESULT_VALUES = {"ok": "OK", "limited": "LIMITED", "failed": "FAILED"}
+_LEGACY_RESULTS = {"SUCCESS": "ok"}
+
+
+def history_result_value(status: str) -> str:
+    """CSV ``result`` value for a three-level status (``ok``/``limited``/``failed``)."""
+    return _RESULT_VALUES[status]
+
+
+def history_result_status(raw) -> str | None:
+    """Three-level status of a CSV ``result`` value, new or legacy; None if unknown."""
+    text = str(raw or "").strip().upper()
+    for status, value in _RESULT_VALUES.items():
+        if text == value:
+            return status
+    return _LEGACY_RESULTS.get(text)
 RECORD_COLUMNS = [c for c in CSV_HEADERS if c not in HASH_COLUMNS]
 
 # Serialises read-last-hash + append so two wipes finishing at the same time

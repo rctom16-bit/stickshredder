@@ -15,14 +15,15 @@ from urllib.parse import parse_qs
 
 import core.config as settings
 from cert.generator import CertificateData, format_capacity, generate_certificate
-from cert.payload import PAYLOAD_LABELS, RESULT_LABELS
+from cert.payload import PAYLOAD_LABELS, RESULT_LABELS, nist_category, result_status
 from cert.signing import SigningKey, SigningKeyError, b64url_decode
 from cert.verify_cert import (
     TrustStore, extract_key_from_keycard_pdf, extract_token_from_pdf, verify_token,
 )
 from core.config import AppConfig, get_next_cert_number, DEFAULT_CERT_OUTPUT, load_signing_key
 from core.log import (
-    audit_log, log_wipe_to_csv, read_wipe_history, setup_logging, verify_wipe_history,
+    audit_log, history_result_status, history_result_value, log_wipe_to_csv,
+    read_wipe_history, setup_logging, verify_wipe_history,
 )
 from wipe.device import (
     DeviceInfo, UnsafeTargetError, list_devices, open_physical_drive, close_drive,
@@ -32,6 +33,9 @@ from wipe.methods import ZeroFill, RandomThreePass, BsiVsitr, CustomWipe, WipeRe
 from wipe.verify import VerifyResult
 from wipe.hidden_areas import detect_hidden_areas, hidden_bytes
 from wipe.secure_erase import secure_erase
+from wipe.recommend import (
+    MULTI_PASS_NOTE_DE, MULTI_PASS_NOTE_EN, Recommendation, media_type_of, recommend,
+)
 
 
 def is_admin() -> bool:
@@ -349,6 +353,115 @@ def _find_device(identifier: str, devices: list[DeviceInfo]) -> DeviceInfo | Non
     return None
 
 
+# -- Three-level result and recommendations ---------------------------------
+
+# ``wipe`` exit codes per three-level result (spec G4).
+_RESULT_EXIT = {"ok": 0, "limited": 3, "failed": 1}
+_RESULT_COLOUR = {"ok": _Ansi.GREEN, "limited": _Ansi.YELLOW, "failed": _Ansi.RED}
+
+_VERIFY_MODE_LABEL = {
+    "none": "Keine / Skipped",
+    "sample": "Stichprobe (100 Sektoren) / Sample (100 sectors)",
+    "full": "Vollständig / Full",
+}
+
+_MEDIA_LABEL = {
+    "hdd": "Festplatte (HDD) / Hard disk (HDD)",
+    "ssd": "SSD",
+    "flash": "USB-Stick/SD-Karte / USB stick/SD card",
+    "unknown": "Unbekannt / Unknown",
+}
+
+_METHOD_LABEL = {
+    "zero": "zero — Nullen, 1 Durchgang / zeros, 1 pass",
+    "standard": "standard — 3 Durchgänge Zufall / 3 random passes",
+    "bsi": "bsi — BSI-VSITR, 7 Durchgänge / 7 passes",
+}
+
+# Multi-pass methods: allowed, never recommended (spec G6).
+_MULTI_PASS_METHODS = ("standard", "bsi")
+
+
+def wipe_outcome(data: CertificateData) -> tuple[int, str]:
+    """Exit code and result line for a finished wipe.
+
+    Same three levels as the certificate (``result_status``) and the history
+    (``OK``/``LIMITED``/``FAILED``): exit 0 ok, 3 with limitations, 1 failed.
+    """
+    status = result_status(data)
+    de, en = RESULT_LABELS[status]
+    return _RESULT_EXIT[status], f"Ergebnis / Result: {de} / {en}"
+
+
+def _print_recommendation(rec: Recommendation, indent: str = "    ") -> None:
+    method = _METHOD_LABEL.get(rec.method_key, rec.method_key)
+    if rec.hardware_erase:
+        method = f"Hardware-Löschen (Beta), danach / hardware erase (Beta), then {method}"
+    verify = _VERIFY_MODE_LABEL.get(rec.verify_mode, rec.verify_mode)
+    print(f"{indent}Verfahren / Method:        {method}")
+    print(f"{indent}Prüfung / Verification:    {verify}")
+    print(f"{indent}NIST SP 800-88:            {rec.nist_category}")
+    print(f"{indent}Begründung:                {rec.reason_de}")
+    print(f"{indent}Reason:                    {rec.reason_en}")
+    for de, en in zip(rec.warnings_de, rec.warnings_en):
+        _warn(de)
+        print(f"  {' ' * len('WARNING: ')}{en}")
+
+
+def _status_text(dev: DeviceInfo) -> str:
+    if dev.is_system_drive:
+        return "Systemplatte — wird nie gelöscht / System disk — never wiped"
+    if dev.is_internal and not dev.is_removable:
+        return "Intern / Internal (nur mit / only with --allow-internal)"
+    return "Wechseldatenträger / Removable"
+
+
+# -- Command: info ----------------------------------------------------------
+
+def cmd_info(args: argparse.Namespace) -> None:
+    """Show a device and the recommended procedure.
+
+    WMI only: the disk is never opened and no drive command is sent, so
+    whether a hardware erase would work is not known here.
+    """
+    config = AppConfig.load()
+    schutzklasse = args.schutzklasse or config.default_schutzklasse or 2
+    device = _find_device(args.device, list_devices())
+    if device is None:
+        _die(
+            f"Datenträger '{args.device}' nicht gefunden / Device '{args.device}' not "
+            "found. Run 'stickshredder list' to see available devices."
+        )
+
+    media = media_type_of(device)
+    letters = ", ".join(
+        getattr(device, "disk_letters", None) or [device.drive_letter or "-"]
+    )
+    print(_c(_Ansi.BOLD + _Ansi.CYAN, "\n  StickShredder -- Datenträger / Device"))
+    print()
+    print(f"    Modell / Model:            {_printable(device.model or 'Unknown')}")
+    print(f"    Typ / Type:                {_MEDIA_LABEL[media]}")
+    print(f"    Laufwerke / Drive letters: {letters}")
+    print(f"    Datenträger / Disk:        {device.device_id}")
+    print(f"    Kapazität / Capacity:      {_format_size_short(device.capacity_bytes)}")
+    print(f"    Anschluss / Connection:    {device.connection_type}")
+    print(f"    Status:                    {_status_text(device)}")
+    print()
+
+    if device.is_system_drive:
+        _info(
+            "Keine Empfehlung: StickShredder löscht die Windows-Systemplatte nie. / "
+            "No recommendation: StickShredder never wipes the Windows system disk."
+        )
+        print()
+        return
+
+    rec = recommend(device, media, False, schutzklasse)
+    print(_c(_Ansi.BOLD, f"  Empfehlung / Recommendation (Schutzklasse {schutzklasse}):"))
+    _print_recommendation(rec)
+    print()
+
+
 # -- Command: list ----------------------------------------------------------
 
 def cmd_list(args: argparse.Namespace) -> None:
@@ -415,6 +528,13 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         )
 
     # -- Resolve method and parameters --------------------------------------
+    schutzklasse: int = getattr(args, "schutzklasse", 2) or 2
+    recommendation: Recommendation | None = None
+    if not getattr(args, "method", None):
+        # No --method: the recommended procedure for this device type (WMI
+        # only; a hardware erase is never chosen automatically).
+        recommendation = recommend(device, media_type_of(device), False, schutzklasse)
+        args.method = recommendation.method_key
     is_secure_erase = args.method == "secure-erase"
     enhanced_erase = getattr(args, "enhanced", False)
     if is_secure_erase and not getattr(args, "experimental", False):
@@ -424,12 +544,11 @@ def cmd_wipe(args: argparse.Namespace) -> None:
             "--experimental to acknowledge the risk."
         )
     wipe_method = None if is_secure_erase else _resolve_wipe_method(args)
-    schutzklasse: int = getattr(args, "schutzklasse", 2) or 2
     client: str = getattr(args, "client", "") or ""
     asset_tag: str = getattr(args, "asset_tag", "") or ""
     output_dir: str = getattr(args, "output_dir", "") or config.cert_output_dir
     language: str = getattr(args, "language", "") or config.cert_language
-    verify_mode: str = getattr(args, "verify", "sample") or "sample"
+    verify_mode: str = getattr(args, "verify", "full") or "full"
     auto_yes: bool = getattr(args, "yes", False)
 
     # -- Signing key ----------------------------------------------------------
@@ -477,6 +596,19 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     }.get(verify_mode, verify_mode)
     print(f"    Verification:    {verify_label}")
     print()
+
+    if recommendation is not None:
+        print(_c(
+            _Ansi.BOLD,
+            "  Kein --method angegeben: Empfohlenes Verfahren / Recommended method "
+            "(no --method given):",
+        ))
+        _print_recommendation(recommendation)
+        print()
+    elif args.method in _MULTI_PASS_METHODS:
+        _info(f"Hinweis: --method {args.method} {MULTI_PASS_NOTE_DE}. Empfohlen: zero.")
+        _info(f"Note: --method {args.method} {MULTI_PASS_NOTE_EN}. Recommended: zero.")
+        print()
 
     # -- SSD warning --------------------------------------------------------
     if device.is_internal and not device.is_removable:
@@ -817,7 +949,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         "start_time": wipe_result.start_time.strftime("%Y-%m-%d %H:%M:%S"),
         "end_time": wipe_result.end_time.strftime("%Y-%m-%d %H:%M:%S"),
         "duration_seconds": str(duration_seconds),
-        "result": "SUCCESS" if wipe_result.success else "FAILED",
+        "result": history_result_value(result_status(cert_data)),
         "verification": (
             "SKIPPED" if verify_result is None else
             f"{verify_result.method.upper()}-{'PASSED' if verify_result.success else 'FAILED'}"
@@ -855,7 +987,11 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     print(f"    Serial:          {device.serial_number or 'N/A'}")
     print(f"    Method:          {cert_method_name} ({wipe_result.passes} passes)")
     print(f"    Duration:        {_format_duration(wipe_result.start_time, wipe_result.end_time)}")
-    print(f"    Result:          {_c(_Ansi.GREEN + _Ansi.BOLD, 'SUCCESS') if wipe_result.success else _c(_Ansi.RED + _Ansi.BOLD, 'FAILED')}")
+    exit_code, result_line = wipe_outcome(cert_data)
+    label, _, value = result_line.partition(": ")
+    colour = _RESULT_COLOUR[result_status(cert_data)]
+    print(f"    {label}: {_c(colour + _Ansi.BOLD, value)}")
+    print(f"    NIST SP 800-88:  {nist_category(cert_data)}")
 
     if verify_result:
         if verify_result.success:
@@ -892,6 +1028,8 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         print(f"    Signed by key:   {signing_key.fingerprint()}")
     print(f"    Operator:        {args.operator}")
     print()
+    if exit_code:
+        sys.exit(exit_code)
 
 
 # -- Command: history -------------------------------------------------------
@@ -945,10 +1083,11 @@ def cmd_history(args: argparse.Namespace) -> None:
         result_raw = entry.get("result", "")
         verify_raw = entry.get("verification", "")
 
-        if result_raw == "SUCCESS":
-            result_display = _c(_Ansi.GREEN, "SUCCESS")
-        elif result_raw == "FAILED":
-            result_display = _c(_Ansi.RED, "FAILED")
+        # Three-level values (OK/LIMITED/FAILED); legacy SUCCESS shows as OK.
+        status = history_result_status(result_raw)
+        if status is not None:
+            result_raw = history_result_value(status)
+            result_display = _c(_RESULT_COLOUR[status], result_raw)
         else:
             result_display = result_raw
 
@@ -1020,6 +1159,10 @@ def _verify_history() -> None:
     print(f"    Datum / Date:              {_printable(row.get('date') or '-')}")
     print(f"    Zertifikat / Certificate:  {_cert_label(row.get('cert_number') or '-')}")
     print(f"    Seriennummer / Serial:     {_printable(row.get('serial_number') or '-')}")
+    status = history_result_status(row.get("result"))
+    if status is not None:
+        de, en = RESULT_LABELS[status]
+        print(f"    Ergebnis / Result:         {de} / {en}")
     print(f"    Grund / Reason:            {check.reason}")
     print()
     sys.exit(1)
@@ -1257,6 +1400,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "examples:\n"
             '  stickshredder list\n'
+            '  stickshredder info --device E:\n'
+            '  stickshredder wipe --device E: --operator "Robin Oertel"\n'
             '  stickshredder wipe --device E: --method standard --operator "Robin Oertel"\n'
             '  stickshredder wipe --device E: --method bsi --schutzklasse 3 --operator "Robin" --client "ACME GmbH"\n'
             '  stickshredder wipe --device E: --method custom --passes 5 --pattern random --operator "Robin"\n'
@@ -1295,11 +1440,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub_wipe.add_argument(
         "--method",
-        required=True,
+        default=None,
         choices=["zero", "standard", "bsi", "custom", "secure-erase"],
-        help="Wipe method: zero (1-pass zeros), standard (3-pass random), "
+        help="Wipe method (default: the recommendation for this device, see "
+             "'stickshredder info'): zero (1-pass zeros), standard (3-pass random), "
              "bsi (7-pass BSI-VSITR), custom, or secure-erase (EXPERIMENTAL "
-             "ATA firmware erase — requires --experimental)",
+             "ATA firmware erase — requires --experimental). standard and bsi only "
+             "if a policy requires them — they add no security on today's media.",
     )
     sub_wipe.add_argument(
         "--operator",
@@ -1349,9 +1496,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub_wipe.add_argument(
         "--verify",
         choices=["none", "sample", "full"],
-        default="sample",
+        default="full",
         help=(
-            "Verification mode after wiping (default: sample). "
+            "Verification mode after wiping (default: full). "
             "'none' skips verification. "
             "'sample' checks 100 random sectors (fast, probabilistic). "
             "'full' reads every sector and compares against the expected pattern "
@@ -1416,6 +1563,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Partition style when --reformat is set (default: MBR).",
     )
     sub_wipe.set_defaults(func=cmd_wipe)
+
+    # ── info ──────────────────────────────────────────────────────────────
+    sub_info = subparsers.add_parser(
+        "info",
+        help="Show a device and the recommended wipe procedure",
+        description="Show model, type and status of a device and the recommended "
+                    "procedure (method, verification, NIST SP 800-88 category). Reads "
+                    "Windows' device information only; the disk is not opened.",
+    )
+    sub_info.add_argument(
+        "--device", required=True, metavar="DRIVE",
+        help="Drive letter (e.g. F:) or disk number (e.g. 2 or PhysicalDrive2)",
+    )
+    sub_info.add_argument(
+        "--schutzklasse", type=int, choices=[1, 2, 3], default=0, metavar="N",
+        help="DIN 66399 protection class for the recommendation (default: from config)",
+    )
+    sub_info.set_defaults(func=cmd_info)
 
     # ── history ───────────────────────────────────────────────────────────
     sub_history = subparsers.add_parser(

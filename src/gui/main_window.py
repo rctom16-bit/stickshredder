@@ -362,7 +362,9 @@ class MainWindow(QMainWindow):
             "Vollst\u00e4ndige Verifikation (verdoppelt Laufzeit) / "
             "Full verification (doubles runtime)"
         )
-        self.full_verify_cb.setChecked(False)
+        self.full_verify_cb.setChecked(
+            getattr(self.config, "default_verify_mode", "full") == "full"
+        )
         self.full_verify_cb.setToolTip(
             "Liest nach dem \u00dcberschreiben jeden Sektor erneut und "
             "vergleicht mit dem erwarteten Muster. Erkennt stumm "
@@ -375,8 +377,9 @@ class MainWindow(QMainWindow):
         verify_layout.addWidget(self.full_verify_cb)
 
         verify_hint = QLabel(
-            "Standard: Stichprobenpr\u00fcfung (100 Sektoren) / "
-            "Default: sample check (100 sectors)"
+            "Standard: vollst\u00e4ndig. Ohne Haken: Stichprobe "
+            "(100 Sektoren, schneller) / "
+            "Default: full. Unticked: sample check (100 sectors, faster)"
         )
         verify_hint.setWordWrap(True)
         verify_hint.setStyleSheet("color: #718096; font-size: 10px;")

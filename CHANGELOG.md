@@ -47,9 +47,32 @@ firmware-level erase. Builds on 1.1.1.
   drives. Clearly marked experimental on the certificate. **Untested on real
   hardware** — see SECURITY.md. (GUI exposure is a planned follow-up.)
 
+- **Recommendations.** New `stickshredder info --device <letter|number>`
+  shows model, type (HDD / SSD / USB stick / SD card), drive letters,
+  system/internal status and the recommended procedure (method, verification,
+  NIST SP 800-88 category, reason, warnings). It reads Windows' device
+  information only — the disk is never opened. `wipe` without `--method` uses
+  the recommended method and says so; `--method standard`/`bsi` print that
+  multi-pass wiping only makes sense when a policy requires it.
+- **Three-level result everywhere.** Successful / With limitations / Failed —
+  the same in the CLI, the history and the certificate. `wipe` exits with `0`,
+  `3` (with limitations: unwritable sectors, or a hidden area not removed) or
+  `1` (failed, including a failed verification).
+- **NIST SP 800-88 category on the certificate** next to the DIN 66399 level
+  ("Clear" for overwriting, "Purge" for a hardware erase).
+- **Certificate data as PDF attachment.** Signed certificates embed
+  `stickshredder-certificate.json` (the signed data and the verification code).
+
 ### Changed
 
 - Version `2.0.0.dev0` (single source, as introduced in 1.1.1).
+- **Full verification is the default** (CLI `--verify`, GUI checkbox, settings);
+  `sample` stays available as the quicker option. The default method in the
+  settings is now the one-pass zero fill.
+- `--method` is optional for `wipe` (defaults to the recommendation).
+- The history's `result` column records `OK` / `LIMITED` / `FAILED`. Older
+  entries with `SUCCESS` / `FAILED` are still read and shown correctly; the
+  history chain is unaffected.
 
 ### Security
 

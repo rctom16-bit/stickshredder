@@ -24,6 +24,7 @@
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Wipe Methods](#wipe-methods)
+- [Recommendations & Results](#recommendations--results)
 - [DIN 66399 Explained](#din-66399-explained)
 - [SSD Limitations](#ssd-limitations)
 - [FAQ](#faq)
@@ -154,10 +155,13 @@ The built executable will be in the `dist/` folder.
 # List detected devices (USB + internal)
 stickshredder list
 
-# Wipe drive E: with a 3-pass random overwrite
-stickshredder wipe --device E: --method standard --operator "Your Name"
+# Show a device and the recommended procedure (reads Windows' device info only)
+stickshredder info --device E:
 
-# BSI VSITR (7-pass), Schutzklasse 3, client reference, certificate saved to a specific folder
+# Wipe drive E: with the recommended procedure (one zero pass + full verify)
+stickshredder wipe --device E: --operator "Your Name"
+
+# Only if a policy requires it: BSI VSITR (7-pass), Schutzklasse 3, client reference, certificate saved to a specific folder
 stickshredder wipe --device E: --method bsi --schutzklasse 3 --operator "Your Name" --client "ACME GmbH" --output-dir "C:\Certificates"
 
 # Wipe an internal SATA disk (opt-in; the Windows disk is always protected)
@@ -170,7 +174,7 @@ stickshredder wipe --device PhysicalDrive2 --method secure-erase --experimental 
 stickshredder history
 ```
 
-Methods: `zero` (1 pass), `standard` (3-pass random), `bsi` (BSI VSITR, 7 passes), `custom` (with `--passes` and `--pattern`), `secure-erase` (experimental, needs `--experimental`). Run `stickshredder wipe --help` for all options.
+Methods: `zero` (1 pass), `standard` (3-pass random), `bsi` (BSI VSITR, 7 passes), `custom` (with `--passes` and `--pattern`), `secure-erase` (experimental, needs `--experimental`). Without `--method`, `wipe` uses the recommended method for the device and says so. Run `stickshredder wipe --help` for all options.
 
 > **Note:** Administrator privileges are required. Right-click and select "Run as administrator" or use an elevated terminal.
 
@@ -197,6 +201,32 @@ Methods: `zero` (1 pass), `standard` (3-pass random), `bsi` (BSI VSITR, 7 passes
 
 ---
 
+## Recommendations & Results
+
+**Recommendation per device type.** `stickshredder info --device E:` shows the device (model, type, drive letters, system/internal status) and the recommended procedure. It only reads Windows' device information — the disk is not opened and no drive command is sent.
+
+| Device | Recommended | NIST SP 800-88 |
+|---|---|---|
+| Hard disk (HDD) | One pass of zeros + full verification | Clear |
+| SSD | One pass of zeros + full verification, with a warning that spare areas are not reached (hardware erase, Beta, is not chosen automatically) | Clear |
+| USB stick / SD card | One pass of zeros + full verification; for Schutzklasse 3: destroy physically | Clear |
+
+One overwrite pass is enough for today's media. 3-pass and BSI-VSITR stay selectable because some internal policies require them, but they are never recommended: they add time, not security. Choosing them prints that note.
+
+**Three-level result.** Every wipe ends in one of three results — the same in the CLI, the history and the certificate:
+
+| Result | When | CLI exit code | History (`result` column) |
+|---|---|---|---|
+| Erfolgreich / Successful | Wipe and verification passed | `0` | `OK` |
+| Mit Einschränkungen / With limitations | Unwritable sectors remain, or a hidden area (HPA/DCO) was found and not removed | `3` | `LIMITED` |
+| Fehlgeschlagen / Failed | The wipe or the verification failed | `1` | `FAILED` |
+
+History files from older versions (`SUCCESS` / `FAILED`) are still read and shown correctly.
+
+**On the certificate.** Next to the DIN 66399 level, the certificate names the NIST SP 800-88 category of the method actually used: overwriting is „Clear“, a hardware erase is „Purge“. A signed certificate also carries its data as a machine-readable PDF attachment, `stickshredder-certificate.json` (the signed data and the verification code); most PDF readers list it under attachments.
+
+---
+
 ## Verification Modes
 
 After a wipe finishes, StickShredder can read the drive back to prove the overwrite actually took effect. There are three modes:
@@ -204,8 +234,8 @@ After a wipe finishes, StickShredder can read the drive back to prove the overwr
 | Mode | Runtime Cost | What It Does | When to Use |
 |---|---|---|---|
 | `none` | 0% | Skip verification entirely | You trust the drive and don't need a signed verification record |
-| `sample` (default) | ~1% | Reads 100 random sectors, hashes them, compares to the expected pattern | Standard use — fast, catches most large-scale failures |
-| `full` | ~100% (doubles runtime) | Reads **every** sector and compares against the expected pattern; reports the first 100 mismatching byte offsets | Regulatory audits, silent-sector-failure detection, high-value drives |
+| `sample` | ~1% | Reads 100 random sectors, hashes them, compares to the expected pattern | Quicker check when time matters — catches most large-scale failures |
+| `full` (default) | ~100% (doubles runtime) | Reads **every** sector and compares against the expected pattern; reports the first 100 mismatching byte offsets | Default since 2.0 — audits, silent-sector-failure detection |
 
 **Why full verify matters.** Overwrite-based wipes assume each `WriteFile` that returns success actually committed data to the media. On aging flash or failing USB controllers, some sectors can "silently fail" — writes appear to succeed, but old content is still present when you read it back. Only full verify catches this.
 
@@ -214,17 +244,17 @@ After a wipe finishes, StickShredder can read the drive back to prove the overwr
 **CLI:**
 
 ```bash
-# Sample verify (default — same as 1.0.x behavior)
-stickshredder wipe --device E: --method standard --operator "Robin"
+# Full verify (default since 2.0) — roughly doubles the total runtime
+stickshredder wipe --device E: --method zero --operator "Robin"
 
-# Full verify — roughly doubles the total runtime
-stickshredder wipe --device E: --method standard --operator "Robin" --verify full
+# Sample verify — quicker
+stickshredder wipe --device E: --method zero --operator "Robin" --verify sample
 
 # Skip verification entirely
 stickshredder wipe --device E: --method zero --operator "Robin" --verify none
 ```
 
-**GUI:** tick the *"Full verification (doubles runtime)"* checkbox in the wipe configuration panel. Without the checkbox, the GUI still performs sample verification by default.
+**GUI:** the *"Full verification (doubles runtime)"* checkbox is ticked by default. Untick it for a sample check.
 
 ---
 
@@ -379,6 +409,7 @@ StickShredder is licensed under the [MIT License](LICENSE).
 - [Installation](#installation-1)
 - [Schnellstart](#schnellstart)
 - [Löschmethoden](#löschmethoden)
+- [Empfehlungen & Ergebnis](#empfehlungen--ergebnis)
 - [DIN 66399 erklärt](#din-66399-erklärt)
 - [SSD-Einschränkungen](#ssd-einschränkungen)
 - [Häufige Fragen (FAQ)](#häufige-fragen-faq)
@@ -508,10 +539,13 @@ Die erstellte Datei befindet sich im Ordner `dist/`.
 # Erkannte Geräte auflisten (USB + intern)
 stickshredder list
 
-# Laufwerk E: mit 3-Pass Random überschreiben
-stickshredder wipe --device E: --method standard --operator "Ihr Name"
+# Gerät und empfohlenes Verfahren anzeigen (liest nur die Geräteinformationen von Windows)
+stickshredder info --device E:
 
-# BSI VSITR (7 Durchgänge), Schutzklasse 3, mit Auftraggeber, Zertifikat in einem bestimmten Ordner speichern
+# Laufwerk E: mit dem empfohlenen Verfahren löschen (ein Durchgang Nullen + vollständige Prüfung)
+stickshredder wipe --device E: --operator "Ihr Name"
+
+# Nur wenn eine Vorgabe es verlangt: BSI VSITR (7 Durchgänge), Schutzklasse 3, mit Auftraggeber, Zertifikat in einem bestimmten Ordner speichern
 stickshredder wipe --device E: --method bsi --schutzklasse 3 --operator "Ihr Name" --client "ACME GmbH" --output-dir "C:\Zertifikate"
 
 # Interne SATA-Platte löschen (Opt-in; die Windows-Platte ist immer geschützt)
@@ -524,7 +558,7 @@ stickshredder wipe --device PhysicalDrive2 --method secure-erase --experimental 
 stickshredder history
 ```
 
-Methoden: `zero` (1 Durchgang), `standard` (3-Pass Random), `bsi` (BSI VSITR, 7 Durchgänge), `custom` (mit `--passes` und `--pattern`), `secure-erase` (experimentell, braucht `--experimental`). Alle Optionen: `stickshredder wipe --help`.
+Methoden: `zero` (1 Durchgang), `standard` (3-Pass Random), `bsi` (BSI VSITR, 7 Durchgänge), `custom` (mit `--passes` und `--pattern`), `secure-erase` (experimentell, braucht `--experimental`). Ohne `--method` nimmt `wipe` das empfohlene Verfahren für das Gerät und sagt das an. Alle Optionen: `stickshredder wipe --help`.
 
 > **Hinweis:** Administratorrechte sind erforderlich. Klicken Sie mit der rechten Maustaste und wählen Sie "Als Administrator ausführen" oder verwenden Sie ein Terminal mit erhöhten Rechten.
 
@@ -547,6 +581,32 @@ Methoden: `zero` (1 Durchgang), `standard` (3-Pass Random), `bsi` (BSI VSITR, 7 
 
 ---
 
+### Empfehlungen & Ergebnis
+
+**Empfehlung je Gerätetyp.** `stickshredder info --device E:` zeigt das Gerät (Modell, Typ, Laufwerksbuchstaben, System-/Intern-Status) und das empfohlene Verfahren. Es liest nur die Geräteinformationen von Windows — der Datenträger wird nicht geöffnet, es wird kein Laufwerksbefehl gesendet.
+
+| Gerät | Empfehlung | NIST SP 800-88 |
+|---|---|---|
+| Festplatte (HDD) | Ein Durchgang Nullen + vollständige Prüfung | Clear |
+| SSD | Ein Durchgang Nullen + vollständige Prüfung, mit Hinweis, dass Reserve-Bereiche nicht erreicht werden (Hardware-Löschen, Beta, wird nicht automatisch gewählt) | Clear |
+| USB-Stick / SD-Karte | Ein Durchgang Nullen + vollständige Prüfung; für Schutzklasse 3: physisch vernichten | Clear |
+
+Ein Durchgang genügt bei heutigen Datenträgern. 3-Pass und BSI-VSITR bleiben wählbar, weil manche internen Vorgaben sie verlangen, werden aber nie empfohlen: Sie kosten Zeit und bringen keinen Sicherheitsgewinn. Wer sie wählt, bekommt diesen Hinweis angezeigt.
+
+**Dreistufiges Ergebnis.** Jede Löschung endet mit einem von drei Ergebnissen — gleich in CLI, Verlauf und Zertifikat:
+
+| Ergebnis | Wann | CLI-Exitcode | Verlauf (Spalte `result`) |
+|---|---|---|---|
+| Erfolgreich | Löschen und Prüfung bestanden | `0` | `OK` |
+| Mit Einschränkungen | Nicht beschreibbare Sektoren, oder ein versteckter Bereich (HPA/DCO) wurde gefunden und nicht entfernt | `3` | `LIMITED` |
+| Fehlgeschlagen | Löschen oder Prüfung fehlgeschlagen | `1` | `FAILED` |
+
+Verlaufsdateien älterer Versionen (`SUCCESS` / `FAILED`) werden weiterhin gelesen und richtig angezeigt.
+
+**Auf dem Zertifikat.** Neben der DIN-66399-Stufe nennt das Zertifikat die NIST-SP-800-88-Kategorie des tatsächlich verwendeten Verfahrens: Überschreiben ist „Clear“, Hardware-Löschen „Purge“. Ein signiertes Zertifikat enthält seine Daten außerdem als maschinenlesbaren PDF-Anhang `stickshredder-certificate.json` (signierte Daten und Prüfcode); die meisten PDF-Programme zeigen ihn unter „Anlagen“.
+
+---
+
 ### Verifikationsmodi
 
 Nach Abschluss des Löschvorgangs kann StickShredder den Datenträger erneut auslesen, um nachzuweisen, dass das Überschreiben tatsächlich wirksam war. Es gibt drei Modi:
@@ -554,25 +614,25 @@ Nach Abschluss des Löschvorgangs kann StickShredder den Datenträger erneut aus
 | Modus | Laufzeitkosten | Beschreibung | Einsatz |
 |---|---|---|---|
 | `none` | 0% | Keine Verifikation | Wenn dem Datenträger vertraut wird und kein signierter Nachweis erforderlich ist |
-| `sample` (Standard) | ca. 1% | Liest 100 zufällige Sektoren, hasht sie und vergleicht mit dem erwarteten Muster | Standardnutzung — schnell, erkennt großflächige Fehler |
-| `full` | ca. 100% (verdoppelt Laufzeit) | Liest **jeden** Sektor und vergleicht byte-genau mit dem erwarteten Muster; meldet die ersten 100 Fehler-Offsets | Regulatorische Audits, Erkennung still fehlschlagender Sektoren, hochwertige Datenträger |
+| `sample` | ca. 1% | Liest 100 zufällige Sektoren, hasht sie und vergleicht mit dem erwarteten Muster | Schnellere Prüfung, wenn es eilt — erkennt großflächige Fehler |
+| `full` (Standard) | ca. 100% (verdoppelt Laufzeit) | Liest **jeden** Sektor und vergleicht byte-genau mit dem erwarteten Muster; meldet die ersten 100 Fehler-Offsets | Standard seit 2.0 — Audits, Erkennung still fehlschlagender Sektoren |
 
 **Warum vollständige Verifikation zählt.** Überschreibbasierte Löschungen gehen davon aus, dass jeder erfolgreich zurückgekehrte `WriteFile`-Aufruf Daten tatsächlich auf das Medium geschrieben hat. Auf alternden Flash-Speichern oder ausfallenden USB-Controllern können einzelne Sektoren "still fehlschlagen" — das Schreiben scheint erfolgreich, aber beim erneuten Lesen sind die alten Daten noch vorhanden. Nur die vollständige Verifikation erkennt das.
 
 **CLI:**
 
 ```bash
-# Probe-Verifikation (Standard — wie 1.0.x)
-stickshredder wipe --device E: --method standard --operator "Robin"
+# Vollständige Verifikation (Standard seit 2.0) — verdoppelt ungefähr die Gesamtlaufzeit
+stickshredder wipe --device E: --method zero --operator "Robin"
 
-# Vollständige Verifikation — verdoppelt ungefähr die Gesamtlaufzeit
-stickshredder wipe --device E: --method standard --operator "Robin" --verify full
+# Probe-Verifikation — schneller
+stickshredder wipe --device E: --method zero --operator "Robin" --verify sample
 
 # Verifikation überspringen
 stickshredder wipe --device E: --method zero --operator "Robin" --verify none
 ```
 
-**GUI:** Aktivieren Sie die Checkbox *"Vollständige Verifikation (verdoppelt Laufzeit)"* im Löschkonfigurationsbereich. Ohne Häkchen führt die GUI weiterhin standardmäßig eine Probe-Verifikation durch.
+**GUI:** Die Checkbox *"Vollständige Verifikation (verdoppelt Laufzeit)"* ist standardmäßig angehakt. Ohne Häkchen wird eine Stichprobe geprüft.
 
 ---
 
