@@ -157,12 +157,25 @@ int main(void)
     OFF(NVME_HEALTH_INFO_LOG, PercentageUsed);
     OFF(NVME_HEALTH_INFO_LOG, MediaErrors);
 
+    /* Which disks a volume lies on (winioctl.h, volume manager) */
+    SIZE(DISK_EXTENT);
+    OFF(DISK_EXTENT, DiskNumber);
+    OFF(DISK_EXTENT, StartingOffset);
+    OFF(DISK_EXTENT, ExtentLength);
+    SIZE(VOLUME_DISK_EXTENTS);
+    OFF(VOLUME_DISK_EXTENTS, NumberOfDiskExtents);
+    OFF(VOLUME_DISK_EXTENTS, Extents);
+
     /* IOCTL codes */
     VAL(IOCTL_ATA_PASS_THROUGH_DIRECT);
     VAL(IOCTL_SCSI_PASS_THROUGH_DIRECT);
     VAL(IOCTL_SCSI_GET_ADDRESS);
     VAL(IOCTL_STORAGE_QUERY_PROPERTY);
     VAL(IOCTL_STORAGE_GET_DEVICE_NUMBER);
+    VAL(IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS);
+    VAL(IOCTL_DISK_GET_LENGTH_INFO);
+    VAL(FSCTL_LOCK_VOLUME);
+    VAL(FSCTL_DISMOUNT_VOLUME);
 
     /* Flags and enum values */
     VAL(ATA_FLAGS_DRDY_REQUIRED);

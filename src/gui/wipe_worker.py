@@ -17,14 +17,11 @@ from cert.generator import CertificateData, generate_certificate, format_capacit
 from cert.signing import SigningKeyError
 from wipe.device import (
     DeviceInfo,
-    UnsafeTargetError,
     prepare_target,
     release_volumes,
     open_physical_drive,
     close_drive,
     get_drive_size,
-    lock_volume,
-    unlock_volume,
 )
 from wipe import hardware_erase, secure_erase
 from wipe.methods import WipeMethod, WipeResult
@@ -129,10 +126,14 @@ class WipeWorker(QThread):
         reformat_label: str = "USB",
         reformat_partition: str = "MBR",
         hardware_erase: bool = False,
+        media_types: dict[str, str] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.devices = devices
+        # device_id -> "ssd" | "flash" | "hdd" | "unknown" as the page knows
+        # it; the certificate notes protection class 3 limits from it.
+        self.media_types = dict(media_types or {})
         # With hardware_erase the drive erases itself first; wipe_method is
         # then the overwrite after it (the page passes one pass of zeros).
         self.wipe_method = wipe_method
@@ -528,10 +529,13 @@ class WipeWorker(QThread):
                             verify_mode=self.verify_mode,
                             verify_progress_callback=_verify_cb,
                         )
-                    # Wipe + verify done: let go of the volumes before any
-                    # reformat (which needs the disk free).
+                    # Wipe + verify done: let go of the volumes and close the
+                    # physical drive before any reformat — PowerShell's
+                    # Clear-Disk needs the disk free.
                     locks, volume_locks = volume_locks, []
                     release_volumes(locks)
+                    close_drive(handle)
+                    handle = None
 
                     if not wipe_result.success:
                         raise RuntimeError(
@@ -553,9 +557,9 @@ class WipeWorker(QThread):
                         self.phase_changed.emit(idx, "verifying")
 
                     # 6b. Optional reformat — only when wipe (and any verify)
-                    # succeeded. Reformat failures are logged but do NOT fail
-                    # the device-level wipe; the cert is still issued and
-                    # simply omits the reformat fields.
+                    # succeeded. A skipped or failed reformat (even one that
+                    # raises) never changes the wipe result: the cert is
+                    # still issued and simply omits the reformat fields.
                     format_result = None
                     if self.reformat != "none" and wipe_result.success:
                         self.phase_changed.emit(idx, "reformatting")
@@ -573,7 +577,7 @@ class WipeWorker(QThread):
                         try:
                             release_volumes(prepare_target(device))
                             unsafe = None
-                        except UnsafeTargetError as exc:
+                        except Exception as exc:  # noqa: BLE001 — only skips the reformat
                             unsafe = exc
                         if unsafe is not None:
                             audit_log(
@@ -584,19 +588,28 @@ class WipeWorker(QThread):
                             )
                         elif m:
                             disk_number = int(m.group(1))
-                            format_result = reformat_drive(
-                                disk_number=disk_number,
-                                filesystem=self.reformat,
-                                label=self.reformat_label,
-                                partition_style=self.reformat_partition,
-                                progress_callback=lambda msg: self.status_message.emit(msg),
-                            )
+                            try:
+                                format_result = reformat_drive(
+                                    disk_number=disk_number,
+                                    filesystem=self.reformat,
+                                    label=self.reformat_label,
+                                    partition_style=self.reformat_partition,
+                                    progress_callback=lambda msg: self.status_message.emit(msg),
+                                )
+                            except Exception as exc:  # noqa: BLE001 — the wipe result stands
+                                audit_log(
+                                    f"Reformat crashed for {device.device_id}: {exc}"
+                                )
+                                self.status_message.emit(
+                                    f"Formatieren fehlgeschlagen / reformat failed: {exc}"
+                                )
+                                format_result = None
                             # Attach to the wipe result so cert generation can see it
                             try:
                                 wipe_result.format_result = format_result
                             except Exception:
                                 pass
-                            if not format_result.success:
+                            if format_result is not None and not format_result.success:
                                 audit_log(
                                     f"Reformat failed for {device.drive_letter}: "
                                     f"{format_result.error_message}"
@@ -607,16 +620,6 @@ class WipeWorker(QThread):
                                 f"could not parse PhysicalDrive number from "
                                 f"{device.device_id!r}"
                             )
-
-                    # 7. Unlock
-                    try:
-                        unlock_volume(handle)
-                    except OSError:
-                        pass
-
-                    # 8. Close drive
-                    close_drive(handle)
-                    handle = None
 
                 # 9. Generate certificate
                 self.status_message.emit("Generating certificate...")
@@ -713,6 +716,7 @@ class WipeWorker(QThread):
                         getattr(verify_result, "duration_seconds", 0.0) or 0.0
                     ),
                     wipe_success=bool(wipe_result.success),
+                    media_type=self.media_types.get(device.device_id, ""),
                     secure_erase_used=secure_erase_result is not None,
                     secure_erase_method=(
                         secure_erase_result.method if secure_erase_result else ""
@@ -797,10 +801,6 @@ class WipeWorker(QThread):
                 )
             finally:
                 if handle is not None:
-                    try:
-                        unlock_volume(handle)
-                    except OSError:
-                        pass
                     close_drive(handle)
                 locks, volume_locks = volume_locks, []
                 release_volumes(locks)

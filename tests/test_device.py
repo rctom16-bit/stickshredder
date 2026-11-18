@@ -1074,16 +1074,11 @@ def _run_emitting(payload: bytes):
     return fake_run
 
 
-def test_bitlocker_probe_survives_non_ascii_output(monkeypatch):
-    import wipe.device as device_mod
-    # 0x81 is "ü" in the German OEM code page and undefined in cp1252.
-    monkeypatch.setattr(device_mod.subprocess, "run",
-                        _run_emitting(b"Verschl\x81sselung\r\nProtection On\r\n"))
-    assert device_mod._check_bitlocker("F:") is True
-
-
 def test_handle_probe_survives_non_ascii_output(monkeypatch):
     import wipe.device as device_mod
+    monkeypatch.setattr(device_mod, "_is_admin", lambda: True)
+    monkeypatch.setattr(device_mod, "_handle_exe_missing", False)
+    # 0x81 is "ü" in the German OEM code page and undefined in cp1252.
     monkeypatch.setattr(device_mod.subprocess, "run",
                         _run_emitting(b"explorer.exe pid: 42 \x81 F:\\Users\r\n"))
     assert device_mod._check_active_processes("F:") is True

@@ -58,7 +58,7 @@ def _cert_data(**overrides) -> CertificateData:
     values = dict(
         cert_number=7, date=datetime(2026, 11, 17, 10, 0, 0), operator="Max Mustermann",
         client_reference="", asset_tag="", device_model="SanDisk 3.2Gen1",
-        device_manufacturer="", serial_number="0901C3F2", capacity_bytes=61953654784,
+        device_manufacturer="", serial_number="DEMO00000001", capacity_bytes=61953654784,
         filesystem="FAT32", connection_type="USB", wipe_method="ZeroFill",
         sicherheitsstufe="H-2", schutzklasse=2, passes=1,
         start_time=datetime(2026, 11, 17, 9, 0, 0), end_time=datetime(2026, 11, 17, 9, 50, 0),
@@ -120,8 +120,6 @@ def _wipe(app_config, *, generate=None, log_csv=None, extra=None):
         patch.object(cli, "prepare_target"),
         patch.object(cli, "open_physical_drive", return_value=12345),
         patch.object(cli, "close_drive"),
-        patch.object(cli, "lock_volume"),
-        patch.object(cli, "unlock_volume"),
         patch.object(cli, "get_drive_size", return_value=1024 * 1024),
         patch.object(
             cli, "detect_hidden_areas",
@@ -190,7 +188,7 @@ def test_verify_cert_trusted_exit_0(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Echt" in out and "IT Beispiel" in out
     assert FINGERPRINT in out
-    assert "0901C3F2" in out and "Max Mustermann" in out
+    assert "DEMO00000001" in out and "Max Mustermann" in out
     assert "SS-000007" in out
 
 

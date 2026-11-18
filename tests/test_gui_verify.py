@@ -462,7 +462,6 @@ def test_worker_rechecks_target_before_reformat(qtbot, app_config):
          patch("gui.wipe_worker.open_physical_drive", return_value=1), \
          patch("gui.wipe_worker.get_drive_size", return_value=1024**2), \
          patch("gui.wipe_worker.detect_hidden_areas", return_value=no_hidden), \
-         patch("gui.wipe_worker.unlock_volume"), \
          patch("gui.wipe_worker.close_drive"), \
          patch("gui.wipe_worker.get_next_cert_number", return_value=1), \
          patch("gui.wipe_worker.generate_certificate", return_value="x.pdf") as cert, \
@@ -525,7 +524,7 @@ def test_worker_holds_volume_locks_for_the_whole_wipe(qtbot, app_config):
 
     no_hidden = SimpleNamespace(supported=False, hpa_present=False, dco_present=False,
                                 hpa_hidden_sectors=0, dco_hidden_sectors=0)
-    with patch("gui.wipe_worker.prepare_target", return_value=[7, 8]),          patch("gui.wipe_worker.release_volumes", side_effect=released.extend),          patch("gui.wipe_worker.open_physical_drive", return_value=1),          patch("gui.wipe_worker.get_drive_size", return_value=1024**2),          patch("gui.wipe_worker.detect_hidden_areas", return_value=no_hidden),          patch("gui.wipe_worker.close_drive"),          patch("gui.wipe_worker.unlock_volume"),          patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"),          patch("gui.wipe_worker.log_wipe_to_csv"),          patch("gui.wipe_worker.get_next_cert_number", return_value=1),          patch("gui.wipe_worker.audit_log"):
+    with patch("gui.wipe_worker.prepare_target", return_value=[7, 8]),          patch("gui.wipe_worker.release_volumes", side_effect=released.extend),          patch("gui.wipe_worker.open_physical_drive", return_value=1),          patch("gui.wipe_worker.get_drive_size", return_value=1024**2),          patch("gui.wipe_worker.detect_hidden_areas", return_value=no_hidden),          patch("gui.wipe_worker.close_drive"),                    patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"),          patch("gui.wipe_worker.log_wipe_to_csv"),          patch("gui.wipe_worker.get_next_cert_number", return_value=1),          patch("gui.wipe_worker.audit_log"):
         worker = WipeWorker(devices=[_gui_lock_test_device()],
                             wipe_method=_gui_lock_test_method(fake_execute),
                             config=app_config, verify_mode="none")
@@ -553,7 +552,7 @@ def test_worker_releases_the_gate_locks_before_reformatting(qtbot, app_config):
     no_hidden = SimpleNamespace(supported=False, hpa_present=False, dco_present=False,
                                 hpa_hidden_sectors=0, dco_hidden_sectors=0)
     gate = MagicMock(side_effect=[[7], [9]])
-    with patch("gui.wipe_worker.prepare_target", gate),          patch("gui.wipe_worker.release_volumes", side_effect=released.extend),          patch("gui.wipe_worker.open_physical_drive", return_value=1),          patch("gui.wipe_worker.get_drive_size", return_value=1024**2),          patch("gui.wipe_worker.detect_hidden_areas", return_value=no_hidden),          patch("gui.wipe_worker.close_drive"),          patch("gui.wipe_worker.unlock_volume"),          patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"),          patch("gui.wipe_worker.log_wipe_to_csv"),          patch("gui.wipe_worker.get_next_cert_number", return_value=1),          patch("gui.wipe_worker.audit_log"),          patch("wipe.format.reformat_drive", side_effect=fake_reformat):
+    with patch("gui.wipe_worker.prepare_target", gate),          patch("gui.wipe_worker.release_volumes", side_effect=released.extend),          patch("gui.wipe_worker.open_physical_drive", return_value=1),          patch("gui.wipe_worker.get_drive_size", return_value=1024**2),          patch("gui.wipe_worker.detect_hidden_areas", return_value=no_hidden),          patch("gui.wipe_worker.close_drive"),                    patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"),          patch("gui.wipe_worker.log_wipe_to_csv"),          patch("gui.wipe_worker.get_next_cert_number", return_value=1),          patch("gui.wipe_worker.audit_log"),          patch("wipe.format.reformat_drive", side_effect=fake_reformat):
         worker = WipeWorker(devices=[_gui_lock_test_device()],
                             wipe_method=_gui_lock_test_method(lambda *a, **k: _ok_wipe_result()),
                             config=app_config, verify_mode="none", reformat="exfat")

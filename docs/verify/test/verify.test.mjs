@@ -8,15 +8,15 @@ const SV = require('../verify.js');
 
 const VECTOR_PAYLOAD = {
   v: 1, n: 42, t: '2026-11-17T10:00:00Z', op: 'Max Mustermann', co: 'Beispiel GmbH',
-  dm: 'SanDisk 3.2Gen1', ds: '0901C3F2', dc: 61953654784, dt: 'USB', m: 'ZeroFill', p: 1,
+  dm: 'SanDisk 3.2Gen1', ds: 'DEMO00000001', dc: 61953654784, dt: 'USB', m: 'ZeroFill', p: 1,
   sk: 2, sl: 'H-2', r: 'ok', vm: 'full', ve: 0, bs: 0, hpa: 'n/a', sw: '2.0.0', h: '',
   k: 'ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ',
 };
 const PUBKEY = 'ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ';
 const FINGERPRINT = '65B6-0673-D6ED-884B-F01C-2C22-2D82-ADA0';
 const TOKEN =
-  'eyJicyI6MCwiY28iOiJCZWlzcGllbCBHbWJIIiwiZGMiOjYxOTUzNjU0Nzg0LCJkbSI6IlNhbkRpc2sgMy4yR2VuMSIsImRzIjoiMDkwMUMzRjIiLCJkdCI6IlVTQiIsImgiOiIiLCJocGEiOiJuL2EiLCJrIjoiZWJWV0xvX21WUGxBZUxFUzZLbUxwNUFmaFRybWxiN1g0T09SQzYwRWxtUSIsIm0iOiJaZXJvRmlsbCIsIm4iOjQyLCJvcCI6Ik1heCBNdXN0ZXJtYW5uIiwicCI6MSwiciI6Im9rIiwic2siOjIsInNsIjoiSC0yIiwic3ciOiIyLjAuMCIsInQiOiIyMDI2LTExLTE3VDEwOjAwOjAwWiIsInYiOjEsInZlIjowLCJ2bSI6ImZ1bGwifQ' +
-  '.XR2XsL_KAfkdyOTIduvuAletZ4CSwL-TmNYHY4UqFanWmkaTnpj_O7sHe1CJIY8L3zkiQEZh_jCIBtCbBc4gBA';
+  'eyJicyI6MCwiY28iOiJCZWlzcGllbCBHbWJIIiwiZGMiOjYxOTUzNjU0Nzg0LCJkbSI6IlNhbkRpc2sgMy4yR2VuMSIsImRzIjoiREVNTzAwMDAwMDAxIiwiZHQiOiJVU0IiLCJoIjoiIiwiaHBhIjoibi9hIiwiayI6ImViVldMb19tVlBsQWVMRVM2S21McDVBZmhUcm1sYjdYNE9PUkM2MEVsbVEiLCJtIjoiWmVyb0ZpbGwiLCJuIjo0Miwib3AiOiJNYXggTXVzdGVybWFubiIsInAiOjEsInIiOiJvayIsInNrIjoyLCJzbCI6IkgtMiIsInN3IjoiMi4wLjAiLCJ0IjoiMjAyNi0xMS0xN1QxMDowMDowMFoiLCJ2IjoxLCJ2ZSI6MCwidm0iOiJmdWxsIn0' +
+  '.rV-EP-MR02TXztjCkndxD5DbghFtKCPI36ZfSz2TeHGs8Vye1Vv4qpbJZ4CaD71wMJtKGqOIDtgVIJa5wdezCg';
 
 // Python: json.dumps(p, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
 // for a payload with umlauts, quotes, backslashes, control chars, U+2028, emoji, nesting.

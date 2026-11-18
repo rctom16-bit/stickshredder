@@ -134,8 +134,6 @@ def test_cmd_wipe_passes_verify_mode_to_execute():
         patch.object(cli, "prepare_target"),
         patch.object(cli, "open_physical_drive", return_value=12345),
         patch.object(cli, "close_drive"),
-        patch.object(cli, "lock_volume"),
-        patch.object(cli, "unlock_volume"),
         patch.object(cli, "get_drive_size", return_value=1024 * 1024),
         patch.object(cli, "get_next_cert_number", return_value=1),
         patch.object(cli, "generate_certificate", return_value="C:/tmp/fake.pdf"),
@@ -267,8 +265,6 @@ def _hardware_wipe(*, status=None, erase=None, zero=None, locks=(), released=Non
             enter(patch.object(cli, "release_volumes", side_effect=released.extend))
         enter(patch.object(cli, "open_physical_drive", return_value=12345))
         mocks.close = enter(patch.object(cli, "close_drive"))
-        enter(patch.object(cli, "lock_volume"))
-        enter(patch.object(cli, "unlock_volume"))
         enter(patch.object(cli, "get_drive_size", return_value=1024 * 1024))
         enter(patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()))
         enter(patch.object(cli, "get_next_cert_number", return_value=1))
@@ -581,8 +577,6 @@ def test_hpa_detection_flows_to_certificate():
         patch.object(cli, "prepare_target"),
         patch.object(cli, "open_physical_drive", return_value=12345),
         patch.object(cli, "close_drive"),
-        patch.object(cli, "lock_volume"),
-        patch.object(cli, "unlock_volume"),
         patch.object(cli, "get_drive_size", return_value=1024 * 1024),
         patch.object(cli, "detect_hidden_areas", return_value=hidden),
         patch.object(cli, "get_next_cert_number", return_value=1),
@@ -673,8 +667,6 @@ def test_cert_uses_wipe_result_passes_not_method_passes():
         patch.object(cli, "prepare_target"),
         patch.object(cli, "open_physical_drive", return_value=12345),
         patch.object(cli, "close_drive"),
-        patch.object(cli, "lock_volume"),
-        patch.object(cli, "unlock_volume"),
         patch.object(cli, "get_drive_size", return_value=1024 * 1024),
         patch.object(cli, "get_next_cert_number", return_value=42),
         patch.object(cli, "generate_certificate", side_effect=_capture_cert),
@@ -779,8 +771,6 @@ def test_cmd_wipe_calls_reformat_when_requested():
             patch.object(cli, "prepare_target"),
             patch.object(cli, "open_physical_drive", return_value=12345),
             patch.object(cli, "close_drive"),
-            patch.object(cli, "lock_volume"),
-            patch.object(cli, "unlock_volume"),
             patch.object(cli, "get_drive_size", return_value=1024 * 1024),
             patch.object(cli, "get_next_cert_number", return_value=1),
             patch.object(cli, "generate_certificate", return_value="C:/tmp/fake.pdf"),
@@ -888,8 +878,6 @@ def test_reformat_rechecks_target_and_is_skipped_when_refused():
             patch.object(cli, "prepare_target", gate),
             patch.object(cli, "open_physical_drive", return_value=12345),
             patch.object(cli, "close_drive"),
-            patch.object(cli, "lock_volume"),
-            patch.object(cli, "unlock_volume"),
             patch.object(cli, "get_drive_size", return_value=1024 * 1024),
             patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()),
             patch.object(cli, "get_next_cert_number", return_value=1),
@@ -951,7 +939,6 @@ def test_cmd_wipe_holds_volume_locks_until_the_wipe_is_done():
         patch.object(cli, "release_volumes", side_effect=released.extend),
         patch.object(cli, "open_physical_drive", return_value=12345),
         patch.object(cli, "close_drive"),
-        patch.object(cli, "unlock_volume"),
         patch.object(cli, "get_drive_size", return_value=1024 * 1024),
         patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()),
         patch.object(cli, "get_next_cert_number", return_value=1),
@@ -1036,7 +1023,6 @@ def test_reformat_releases_the_gate_locks_before_reformatting():
             patch.object(cli, "release_volumes", side_effect=released.extend),
             patch.object(cli, "open_physical_drive", return_value=12345),
             patch.object(cli, "close_drive"),
-            patch.object(cli, "unlock_volume"),
             patch.object(cli, "get_drive_size", return_value=1024 * 1024),
             patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()),
             patch.object(cli, "get_next_cert_number", return_value=1),
@@ -1051,3 +1037,34 @@ def test_reformat_releases_the_gate_locks_before_reformatting():
     assert gate.call_count == 2
     assert seen_at_reformat == [[5, 6]]
     assert released == [5, 6]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# list: the footer counts physical disks, not drive letters (2.0 polish)
+# ─────────────────────────────────────────────────────────────────────
+
+def _listed(letter: str, disk: int, **kw):
+    values = dict(
+        drive_letter=letter, device_id=f"\\.\PhysicalDrive{disk}",
+        model=f"Disk{disk}", serial_number=f"SN{disk}", capacity_bytes=64 * 1024**3,
+        filesystem="NTFS", connection_type="USB", is_removable=True,
+        is_system_drive=False, is_internal=False,
+    )
+    values.update(kw)
+    return cli.DeviceInfo(**values)
+
+
+def test_list_footer_counts_disks_not_letters(capsys):
+    devices = [
+        _listed("C:", 0, connection_type="NVMe", is_removable=False, is_system_drive=True),
+        _listed("D:", 1), _listed("E:", 1),          # one stick, two partitions
+        _listed("F:", 2),
+        _listed("G:", 3), _listed("", 3),
+        _listed("H:", 4, connection_type="SATA", is_removable=False, is_internal=True),
+        _listed("I:", 4, connection_type="SATA", is_removable=False, is_internal=True),
+    ]
+    with patch.object(cli, "list_devices", return_value=devices):
+        cli.cmd_list(cli.build_parser().parse_args(["list"]))
+    out = capsys.readouterr().out
+    assert "Found 3 removable disk(s) ready for wiping." in out
+    assert "1 internal disk(s) detected" in out

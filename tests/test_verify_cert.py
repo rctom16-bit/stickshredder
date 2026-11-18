@@ -41,7 +41,7 @@ def test_unknown_key_when_signature_valid_but_not_trusted():
     out = verify_token(TOKEN, {})
     assert out.status == "unknown_key"
     assert out.fingerprint == FINGERPRINT
-    assert out.payload is not None and out.payload["ds"] == "0901C3F2"
+    assert out.payload is not None and out.payload["ds"] == "DEMO00000001"
 
 
 def test_unknown_key_when_other_key_is_trusted():

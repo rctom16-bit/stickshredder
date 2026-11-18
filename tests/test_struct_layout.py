@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+import wipe.device as device
 import wipe.nvme as nvme
 import wipe.passthrough as pt
 import wipe.sat as sat
@@ -70,6 +71,8 @@ MIRRORS = {
     "STORAGE_ADAPTER_DESCRIPTOR": transport.STORAGE_ADAPTER_DESCRIPTOR,
     "STORAGE_DEVICE_DESCRIPTOR": transport.STORAGE_DEVICE_DESCRIPTOR,
     "STORAGE_DEVICE_NUMBER": transport.STORAGE_DEVICE_NUMBER,
+    "DISK_EXTENT": device.DISK_EXTENT,
+    "VOLUME_DISK_EXTENTS": type(device._volume_disk_extents(1)),
 }
 
 # Device data parsed by byte offset rather than through a ctypes mirror.
@@ -82,6 +85,10 @@ CONSTANTS = {
     "IOCTL_SCSI_GET_ADDRESS": transport.IOCTL_SCSI_GET_ADDRESS,
     "IOCTL_STORAGE_QUERY_PROPERTY": transport.IOCTL_STORAGE_QUERY_PROPERTY,
     "IOCTL_STORAGE_GET_DEVICE_NUMBER": transport.IOCTL_STORAGE_GET_DEVICE_NUMBER,
+    "IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS": device.IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+    "IOCTL_DISK_GET_LENGTH_INFO": device.IOCTL_DISK_GET_LENGTH_INFO,
+    "FSCTL_LOCK_VOLUME": device.FSCTL_LOCK_VOLUME,
+    "FSCTL_DISMOUNT_VOLUME": device.FSCTL_DISMOUNT_VOLUME,
     "ATA_FLAGS_DRDY_REQUIRED": pt.ATA_FLAGS_DRDY_REQUIRED,
     "ATA_FLAGS_DATA_IN": pt.ATA_FLAGS_DATA_IN,
     "ATA_FLAGS_DATA_OUT": pt.ATA_FLAGS_DATA_OUT,

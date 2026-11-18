@@ -1,5 +1,6 @@
-"""Tests for the 2.0 safety fixes in wipe.device: BitLocker via WMI with a
-German/English manage-bde fallback, and prepare_target refusals."""
+"""Tests for the 2.0 safety fixes in wipe.device: the BitLocker probe
+(Explorer's property first, one WMI query per scan as administrator) and
+prepare_target refusals."""
 
 from __future__ import annotations
 
@@ -18,79 +19,151 @@ def _quiet(monkeypatch):
     monkeypatch.setattr(device_mod, "_bitlocker_wmi_denied", False)
 
 
-def test_bitlocker_wmi_denial_is_tried_once_per_run(monkeypatch, bde):
-    tries = []
+# ── BitLocker: Explorer's property first ───────────────────────────────
 
-    def denied():
-        tries.append(1)
-        raise PermissionError("Access denied")
-    monkeypatch.setattr(device_mod, "_get_bitlocker_wmi_connection", denied)
-    bde.stdout = ENGLISH_ON
+@pytest.fixture
+def shell(monkeypatch):
+    """Explorer's BitLocker property per letter; records the letters asked."""
+    state = SimpleNamespace(values={}, asked=[])
+
+    def value(letter):
+        state.asked.append(letter)
+        result = state.values.get(letter)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(device_mod, "_shell_bitlocker_value", value)
+    return state
+
+
+@pytest.fixture
+def wmi_volumes(monkeypatch):
+    """Fake BitLocker WMI namespace; ``state.connects`` counts connections."""
+    state = SimpleNamespace(volumes=[], connects=0, error=None)
+
+    def connect():
+        state.connects += 1
+        if state.error is not None:
+            raise state.error
+        return SimpleNamespace(Win32_EncryptableVolume=lambda: list(state.volumes))
+
+    monkeypatch.setattr(device_mod, "_get_bitlocker_wmi_connection", connect)
+    return state
+
+
+def _admin(monkeypatch, admin: bool) -> None:
+    monkeypatch.setattr(device_mod, "_is_admin", lambda: admin)
+
+
+@pytest.mark.parametrize("value", [1, 3, 4, 5, 6, 8, "1"])
+def test_bitlocker_shell_encrypted_states_count(monkeypatch, shell, wmi_volumes, value):
+    # on, encrypting, decrypting, suspended, locked, waiting for activation
+    _admin(monkeypatch, True)
+    shell.values["E:"] = value
     assert _check_bitlocker("E:") is True
-    assert _check_bitlocker("F:") is True
-    assert len(tries) == 1
-    assert bde.calls == 2
+    assert wmi_volumes.connects == 0
 
 
-# ── BitLocker: WMI first ───────────────────────────────────────────────
+@pytest.mark.parametrize("value", [2, 0, 7])
+def test_bitlocker_shell_off_or_not_encryptable_is_false(monkeypatch, shell, wmi_volumes, value):
+    _admin(monkeypatch, True)
+    shell.values["E:"] = value
+    assert _check_bitlocker("E:") is False
+    assert wmi_volumes.connects == 0
+
+
+def test_bitlocker_shell_asks_with_upper_case_letter(monkeypatch, shell):
+    _admin(monkeypatch, False)
+    shell.values["E:"] = 1
+    assert _check_bitlocker("e:") is True
+    assert shell.asked == ["E:"]
+
+
+@pytest.mark.parametrize("answer", [None, "", "garbage", OSError("COM failed")])
+def test_bitlocker_without_admin_never_asks_wmi(monkeypatch, shell, wmi_volumes, answer):
+    """Without administrator rights WMI and manage-bde are refused after ~5 s
+    each — that made the list slow. No answer from Explorer: not encrypted."""
+    _admin(monkeypatch, False)
+    shell.values["E:"] = answer
+    assert _check_bitlocker("E:") is False
+    assert wmi_volumes.connects == 0
+
 
 def _vol(protection: int, conversion: int, letter: str = "E:"):
     return SimpleNamespace(DriveLetter=letter, ProtectionStatus=protection,
                            ConversionStatus=conversion)
 
 
-@pytest.fixture
-def bde(monkeypatch):
-    """Stub manage-bde; records whether it was called."""
-    state = SimpleNamespace(stdout="", calls=0)
-
-    def run(*a, **k):
-        state.calls += 1
-        return SimpleNamespace(stdout=state.stdout, stderr="", returncode=0)
-
-    monkeypatch.setattr(device_mod.subprocess, "run", run)
-    return state
-
-
-def _use_volumes(monkeypatch, *vols):
-    conn = SimpleNamespace(Win32_EncryptableVolume=lambda **kw: [
-        v for v in vols if v.DriveLetter == kw.get("DriveLetter", v.DriveLetter)
-    ])
-    monkeypatch.setattr(device_mod, "_get_bitlocker_wmi_connection", lambda: conn)
+@pytest.mark.parametrize("protection,conversion,expected", [
+    (1, 1, True),    # protection on
+    (0, 0, False),   # fully decrypted
+    (0, 1, True),    # suspended, data still encrypted
+    (2, 1, True),    # locked
+    (0, 2, True),    # encryption in progress
+])
+def test_bitlocker_wmi_as_admin_when_shell_has_no_answer(
+        monkeypatch, shell, wmi_volumes, protection, conversion, expected):
+    _admin(monkeypatch, True)
+    wmi_volumes.volumes = [_vol(protection, conversion)]
+    assert _check_bitlocker("E:") is expected
+    assert wmi_volumes.connects == 1
 
 
-def test_bitlocker_wmi_protection_on(monkeypatch, bde):
-    _use_volumes(monkeypatch, _vol(1, 1))
-    assert _check_bitlocker("E:") is True
-    assert bde.calls == 0
-
-
-def test_bitlocker_wmi_fully_decrypted_off(monkeypatch, bde):
-    _use_volumes(monkeypatch, _vol(0, 0))
+def test_bitlocker_wmi_no_volume_entry_is_false(monkeypatch, shell, wmi_volumes):
+    _admin(monkeypatch, True)
+    wmi_volumes.volumes = [_vol(1, 1, letter="F:")]
     assert _check_bitlocker("E:") is False
-    assert bde.calls == 0
 
 
-def test_bitlocker_wmi_suspended_but_encrypted_counts(monkeypatch, bde):
-    # Protection suspended (0) but data still encrypted (ConversionStatus 1).
-    _use_volumes(monkeypatch, _vol(0, 1))
-    assert _check_bitlocker("E:") is True
+def test_bitlocker_wmi_is_queried_once_per_scan(monkeypatch, shell, wmi_volumes):
+    _admin(monkeypatch, True)
+    wmi_volumes.volumes = [_vol(1, 1, "E:"), _vol(0, 0, "F:")]
+    with device_mod._scan_cache():
+        assert _check_bitlocker("E:") is True
+        assert _check_bitlocker("F:") is False
+    assert wmi_volumes.connects == 1
+    # A new scan reads the state again.
+    with device_mod._scan_cache():
+        _check_bitlocker("E:")
+    assert wmi_volumes.connects == 2
 
 
-def test_bitlocker_wmi_locked_volume_counts(monkeypatch, bde):
-    _use_volumes(monkeypatch, _vol(2, 1))
-    assert _check_bitlocker("E:") is True
-
-
-def test_bitlocker_wmi_encryption_in_progress_counts(monkeypatch, bde):
-    _use_volumes(monkeypatch, _vol(0, 2))
-    assert _check_bitlocker("E:") is True
-
-
-def test_bitlocker_wmi_no_volume_entry_is_false(monkeypatch, bde):
-    _use_volumes(monkeypatch, _vol(1, 1, letter="F:"))
+def test_bitlocker_wmi_denial_is_tried_once_per_run(monkeypatch, shell, wmi_volumes):
+    _admin(monkeypatch, True)
+    wmi_volumes.error = PermissionError("Access denied")
     assert _check_bitlocker("E:") is False
-    assert bde.calls == 0
+    assert _check_bitlocker("F:") is False
+    assert wmi_volumes.connects == 1
+
+
+def test_bitlocker_shell_property_reads_this_pc(monkeypatch):
+    calls = []
+
+    class Item:
+        def ExtendedProperty(self, name):  # noqa: N802 — COM method name
+            calls.append(name)
+            return 6
+
+    class Folder:
+        def ParseName(self, name):  # noqa: N802 — COM method name
+            calls.append(name)
+            return Item()
+
+    class Shell:
+        def NameSpace(self, what):  # noqa: N802 — COM method name
+            calls.append(what)
+            return Folder()
+
+    monkeypatch.setattr(device_mod, "_shell_application", Shell)
+    assert device_mod._shell_bitlocker_value("E:") == 6
+    assert calls == [17, "E:\\", "System.Volume.BitLockerProtection"]
+
+
+def test_bitlocker_shell_unknown_drive_has_no_answer(monkeypatch):
+    shell = SimpleNamespace(NameSpace=lambda _w: SimpleNamespace(ParseName=lambda _n: None))
+    monkeypatch.setattr(device_mod, "_shell_application", lambda: shell)
+    assert device_mod._shell_bitlocker_value("Q:") is None
 
 
 def test_bitlocker_wmi_namespace_initialises_com(monkeypatch):
@@ -102,93 +175,24 @@ def test_bitlocker_wmi_namespace_initialises_com(monkeypatch):
     assert calls == ["com", r"root\CIMV2\Security\MicrosoftVolumeEncryption"]
 
 
-# ── BitLocker: manage-bde fallback when WMI is denied ──────────────────
+# ── handle.exe probe: skipped where it can't succeed ───────────────────
 
-def _deny_wmi(monkeypatch):
-    def denied():
-        raise PermissionError("Access denied (non-admin)")
-    monkeypatch.setattr(device_mod, "_get_bitlocker_wmi_connection", denied)
-
-
-GERMAN_ON = """\
-BitLocker-Laufwerkverschlüsselung: Konfigurationstool, Version 10.0.26100
-Volume "E:" [STICK]
-[Datenvolume]
-
-    Größe:                        58,59 GB
-    BitLocker-Version:            2.0
-    Konvertierungsstatus:         Nur verwendeter Speicherplatz verschlüsselt
-    Verschlüsselt (Prozent):      100,0 %
-    Verschlüsselungsmethode:      XTS-AES 128
-    Schutzstatus:                 Der Schutz ist aktiviert.
-    Sperrungsstatus:              Entsperrt
-"""
-
-GERMAN_OFF = """\
-Volume "E:" [STICK]
-    Konvertierungsstatus:         Vollständig entschlüsselt
-    Verschlüsselt (Prozent):      0,0 %
-    Schutzstatus:                 Der Schutz ist deaktiviert.
-    Sperrungsstatus:              Entsperrt
-"""
-
-GERMAN_SUSPENDED = """\
-    Konvertierungsstatus:         Vollständig verschlüsselt
-    Verschlüsselt (Prozent):      100,0 %
-    Schutzstatus:                 Der Schutz ist deaktiviert.
-"""
-
-ENGLISH_ON = """\
-Volume E: [STICK]
-    Conversion Status:    Fully Encrypted
-    Percentage Encrypted: 100.0%
-    Protection Status:    Protection On
-    Lock Status:          Unlocked
-"""
-
-ENGLISH_OFF = """\
-    Conversion Status:    Fully Decrypted
-    Percentage Encrypted: 0.0%
-    Protection Status:    Protection Off
-    Lock Status:          Unlocked
-"""
-
-ENGLISH_PARTIAL = """\
-    Conversion Status:    Encryption in Progress
-    Percentage Encrypted: 12.5%
-    Protection Status:    Protection Off
-"""
-
-GERMAN_DENIED = """\
-FEHLER: Fehler beim Versuch, auf eine erforderliche Ressource zuzugreifen.
-Zugriff verweigert
-"""
+def test_open_handle_probe_skipped_without_admin(monkeypatch):
+    _admin(monkeypatch, False)
+    monkeypatch.setattr(device_mod, "_handle_exe_missing", False)
+    monkeypatch.setattr(device_mod.subprocess, "run",
+                        MagicMock(side_effect=AssertionError("must not run")))
+    assert device_mod._check_active_processes("E:") is False
 
 
-@pytest.mark.parametrize("text,expected", [
-    (GERMAN_ON, True),
-    (GERMAN_OFF, False),
-    (GERMAN_SUSPENDED, True),
-    (ENGLISH_ON, True),
-    (ENGLISH_OFF, False),
-    (ENGLISH_PARTIAL, True),
-    (GERMAN_DENIED, False),
-    ("", False),
-])
-def test_bitlocker_manage_bde_fallback(monkeypatch, bde, text, expected):
-    _deny_wmi(monkeypatch)
-    bde.stdout = text
-    assert _check_bitlocker("E:") is expected
-    assert bde.calls == 1
-
-
-def test_bitlocker_fallback_never_raises(monkeypatch):
-    _deny_wmi(monkeypatch)
-
-    def run(*a, **k):
-        raise FileNotFoundError("manage-bde")
+def test_open_handle_probe_remembers_a_missing_tool(monkeypatch):
+    _admin(monkeypatch, True)
+    monkeypatch.setattr(device_mod, "_handle_exe_missing", False)
+    run = MagicMock(side_effect=FileNotFoundError("handle.exe"))
     monkeypatch.setattr(device_mod.subprocess, "run", run)
-    assert _check_bitlocker("E:") is False
+    assert device_mod._check_active_processes("E:") is False
+    assert device_mod._check_active_processes("F:") is False
+    assert run.call_count == 1
 
 
 # ── prepare_target ─────────────────────────────────────────────────────

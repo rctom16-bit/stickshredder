@@ -20,6 +20,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm, mm
 from reportlab.platypus import (
     Image,
+    KeepTogether,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -30,6 +31,7 @@ from reportlab.platypus import (
 from cert.payload import RESULT_LABELS, build_payload, nist_category, result_status
 from core.config import APP_VERSION
 from core.log import audit_log
+from core.protection_class import class3_note
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
     from cert.signing import SigningKey
@@ -147,6 +149,11 @@ class CertificateData:
     # HPA/DCO has been removed and wiped as well.
     wipe_success: bool = True
     hidden_area_removed: bool = False
+
+    # Media type of the wiped disk ("ssd" | "flash" | "hdd" | "unknown", or
+    # "" when not known). With protection class 3 an SSD or flash medium gets
+    # the note that only physical destruction is enough. Not signed.
+    media_type: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +690,8 @@ def _build_hidden_area_elements(
 _RESULT_STYLE = {"ok": "result_pass", "limited": "result_limited", "failed": "result_fail"}
 
 _QR_SIZE = 3.4 * cm
+# Smallest printed QR module a phone camera reads reliably.
+QR_MIN_MODULE = 0.5 * mm
 
 
 def _build_result_row(
@@ -706,10 +715,19 @@ def _build_result_row(
     return tbl
 
 
+def qr_module_count(widget: QrCodeWidget) -> int:
+    """Modules per side of ``widget``'s code, quiet zone included."""
+    widget.draw()   # builds widget.qr
+    return widget.qr.getModuleCount() + 2 * int(widget.barBorder)
+
+
 def _qr_drawing(value: str, size: float = _QR_SIZE) -> Drawing:
-    # Level L keeps the long verify link (~800 characters) as coarse as
-    # possible so phone cameras can still read the printed code.
+    """QR code of ``value``, at least ``size`` wide and never finer than
+    QR_MIN_MODULE per module: the signed verify link (~700 characters) needs
+    ~97 modules, which at 3.4 cm printed 0.35 mm modules — too fine to scan."""
+    # Level L keeps the long verify link as coarse as possible.
     widget = QrCodeWidget(value, barLevel="L")
+    size = max(size, qr_module_count(widget) * QR_MIN_MODULE)
     x1, y1, x2, y2 = widget.getBounds()
     drawing = Drawing(size, size, transform=[size / (x2 - x1), 0, 0, size / (y2 - y1), 0, 0])
     drawing.add(widget)
@@ -744,9 +762,10 @@ def _build_authenticity_elements(
         Spacer(1, 2 * mm),
         Paragraph(text, styles["auth_text"]),
     ]
+    qr = _qr_drawing(verify_url(token))
     tbl = Table(
-        [[_qr_drawing(verify_url(token)), right]],
-        colWidths=[_QR_SIZE + 4 * mm, _TABLE_WIDTH - _QR_SIZE - 4 * mm],
+        [[qr, right]],
+        colWidths=[qr.width + 4 * mm, _TABLE_WIDTH - qr.width - 4 * mm],
     )
     tbl.setStyle(
         TableStyle(
@@ -761,9 +780,9 @@ def _build_authenticity_elements(
             ]
         )
     )
+    # Header and code stay on one page (the header alone ended page 1).
     return [
-        _section_header(_label("Echtheit", "Authenticity", lang), styles),
-        tbl,
+        KeepTogether([_section_header(_label("Echtheit", "Authenticity", lang), styles), tbl]),
         Spacer(1, 2 * mm),
     ]
 
@@ -771,6 +790,32 @@ def _build_authenticity_elements(
 # ---------------------------------------------------------------------------
 # PDF generation
 # ---------------------------------------------------------------------------
+def _footer_lines(lang: str) -> list[str]:
+    """Footer text: program version and what the certificate is (not)."""
+    de = (f"Erstellt mit StickShredder v{APP_VERSION}, aufgebaut nach DIN 66399 / "
+          "ISO 21964. Software nicht von DEKRA, DIN oder einer anderen Stelle zertifiziert.")
+    en = (f"Created with StickShredder v{APP_VERSION}, structured according to DIN 66399 / "
+          "ISO 21964. Software not certified by DEKRA, DIN or any other body.")
+    return {"de": [de], "en": [en]}.get(lang, [de, en])
+
+
+# Footer baselines, from the bottom edge of the page: inside the 1.5 cm
+# margin, above what printers leave blank (~5 mm).
+_FOOTER_FIRST_BASELINE = 10 * mm
+_FOOTER_LEADING = 9
+
+
+def _draw_footer(canvas, lines: list[str]) -> None:
+    """Draw the footer lines centred in the bottom margin of the current page."""
+    canvas.saveState()
+    canvas.setFont("Helvetica", 7)
+    canvas.setFillColor(TEXT_GRAY)
+    width = canvas._pagesize[0]
+    for i, line in enumerate(lines):
+        canvas.drawCentredString(width / 2, _FOOTER_FIRST_BASELINE - i * _FOOTER_LEADING, line)
+    canvas.restoreState()
+
+
 def attachment_bytes(payload: dict, token: str) -> bytes:
     """Content of the PDF attachment: the signed payload (incl. ``k``) and its token."""
     return json.dumps(
@@ -896,9 +941,13 @@ def generate_certificate(
         title_text = "Löschzertifikat / Deletion Certificate"
     elements.append(Paragraph(title_text, styles["title"]))
 
-    # Subtitle
+    # Subtitle: built after the standards, not certified against them.
     elements.append(
-        Paragraph("nach DIN 66399 / ISO 21964", styles["subtitle"])
+        Paragraph(
+            _label("aufgebaut nach", "structured according to", lang)
+            + " DIN 66399 / ISO 21964",
+            styles["subtitle"],
+        )
     )
 
     # ------------------------------------------------------------------
@@ -1048,6 +1097,14 @@ def generate_certificate(
                 lang,
             )
         elements.append(Paragraph(se_note, styles["result_skipped"]))
+
+    # Protection class 3 on an SSD or flash medium: overwriting can't reach
+    # the reserve areas, so the certificate says physical destruction is needed.
+    note = class3_note(data.media_type, data.schutzklasse, data.secure_erase_used)
+    if note is not None:
+        elements.append(Spacer(1, 1.5 * mm))
+        elements.append(Paragraph(_safe(_label(note[0], note[1], lang)),
+                                  styles["result_limited"]))
     elements.append(Spacer(1, 2 * mm))
 
     # ------------------------------------------------------------------
@@ -1161,38 +1218,14 @@ def generate_certificate(
             ]
         )
     )
-    elements.append(sig_tbl)
-    elements.append(Spacer(1, 4 * mm))
+    # A table splits by rows across pages: keep the signature lines together.
+    elements.append(KeepTogether([sig_tbl]))
 
     # ------------------------------------------------------------------
-    # 7. Footer
+    # 7. Footer — in the bottom margin of every page (_draw_footer). As the
+    #    last paragraphs it used to spill onto an otherwise empty page.
     # ------------------------------------------------------------------
-    elements.append(
-        Paragraph(
-            f"Erstellt mit StickShredder v{APP_VERSION}",
-            styles["footer"],
-        )
-    )
-    elements.append(Spacer(1, 1 * mm))
-
-    if lang == "de":
-        disclaimer = (
-            "Erstellt nach DIN 66399 / ISO 21964 Richtlinien. "
-            "Software nicht DEKRA-zertifiziert."
-        )
-    elif lang == "en":
-        disclaimer = (
-            "Generated according to DIN 66399 / ISO 21964 guidelines. "
-            "Software not DEKRA-certified."
-        )
-    else:
-        disclaimer = (
-            "Erstellt nach DIN 66399 / ISO 21964 Richtlinien. "
-            "Software nicht DEKRA-zertifiziert.<br/>"
-            "Generated according to DIN 66399 / ISO 21964 guidelines. "
-            "Software not DEKRA-certified."
-        )
-    elements.append(Paragraph(disclaimer, styles["footer"]))
+    footer = _footer_lines(lang)
 
     # ------------------------------------------------------------------
     # Build the PDF
@@ -1214,14 +1247,18 @@ def generate_certificate(
         subject="DIN 66399 / ISO 21964 Deletion Certificate",
         **doc_kwargs,
     )
-    if token:
-        attachment = attachment_bytes(payload, token)
-        doc.build(
-            elements,
-            onFirstPage=lambda canvas, _doc: _embed_file(canvas, ATTACHMENT_NAME, attachment),
-        )
-    else:
-        doc.build(elements)
+    attachment = attachment_bytes(payload, token) if token else None
+
+    def first_page(canvas, _doc):
+        if attachment is not None:
+            _embed_file(canvas, ATTACHMENT_NAME, attachment)
+        _draw_footer(canvas, footer)
+
+    doc.build(
+        elements,
+        onFirstPage=first_page,
+        onLaterPages=lambda canvas, _doc: _draw_footer(canvas, footer),
+    )
 
     abs_path = str(out.resolve())
     signed = f" signed={signing_key.fingerprint()}" if token else " unsigned"

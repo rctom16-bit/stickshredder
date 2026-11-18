@@ -44,7 +44,13 @@ MAX_LOG_LINES = 300
 
 
 def target_name(device: DeviceInfo) -> str:
-    """How the page names a disk: its drive letters, else its model."""
+    """How the page names a disk: its drive letters, else its model.
+
+    The demo disk's pretend letter "DEMO:" read as „DEMO: ist sicher
+    gelöscht“; demo disks are named by their model.
+    """
+    if device.device_id.startswith("\\\\.\\DemoDevice"):
+        return device.model or device.device_id
     letters = device.disk_letters or ([device.drive_letter] if device.drive_letter else [])
     return ", ".join(letters) if letters else (device.model or device.device_id)
 

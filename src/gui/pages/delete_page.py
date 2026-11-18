@@ -768,6 +768,9 @@ class DeletePage(QWidget):
             unavailable = set(plain.warnings_en if language() == "en" else plain.warnings_de)
             warnings = [tr("hw.overwrite_only_warning")] + [
                 w for w in warnings if w not in unavailable]
+        if device.has_bitlocker:
+            # Same as the CLI: the wipe runs, the confirmation says what it means.
+            warnings.append(tr("select.bitlocker_warning"))
         if device.is_internal:
             warnings.append(tr("select.internal_warning"))
         return warnings
@@ -983,6 +986,7 @@ class DeletePage(QWidget):
             reformat=o.reformat,
             reformat_label=o.reformat_label,
             hardware_erase=o.hardware_erase,
+            media_types={device.device_id: self._media_type(device)},
             parent=self,
         )
         if o.hardware_erase:
