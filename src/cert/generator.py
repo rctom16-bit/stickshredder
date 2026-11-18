@@ -792,10 +792,10 @@ def _build_authenticity_elements(
 # ---------------------------------------------------------------------------
 def _footer_lines(lang: str) -> list[str]:
     """Footer text: program version and what the certificate is (not)."""
-    de = (f"Erstellt mit StickShredder v{APP_VERSION} nach DIN 66399 / ISO 21964 "
-          "Richtlinien. Software nicht DEKRA-zertifiziert.")
-    en = (f"Created with StickShredder v{APP_VERSION} according to DIN 66399 / "
-          "ISO 21964 guidelines. Software not DEKRA-certified.")
+    de = (f"Erstellt mit StickShredder v{APP_VERSION}, aufgebaut nach DIN 66399 / "
+          "ISO 21964. Software nicht von DEKRA, DIN oder einer anderen Stelle zertifiziert.")
+    en = (f"Created with StickShredder v{APP_VERSION}, structured according to DIN 66399 / "
+          "ISO 21964. Software not certified by DEKRA, DIN or any other body.")
     return {"de": [de], "en": [en]}.get(lang, [de, en])
 
 
@@ -941,9 +941,13 @@ def generate_certificate(
         title_text = "Löschzertifikat / Deletion Certificate"
     elements.append(Paragraph(title_text, styles["title"]))
 
-    # Subtitle
+    # Subtitle: built after the standards, not certified against them.
     elements.append(
-        Paragraph("nach DIN 66399 / ISO 21964", styles["subtitle"])
+        Paragraph(
+            _label("aufgebaut nach", "structured according to", lang)
+            + " DIN 66399 / ISO 21964",
+            styles["subtitle"],
+        )
     )
 
     # ------------------------------------------------------------------

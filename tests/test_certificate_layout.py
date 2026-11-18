@@ -102,6 +102,37 @@ def test_footer_lines_per_language(lang, count):
     assert all("StickShredder v" in line and "DEKRA" in line for line in lines)
 
 
+@pytest.mark.parametrize("lang,subtitle,footer", [
+    ("de", "aufgebaut nach DIN 66399 / ISO 21964",
+     ["Software nicht von DEKRA, DIN oder einer anderen Stelle zertifiziert."]),
+    ("en", "structured according to DIN 66399 / ISO 21964",
+     ["Software not certified by DEKRA, DIN or any other body."]),
+    ("both", "aufgebaut nach / structured according to DIN 66399 / ISO 21964",
+     ["Software nicht von DEKRA, DIN oder einer anderen Stelle zertifiziert.",
+      "Software not certified by DEKRA, DIN or any other body."]),
+])
+def test_certificate_says_built_after_the_standards_not_certified(tmp_path, lang, subtitle,
+                                                                   footer):
+    from reportlab.platypus import SimpleDocTemplate
+
+    from tests.test_certificate import _paragraph_texts
+
+    captured: list = []
+    real_build = SimpleDocTemplate.build
+
+    def build(self, flowables, *args, **kwargs):
+        captured.extend(flowables)
+        return real_build(self, flowables, *args, **kwargs)
+
+    with patch.object(SimpleDocTemplate, "build", build):
+        _generate(tmp_path, _data(language=lang))
+    assert subtitle in _paragraph_texts(captured).splitlines()
+    lines = generator._footer_lines(lang)
+    assert [line.split(". ", 1)[1] for line in lines] == footer
+    assert all(", aufgebaut nach" in line or ", structured according to" in line
+               for line in lines)
+
+
 def test_authenticity_header_stays_with_the_qr_code():
     from reportlab.platypus import KeepTogether
 
