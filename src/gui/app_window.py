@@ -297,6 +297,12 @@ class AppWindow(QMainWindow):
                          tr("msg.erasing_text", password=TEMP_PASSWORD), kind="warning")
             event.ignore()
             return
+        if page.is_unlocking():
+            # Seconds only; quitting now would hide whether it worked.
+            show_message(self, tr("msg.unlocking_title"), tr("msg.unlocking_text"),
+                         kind="info")
+            event.ignore()
+            return
         if page.is_busy():
             if not ask_yes_no(self, tr("msg.busy_title"), tr("msg.busy_text")):
                 event.ignore()

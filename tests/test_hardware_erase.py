@@ -95,6 +95,7 @@ def drive(monkeypatch):
              error="USB device with vendor id 'ASMT' is not an ATA drive"), "no_path"),
     (_status(method="unsupported", supported=False), "unsupported"),
     (_status(method="locked"), "locked"),
+    (_status(method="has_password"), "has_password"),
     (_status(method="error", supported=False, error="IDENTIFY failed"), "error"),
 ])
 def test_check_ready_names_why_the_drive_may_not_erase(status, reason):
@@ -334,3 +335,13 @@ def test_fits_only_directly_attached_sata_ssds():
     for media in ("hdd", "flash", "unknown"):
         assert not hw.fits(ssd, media)
     assert not hw.fits(replace(ssd, is_system_drive=True), "ssd")
+
+
+def test_a_drive_with_a_password_is_refused_before_ours_is_shown(drive):
+    drive.status = _status(method="has_password")
+    started = []
+    outcome = hw.run(HANDLE, SIZE, FakeZeroFill(drive.events),
+                     on_erase_started=lambda *a: started.append(a))
+    assert (outcome.report.status, outcome.report.reason) == ("refused", "has_password")
+    assert drive.events == ["probe"] and started == []
+    assert not any(hw.TEMP_PASSWORD in line for line in drive.logs)

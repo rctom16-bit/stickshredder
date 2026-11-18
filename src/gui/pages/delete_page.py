@@ -90,7 +90,9 @@ _MiB = 1024 * 1024
 # worker fakes the drive's erase for it; nothing real is touched.
 DEMO_SSD_ID = "\\\\.\\DemoDevice1"
 # Refusals that will not change by trying again: hide the offer for that disk.
-_FINAL_REFUSALS = ("no_path", "unsupported", "locked")
+_FINAL_REFUSALS = ("no_path", "unsupported", "locked", "has_password")
+# Refusals the unlock function may help with (the password may be ours).
+_PASSWORD_REFUSALS = ("locked", "has_password")
 _UNLOCK_KEYS = {f"unlock.state.{s}" for s in (
     "unlocked", "no_password", "frozen", "expired", "wrong_password", "unsupported", "error")}
 
@@ -311,6 +313,9 @@ class DeletePage(QWidget):
         # drive said a final "no" in this session (disk_key -> reason).
         self._hardware_key: tuple[str, str] | None = None
         self._no_hardware: dict[tuple[str, str], str] = {}
+        # Disks whose drive refused the temporary password: every try costs
+        # one of its few attempts, so no second one in this session.
+        self._no_unlock: set[tuple[str, str]] = set()
         self.unlock_worker: UnlockWorker | None = None
 
         layout = QVBoxLayout(self)
@@ -517,16 +522,16 @@ class DeletePage(QWidget):
 
     def is_busy(self) -> bool:
         wiping = self.worker is not None and self.worker.isRunning()
-        unlocking = self.unlock_worker is not None and self.unlock_worker.isRunning()
-        return wiping or unlocking
+        return wiping or self.is_unlocking()
+
+    def is_unlocking(self) -> bool:
+        return self.unlock_worker is not None and self.unlock_worker.isRunning()
 
     def stop_work(self) -> None:
-        """Quitting: cancel the wipe and wait for the threads to end."""
+        """Quitting during a wipe: cancel it and wait for the thread to end."""
         if self.worker is not None:
             self.worker.cancel()
             self.worker.wait(5000)
-        if self.unlock_worker is not None:
-            self.unlock_worker.wait(5000)
 
     def disk_rows(self) -> list[DiskRow]:
         return list(self._rows)
@@ -616,6 +621,7 @@ class DeletePage(QWidget):
         self.refresh_devices()
 
     def show_result(self, outcome: WipeOutcome) -> None:
+        outcome.unlock_allowed = disk_key(outcome.device) not in self._no_unlock
         self.result_view.show_outcome(outcome)
         self.stack.setCurrentWidget(self.result_view)
 
@@ -708,8 +714,10 @@ class DeletePage(QWidget):
         hint = "" if fits else self._hardware_hint(device)
         self.hardware_hint.setText(hint)
         self.hardware_hint.setVisible(bool(hint))
-        locked = device is not None and self._no_hardware.get(disk_key(device)) == "locked"
-        self.unlock_link.setVisible(locked)
+        password = (device is not None
+                    and self._no_hardware.get(disk_key(device)) in _PASSWORD_REFUSALS
+                    and disk_key(device) not in self._no_unlock)
+        self.unlock_link.setVisible(password)
 
     def _render_tiles(self) -> None:
         o = self.options
@@ -896,7 +904,7 @@ class DeletePage(QWidget):
 
     def unlock_disk(self, device: DeviceInfo) -> None:
         """„Gesperrte Platte entsperren“: ask, then one try in a worker thread."""
-        if device is None or self.is_busy():
+        if device is None or self.is_busy() or disk_key(device) in self._no_unlock:
             return
         safe, reason = is_safe_to_wipe(device,
                                        allow_internal=self.allow_internal_checkbox.isChecked())
@@ -930,6 +938,9 @@ class DeletePage(QWidget):
         text = tr(f"unlock.state.{state}", error=language_half(result.error or "—"))
         if result.success:
             self._forget_refusal(device)
+            self.result_view.unlock_done()
+        elif result.state == "wrong_password":
+            self._no_unlock.add(disk_key(device))
             self.result_view.unlock_done()
         show_message(self, tr("unlock.done_title"), text,
                      kind="info" if result.success else "warning")

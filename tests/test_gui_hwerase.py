@@ -920,14 +920,14 @@ def test_window_cannot_close_while_the_ssd_erases_itself(qtbot, app_config, gui_
     window = app_window.AppWindow(app_config)
     qtbot.addWidget(window)
     window.delete_page.running_view.begin_hardware_erase("ata-enhanced", 2)
-
-    event = QCloseEvent()
-    window.closeEvent(event)
-    assert not event.isAccepted()
-    assert asked == []                       # no "quit anyway" for this step
-    assert shown and TEMP_PASSWORD in shown[0] and "abstecken" in shown[0]
-
-    window.delete_page.running_view.stop()   # the run is over: closing works again
+    try:
+        event = QCloseEvent()
+        window.closeEvent(event)
+        assert not event.isAccepted()
+        assert asked == []                       # no "quit anyway" for this step
+        assert shown and TEMP_PASSWORD in shown[0] and "abstecken" in shown[0]
+    finally:
+        window.delete_page.running_view.stop()   # the run is over: closing works again
     event = QCloseEvent()
     window.closeEvent(event)
     assert event.isAccepted()
@@ -1052,11 +1052,77 @@ def test_a_wrong_password_is_explained(page, monkeypatch):
 
     state = _unlock_setup(page, monkeypatch,
                           result=UnlockResult(False, "wrong_password", "refused"))
-    page.show_result(_hw_outcome(EraseReport("refused", "locked")))
+    ssd = show_ssd(page)
+    page._remember_refusal(ssd, "locked")
+    page.show_result(_hw_outcome(EraseReport("refused", "locked"), device=ssd))
     page.result_view.unlock_button.click()
     text, kind = state["messages"][0]
     assert "passt nicht" in text and kind == "warning"
-    assert page.result_view.unlock_button.isVisible()
+    # No second try for this disk in this session: every try costs an attempt.
+    assert not page.result_view.unlock_button.isVisible()
+    page.show_result(_hw_outcome(EraseReport("refused", "locked"), device=ssd))
+    assert not page.result_view.unlock_button.isVisible()
+    page.unlock_disk(ssd)
+    assert state["started"] == [ssd] and len(state["asked"]) == 1
+    page.result_view.next_button.click()
+    page.set_devices([make_device("F:", 1), ssd])
+    page.select_device(ssd)
+    assert not page.unlock_link.isVisible()
+    other = sata_ssd(index=3, serial="OTHER-0001")
+    page.show_result(_hw_outcome(EraseReport("refused", "locked"), device=other))
+    assert page.result_view.unlock_button.isVisible()  # another disk may still try
+
+
+def test_a_drive_with_someone_elses_password_offers_unlock_and_overwrite(page, monkeypatch):
+    from wipe.hardware_erase import EraseReport
+
+    _unlock_setup(page, monkeypatch)
+    page.show_result(_hw_outcome(EraseReport("refused", "has_password")))
+    view = page.result_view
+    assert view.unlock_button.isVisible()
+    assert view.overwrite_button.isVisible()   # unlocked until it is replugged: writable
+    assert "Passwort" in view.summary_rows()["Grund"]
+    ssd = show_ssd(page)
+    page._remember_refusal(ssd, "has_password")
+    page.result_view.next_button.click()
+    page.set_devices([make_device("F:", 1), ssd])
+    page.select_device(ssd)
+    assert page.unlock_link.isVisible() and not page.hardware_card.isVisible()
+
+
+def test_window_cannot_close_while_a_disk_is_being_unlocked(qtbot, app_config, gui_reset,
+                                                             monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+
+    import gui.app_window as app_window
+    import gui.pages.delete_page as delete_page
+
+    monkeypatch.setattr(delete_page, "list_devices", lambda: [])
+    shown, asked = [], []
+    monkeypatch.setattr(app_window, "show_message",
+                        lambda parent, title, text, kind="info": shown.append(text))
+    monkeypatch.setattr(app_window, "ask_yes_no", lambda *a, **k: asked.append(a) or True)
+    window = app_window.AppWindow(app_config)
+    qtbot.addWidget(window)
+
+    class Running:
+        def isRunning(self):  # noqa: N802
+            return True
+
+        def wait(self, _ms=0):
+            raise AssertionError("closing must not wait for the unlock")
+
+    window.delete_page.unlock_worker = Running()
+    try:
+        event = QCloseEvent()
+        window.closeEvent(event)
+        assert not event.isAccepted()
+        assert asked == [] and shown and "entsperrt" in shown[0]
+    finally:
+        window.delete_page.unlock_worker = None
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert event.isAccepted()
 
 
 def test_a_locked_disk_can_be_unlocked_from_the_selection(page, monkeypatch):

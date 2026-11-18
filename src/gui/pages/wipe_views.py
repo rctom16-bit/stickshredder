@@ -473,6 +473,7 @@ class WipeOutcome:
     chain_text: str = ""
     hardware_erase: bool = False      # the hardware erase (Beta) was chosen
     hardware: object | None = None    # wipe.hardware_erase.EraseReport from the worker
+    unlock_allowed: bool = True       # False after a wrong password for this disk
 
     def options(self) -> WipeOptions:
         return WipeOptions(method_key=self.method_key, custom_passes=self.custom_passes,
@@ -629,19 +630,24 @@ class ResultView(QWidget):
 
         note = {"limited": tr("result.note_limited"),
                 "failed": tr("result.note_failed")}.get(status, "")
-        locked = hardware == "refused" and getattr(outcome.hardware, "reason", "") == "locked"
+        reason = getattr(outcome.hardware, "reason", "") if hardware == "refused" else ""
+        locked = reason == "locked"
+        foreign = reason == "has_password"
         password = hardware == "failed" and getattr(outcome.hardware, "password_may_be_set", False)
         if locked:
             note = tr("result.note_hw_locked")
+        elif foreign:
+            note = tr("result.note_hw_has_password")
         elif hardware == "refused":
             note = tr("result.note_hw_refused")
         elif password:
             note = tr("result.note_hw_failed", password=TEMP_PASSWORD)
         self.note_label.setText(note)
         self.note_card.setVisible(bool(note))
-        # A locked drive takes no writes: unlock it first.
+        # A locked drive takes no writes: unlock it first. One with a password
+        # that is still unlocked can be overwritten until it is replugged.
         self.overwrite_button.setVisible(hardware in ("refused", "failed") and not locked)
-        self.unlock_button.setVisible(locked or password)
+        self.unlock_button.setVisible((locked or foreign or password) and outcome.unlock_allowed)
         self.unlock_button.setEnabled(True)
 
         payload = outcome.payload

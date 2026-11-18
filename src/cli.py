@@ -430,6 +430,12 @@ _HARDWARE_REFUSAL = {
         "Das Laufwerk ist mit einem Passwort gesperrt. / The drive is locked with "
         "a password."
     ),
+    "has_password": (
+        "Das Laufwerk hat bereits ein Passwort (nicht von dieser Löschung). Stammt es "
+        "von einer abgebrochenen Hardware-Löschung: 'stickshredder unlock'. / The drive "
+        "already has a password (not from this erase). If it is left from an interrupted "
+        "hardware erase: 'stickshredder unlock'."
+    ),
     "error": (
         "Das Laufwerk konnte nicht abgefragt werden. / The drive could not be asked."
     ),

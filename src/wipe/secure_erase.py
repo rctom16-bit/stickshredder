@@ -78,7 +78,7 @@ _CLEANUP_TIMEOUT_SECONDS = 30
 class SecureEraseResult:
     success: bool
     method: str         # "ata-secure-erase" | "ata-enhanced" | "unsupported"
-                        # | "frozen" | "locked" | "error"
+                        # | "frozen" | "locked" | "has_password" | "error"
     supported: bool
     frozen: bool
     duration_seconds: float
@@ -263,6 +263,13 @@ def secure_erase_supported(handle: int) -> SecureEraseResult:
                 success=False, method="locked",
                 supported=True, frozen=False, start=start,
             )
+        if identify.security_enabled:
+            # A password is set but the drive is unlocked (until it is
+            # powered off): not ours to overwrite.
+            return _result(
+                success=False, method="has_password",
+                supported=True, frozen=False, start=start,
+            )
 
         enhanced = bool(identify.enhanced_erase_supported)
         method = "ata-enhanced" if enhanced else "ata-secure-erase"
@@ -340,6 +347,12 @@ def secure_erase(
             _log("secure_erase: refusing — drive is SECURITY locked")
             return _result(
                 success=False, method="locked",
+                supported=True, frozen=False, start=start,
+            )
+        if identify.security_enabled:
+            _log("secure_erase: refusing — drive already has a password")
+            return _result(
+                success=False, method="has_password",
                 supported=True, frozen=False, start=start,
             )
 
@@ -440,6 +453,12 @@ def unlock_drive(handle: int, *, password: str = DEFAULT_PASSWORD) -> UnlockResu
             timeout_seconds=_CLEANUP_TIMEOUT_SECONDS,
         )
         if res is None or not res.success:
+            if not identify.security_locked:
+                # Unlocked with a password set: DISABLE PASSWORD was the only
+                # check of the password, and the drive refused it.
+                _log("unlock_drive: SECURITY DISABLE PASSWORD refused (wrong password?)")
+                return UnlockResult(False, "wrong_password",
+                                    "the drive did not accept the password")
             return UnlockResult(False, "error", "SECURITY DISABLE PASSWORD failed")
         check = passthrough.ata_identify(handle)
         if check is None or check.security_enabled:

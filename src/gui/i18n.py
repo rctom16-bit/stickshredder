@@ -453,6 +453,26 @@ STRINGS: dict[str, tuple[str, str]] = {
                          "The SSD is locked with a password."),
     "hw.reason.error": ("Die SSD konnte nicht abgefragt werden.",
                         "The SSD could not be asked."),
+    "hw.reason.has_password": (
+        "Die SSD hat schon ein Passwort, das nicht von dieser Löschung stammt. Ist es von "
+        "einer abgebrochenen Hardware-Löschung übrig, kann StickShredder es entfernen.",
+        "The SSD already has a password that is not from this erase. If it is left from "
+        "an interrupted hardware erase, StickShredder can remove it.",
+    ),
+    "hw.short.has_password": ("die SSD hat schon ein Passwort", "the SSD already has a password"),
+    "result.note_hw_has_password": (
+        "Der Datenträger ist unverändert. Entferne zuerst das Passwort (falls es von "
+        "StickShredder stammt) oder überschreibe ihn stattdessen.",
+        "The disk is unchanged. Remove the password first (if it is StickShredder's) or "
+        "overwrite it instead.",
+    ),
+    "msg.unlocking_title": ("SSD wird entsperrt", "Unlocking the SSD"),
+    "msg.unlocking_text": (
+        "Die SSD wird gerade entsperrt. Das dauert nur Sekunden — bitte warten, dann "
+        "kannst du StickShredder beenden.",
+        "The SSD is being unlocked. That takes only seconds — please wait, then you can "
+        "quit StickShredder.",
+    ),
     "result.title.hw_refused": ("Hardware-Löschung nicht möglich — {target} ist unverändert",
                                 "Hardware erase not possible — {target} is unchanged"),
     "row.hardware": ("Hardware-Löschung", "Hardware erase"),

@@ -318,6 +318,7 @@ def test_secure_erase_prefers_the_enhanced_erase_when_the_drive_offers_it():
     (_drive_status("unsupported", supported=False,
                    error="NVMe disk on port driver 'iaStorVD'"), ["storahci", "iaStorVD"]),
     (_drive_status("unsupported", supported=False), ["keine Hardware-Löschung"]),
+    (_drive_status("has_password"), ["bereits ein Passwort", "stickshredder unlock"]),
 ])
 def test_secure_erase_refusal_stops_before_any_write(capsys, status, words):
     args = cli.build_parser().parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])

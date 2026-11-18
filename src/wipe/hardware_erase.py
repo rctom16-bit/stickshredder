@@ -54,7 +54,7 @@ ES_SYSTEM_REQUIRED = 0x00000001
 
 @dataclass(frozen=True)
 class Refusal:
-    reason: str      # no_path | unsupported | frozen | locked | error
+    reason: str      # no_path | unsupported | frozen | locked | has_password | error
     detail: str      # English, for the audit log and the CLI
 
 
@@ -99,6 +99,9 @@ def check_ready(status: secure_erase.SecureEraseResult) -> Refusal | None:
         return Refusal("frozen", "the drive is SECURITY FROZEN (locked by the PC's firmware)")
     if status.method == "locked":
         return Refusal("locked", "the drive is locked with an ATA password")
+    if status.method == "has_password":
+        return Refusal("has_password",
+                       "the drive already has an ATA password (set before this erase)")
     if status.method == "error":
         return Refusal("error", status.error or "the drive could not be asked")
     if status.error:  # wipe.transport found no drive-command path for this disk
@@ -204,7 +207,8 @@ def run(
         report = EraseReport("erased", method=erase.method,
                              duration_seconds=erase.duration_seconds,
                              estimated_minutes=minutes)
-    elif erase is not None and erase.method in ("unsupported", "frozen", "locked"):
+    elif erase is not None and erase.method in ("unsupported", "frozen", "locked",
+                                                "has_password"):
         # The drive refused at the last re-check: no erase command was sent.
         refused = check_ready(erase)
         report = EraseReport("refused", refused.reason, detail=refused.detail)
