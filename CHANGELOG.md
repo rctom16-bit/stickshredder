@@ -120,7 +120,23 @@ prepared in June was never released; its work is part of 2.0.)
   NVMe disk.
 - Missing administrator rights are named as such when a volume cannot be
   opened (Win32 error 5).
-<!-- wave-5 polish -->
+- **The device list is fast again** (about 1 s instead of about 5 s per
+  drive). BitLocker is now detected without administrator rights.
+- `list` counts disks, not drive letters.
+- **Volumes without a drive letter, or mounted in a folder,** are dismounted
+  and locked too before a wipe, like lettered volumes.
+- **Reformat after wipe** waits until the drive is released. A failed reformat
+  never changes the wipe result or the certificate.
+- **SSD or USB stick with protection class 3:** the Löschen page, the CLI and
+  the certificate say that overwriting cannot reach the reserve areas and that
+  the medium has to be destroyed physically — also after a hardware erase.
+- The certificate's QR code scans reliably (modules at least 0.5 mm), and its
+  sections are no longer split across pages.
+- **BitLocker disks can be wiped in the CLI as in the GUI,** with a warning
+  that all data will be irrevocably deleted.
+- The demo result shows the device name.
+- The certificate says „aufgebaut nach DIN 66399 / ISO 21964“ and „nicht von
+  DEKRA, DIN oder einer anderen Stelle zertifiziert“.
 
 ### Removed
 
