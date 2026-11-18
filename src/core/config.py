@@ -59,6 +59,10 @@ class AppConfig:
     cert_output_dir: str = str(DEFAULT_CERT_OUTPUT)
     cert_language: str = "de"
     show_ssd_warning: bool = True
+    # GUI appearance: "system" follows Windows, "light"/"dark" override it.
+    theme: str = "system"
+    # GUI language ("de" | "en"); the certificate language is separate.
+    ui_language: str = "de"
 
     def save(self) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)

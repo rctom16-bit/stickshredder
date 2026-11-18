@@ -122,27 +122,26 @@ def main() -> int:
     from core.config import APP_VERSION
     app.setApplicationVersion(APP_VERSION)
 
-    # Apply stylesheet
-    from gui.styles import APP_STYLESHEET
-    app.setStyleSheet(APP_STYLESHEET)
-
     # Load config
     from core.config import AppConfig
     config = AppConfig.load()
 
+    # Design „Signal“: bundled fonts, light/dark palette (follows Windows
+    # unless the user picked one), UI language from the settings.
+    from gui import i18n
+    from gui.theme import ThemeManager, load_fonts
+    app.setStyle("Fusion")
+    i18n.set_language(config.ui_language)
+    theme = ThemeManager(app, config.theme, load_fonts())
+    theme.apply()
+
     # Show admin warning in GUI if not elevated
     if not is_admin():
-        QMessageBox.warning(
-            None,
-            "Administrator Privileges Required",
-            "StickShredder is not running as Administrator.\n\n"
-            "Raw disk access and device wiping require elevated privileges.\n"
-            "Please restart the application as Administrator.",
-        )
+        QMessageBox.warning(None, i18n.tr("admin.title"), i18n.tr("admin.text"))
 
     # Create and show main window
-    from gui.main_window import MainWindow
-    window = MainWindow(config)
+    from gui.app_window import AppWindow
+    window = AppWindow(config, theme)
     window.show()
 
     return app.exec()
