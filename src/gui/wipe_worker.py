@@ -383,8 +383,8 @@ class WipeWorker(QThread):
                     )
                     # Wipe + verify done: let go of the volumes before any
                     # reformat (which needs the disk free).
-                    release_volumes(volume_locks)
-                    volume_locks = []
+                    locks, volume_locks = volume_locks, []
+                    release_volumes(locks)
 
                     if not wipe_result.success:
                         raise RuntimeError(
@@ -590,8 +590,8 @@ class WipeWorker(QThread):
                     except OSError:
                         pass
                     close_drive(handle)
-                release_volumes(volume_locks)
-                volume_locks = []
+                locks, volume_locks = volume_locks, []
+                release_volumes(locks)
                 # Clean up demo temp file
                 if demo_file_path is not None:
                     try:

@@ -544,7 +544,10 @@ def release_volumes(handles: list[int]) -> None:
         except Exception:  # noqa: BLE001 — releasing must never raise
             pass
     if handles:
-        audit_log(f"Released {len(handles)} volume lock(s)")
+        try:
+            audit_log(f"Released {len(handles)} volume lock(s)")
+        except Exception:  # noqa: BLE001 — a locked/full log must not break release
+            pass
 
 
 # ── Safety gate before writing ─────────────────────────────────────────
@@ -632,5 +635,8 @@ def prepare_target(device: DeviceInfo) -> list[int]:
                 f"{letter} konnte nicht ausgehängt werden / "
                 f"could not be dismounted: {exc}"
             ) from exc
+        except BaseException:
+            release_volumes(locks)
+            raise
     audit_log(f"Target verified, dismounted and locked: {device.device_id}")
     return locks

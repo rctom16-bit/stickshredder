@@ -512,3 +512,35 @@ def test_handle_probe_survives_non_ascii_output(monkeypatch):
     monkeypatch.setattr(device_mod.subprocess, "run",
                         _run_emitting(b"explorer.exe pid: 42 \x81 F:\\Users\r\n"))
     assert device_mod._check_active_processes("F:") is True
+
+
+def test_release_volumes_survives_a_failing_log(monkeypatch):
+    """Review 1.1.2: a failing audit log must not stop the release."""
+    import wipe.device as device_mod
+    closed = []
+
+    def broken_log(*_a, **_k):
+        raise OSError("log locked")
+
+    monkeypatch.setattr(device_mod, "audit_log", broken_log)
+    monkeypatch.setattr(device_mod.kernel32, "CloseHandle", lambda h: closed.append(h) or True)
+    device_mod.release_volumes([101, 102])  # must not raise
+    assert closed == [101, 102]
+
+
+def test_prepare_target_releases_locks_on_any_error(gate, monkeypatch):
+    """Review 1.1.2: not only OSError — any failure releases taken locks."""
+    import wipe.device as device_mod
+    from wipe.device import prepare_target
+    released = []
+    monkeypatch.setattr(device_mod, "release_volumes", lambda hs: released.extend(hs))
+
+    def dismount(letter):
+        if letter == "G:":
+            raise ValueError("ctypes argument error")
+        return 101
+
+    gate.side_effect = dismount
+    with pytest.raises(ValueError):
+        prepare_target(_usb_target())
+    assert released == [101]

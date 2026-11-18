@@ -461,8 +461,8 @@ def cmd_wipe(args: argparse.Namespace) -> None:
             verify_mode=verify_mode,
             verify_progress_callback=verify_cb,
         )
-        release_volumes(volume_locks)
-        volume_locks = []
+        locks, volume_locks = volume_locks, []
+        release_volumes(locks)
 
         # Clear the progress bar line (covers both wipe and verify bars)
         sys.stdout.write("\r" + " " * shutil.get_terminal_size((80, 24)).columns + "\r")
