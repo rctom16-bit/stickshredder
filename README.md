@@ -279,8 +279,10 @@ Only runs on real hardware are listed. If you test StickShredder on your own dev
 
 | Device | Connection | Method | Version | Date | Result |
 |---|---|---|---|---|---|
-| SanDisk "3.2Gen1" USB stick, 64 GB | USB | zeros, 1 pass + full verification | 1.1.2 | 18.11.2026 | **passed** — 62 GB in 94 min, verification passed, certificate issued |
-| SATA SSD, connected directly | SATA | hardware erase (Beta) + 1 pass of zeros + full verification | 2.0.0 | — | **not yet tested** |
+| SanDisk "3.2Gen1" USB stick, 64 GB | USB 3.2 | zeros, 1 pass + sample verification | 1.1.2 | 18.11.2026 | **passed** — 62 GB in 94 min, verification passed, certificate issued |
+| Intenso M.2 PCIe NVMe SSD, 250 GB, in a Realtek RTL9210B USB enclosure | USB (UAS) | zeros, 1 pass + sample verification + reformat to NTFS | 2.0 pre-release | 18.11.2026 | **passed** — 250 GB in 34 min (~120 MB/s sustained), verification passed, certificate issued. Earlier attempts stopped at 99.99 % because of the read-only UEFI_NTFS partition Rufus had created; fixed by removing the partition table before the first write |
+| WD Blue SN550 NVMe SSD, 500 GB, in the same enclosure | USB (UAS) | zeros, 1 pass + sample verification + reformat to NTFS | 2.0 pre-release | 18.11.2026 | **passed** — 500 GB in 18 min (~460 MB/s), 3 volumes (1 with a drive letter, 2 without) locked, verification passed, certificate issued |
+| SATA SSD, connected directly | SATA | hardware erase (Beta) + 1 pass of zeros + full verification | 2.0.0 | — | **not yet tested on real hardware** |
 
 ---
 
@@ -593,8 +595,10 @@ Hier stehen nur Läufe auf echter Hardware. Wenn Sie StickShredder an Ihrem eige
 
 | Gerät | Anschluss | Verfahren | Version | Datum | Ergebnis |
 |---|---|---|---|---|---|
-| SanDisk „3.2Gen1“ USB-Stick, 64 GB | USB | 1× Nullen + vollständige Prüfung | 1.1.2 | 18.11.2026 | **bestanden** — 62 GB in 94 Min., Prüfung bestanden, Zertifikat erstellt |
-| SATA-SSD, direkt angeschlossen | SATA | Hardware-Löschung (Beta) + 1× Nullen + vollständige Prüfung | 2.0.0 | — | **noch nicht getestet** |
+| SanDisk „3.2Gen1“ USB-Stick, 64 GB | USB 3.2 | 1× Nullen + Stichprobenprüfung | 1.1.2 | 18.11.2026 | **bestanden** — 62 GB in 94 Min., Prüfung bestanden, Zertifikat erstellt |
+| Intenso M.2 PCIe NVMe SSD, 250 GB, im USB-Gehäuse mit Realtek RTL9210B | USB (UAS) | 1× Nullen + Stichprobenprüfung + Formatieren als NTFS | 2.0 Vorabversion | 18.11.2026 | **bestanden** — 250 GB in 34 Min. (~120 MB/s durchgehend), Prüfung bestanden, Zertifikat erstellt. Frühere Versuche blieben bei 99,99 % stehen, weil Rufus eine schreibgeschützte UEFI_NTFS-Partition angelegt hatte; behoben, indem die Partitionstabelle vor dem ersten Schreiben entfernt wird |
+| WD Blue SN550 NVMe SSD, 500 GB, im selben Gehäuse | USB (UAS) | 1× Nullen + Stichprobenprüfung + Formatieren als NTFS | 2.0 Vorabversion | 18.11.2026 | **bestanden** — 500 GB in 18 Min. (~460 MB/s), 3 Volumes (1 mit Laufwerksbuchstabe, 2 ohne) gesperrt, Prüfung bestanden, Zertifikat erstellt |
+| SATA-SSD, direkt angeschlossen | SATA | Hardware-Löschung (Beta) + 1× Nullen + vollständige Prüfung | 2.0.0 | — | **noch nicht auf echter Hardware getestet** |
 
 ---
 

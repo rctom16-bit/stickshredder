@@ -46,6 +46,7 @@ from gui.i18n import (
     language,
     language_half,
     pick,
+    serial_label,
     tr,
 )
 from gui.pages.wipe_views import (
@@ -227,8 +228,7 @@ class DiskRow(QFrame):
             self._chips.append(chip)
             layout.addWidget(chip)
         tip = []
-        if device.serial_number:
-            tip.append(tr("serial", serial=device.serial_number))
+        tip.append(serial_label(device.serial_number))
         tip.append(device.device_id)
         self.setToolTip(" · ".join(tip))
         self.setAccessibleName(f"{first_letter(device)} {device.model} {size}")
@@ -693,8 +693,7 @@ class DeletePage(QWidget):
             set_prop(self.hero_letter, "muted", "false")
             self.hero_title.setText(device.model)
             media = self._media_type(device)
-            serial = (tr("serial", serial=device.serial_number) if device.serial_number
-                      else tr("no_serial"))
+            serial = serial_label(device.serial_number)
             self.hero_subtitle.setText(
                 f"{html.escape(type_text(device, media))} · "
                 f"{html.escape(fmt_size(device.capacity_bytes))} · "

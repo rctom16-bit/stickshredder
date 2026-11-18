@@ -12,6 +12,7 @@ from PySide6.QtCore import QThread, Signal
 
 from core.config import AppConfig, get_next_cert_number, load_signing_key
 from core.log import audit_log, history_result_value, log_wipe_to_csv
+from core.serial import history_serial, serial_for_filename
 from cert.payload import result_status
 from cert.generator import CertificateData, generate_certificate, format_capacity
 from cert.signing import SigningKeyError
@@ -428,7 +429,8 @@ class WipeWorker(QThread):
                     # prepare_target() already dismounted every volume, giving us exclusive
                     # access to the media.
                     audit_log(
-                        f"Physical-drive lock skipped for {device.drive_letter} "
+                        f"Physical-drive lock skipped for "
+                        f"{device.drive_letter or device.device_id} "
                         f"(dismount already exclusive)"
                     )
 
@@ -616,14 +618,10 @@ class WipeWorker(QThread):
                                 wipe_result.format_result = format_result
                             except Exception:
                                 pass
-                            if format_result is not None and not format_result.success:
-                                audit_log(
-                                    f"Reformat failed for {device.drive_letter}: "
-                                    f"{format_result.error_message}"
-                                )
+                            # reformat_drive logs its start, success and failure.
                         else:
                             audit_log(
-                                f"Reformat skipped for {device.drive_letter}: "
+                                f"Reformat skipped for {device.device_id}: "
                                 f"could not parse PhysicalDrive number from "
                                 f"{device.device_id!r}"
                             )
@@ -751,7 +749,7 @@ class WipeWorker(QThread):
                 history_row = {
                     "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "device_model": device.model,
-                    "serial_number": device.serial_number,
+                    "serial_number": history_serial(device.serial_number),
                     "capacity_bytes": device.capacity_bytes,
                     "method": wipe_result.method_name,
                     "passes": wipe_result.passes,
@@ -772,7 +770,7 @@ class WipeWorker(QThread):
 
                 cert_filename = (
                     f"SS-{cert_number:06d}_"
-                    f"{device.serial_number or 'unknown'}_"
+                    f"{serial_for_filename(device.serial_number)}_"
                     f"{datetime.now().strftime('%Y%m%d')}.pdf"
                 )
                 cert_dir = self.config.cert_output_dir

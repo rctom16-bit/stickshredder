@@ -7,6 +7,8 @@ follow the language too (decimal comma in German).
 
 from __future__ import annotations
 
+from core.serial import serial_text
+
 LANGUAGES = ("de", "en")
 
 _language = "de"
@@ -103,7 +105,6 @@ STRINGS: dict[str, tuple[str, str]] = {
     "type.demo": ("Demo-Datenträger", "Demo disk"),
     "type.disk": ("{connection}-Datenträger", "{connection} disk"),
     "serial": ("SN {serial}", "SN {serial}"),
-    "no_serial": ("ohne Seriennummer", "no serial number"),
     "cert_preview.eyebrow": ("Vorschau Löschzertifikat", "Certificate preview"),
     "cert_preview.title": ("Nr. {n} · {model}", "No. {n} · {model}"),
     "cert_preview.qr": ("QR-Code", "QR code"),
@@ -813,6 +814,11 @@ def tr(key: str, **values) -> str:
         return key
     text = pair[1] if _language == "en" else pair[0]
     return text.format(**values) if values else text
+
+
+def serial_label(serial) -> str:
+    """"SN <serial>", or "SN not reported by the device" (empty / all zeros)."""
+    return tr("serial", serial=serial_text(serial, _language))
 
 
 def pick(de: str, en: str) -> str:

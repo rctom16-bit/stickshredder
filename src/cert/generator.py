@@ -32,6 +32,7 @@ from cert.payload import RESULT_LABELS, build_payload, nist_category, result_sta
 from core.config import APP_VERSION
 from core.log import audit_log
 from core.protection_class import class3_note
+from core.serial import serial_text
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
     from cert.signing import SigningKey
@@ -1010,7 +1011,7 @@ def generate_certificate(
         ),
         (
             _label("Seriennummer", "Serial Number", lang),
-            _safe(data.serial_number),
+            _safe(serial_text(data.serial_number, lang)),
         ),
         (
             _label("Kapazität", "Capacity", lang),

@@ -239,3 +239,47 @@ def test_reformat_progress_callback():
     ]
     indices = [messages.index(m) for m in order]
     assert indices == sorted(indices)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Audit log (2.0 polish): start, success and failure with the reason
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _logged(run) -> list[str]:
+    with patch.object(fmt, "audit_log") as log:
+        run()
+    return [c.args[0] for c in log.call_args_list]
+
+
+def test_reformat_logs_start_and_success():
+    with patch.object(fmt.subprocess, "run", return_value=_ok_proc()):
+        lines = _logged(lambda: reformat_drive(3, "ntfs", "Daten", "GPT"))
+    assert len(lines) == 2
+    start, done = lines
+    assert "Reformat started" in start and "\\\\.\\PhysicalDrive3," in start
+    assert "NTFS" in start and "'Daten'" in start and "GPT" in start
+    assert "Reformat succeeded" in done and "NTFS" in done and "PhysicalDrive3" in done
+
+
+def test_reformat_logs_failure_with_reason():
+    proc = _fail_proc(stderr="Clear-Disk : Access denied")
+    with patch.object(fmt.subprocess, "run", return_value=proc):
+        lines = _logged(lambda: reformat_drive(4, "exfat"))
+    assert "Reformat started" in lines[0]
+    assert "Reformat failed" in lines[-1]
+    assert "PhysicalDrive4" in lines[-1] and "Access denied" in lines[-1]
+
+
+def test_reformat_logs_failure_for_bad_input():
+    lines = _logged(lambda: reformat_drive(2, "hfs+"))
+    assert "Reformat failed" in lines[-1] and "hfs+" in lines[-1]
+
+
+def test_reformat_logs_a_crash_and_still_raises():
+    with patch.object(fmt.subprocess, "run", side_effect=RuntimeError("boom")):
+        with patch.object(fmt, "audit_log") as log:
+            with pytest.raises(RuntimeError):
+                reformat_drive(5)
+    assert "Reformat failed" in log.call_args.args[0]
+    assert "boom" in log.call_args.args[0]
