@@ -4,7 +4,7 @@ All notable changes to StickShredder are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] - unreleased
+## [2.0.0] - 2026-11-18
 
 Driven by the community feedback on 1.x: a certificate you can check, honest
 results, internal disks, hidden areas and bad sectors, and a hardware erase
@@ -126,6 +126,12 @@ prepared in June was never released; its work is part of 2.0.)
   no partition can block writes or be mounted again during the wipe. If
   Windows still blocks a write, the message says so plainly. Affects 1.1.x as
   well.
+- Serial numbers that are empty or all zeros (many USB enclosures, e.g.
+  Realtek RTL9210B, report `0000000000000000`) show „vom Gerät nicht
+  geliefert“ / "not reported by the device" in the window, the certificate,
+  the history and the CLI. The signed certificate keeps the raw value.
+- "Reformat after wipe" writes its start, success or failure (with the
+  reason) to the audit log.
 
 - A USB enclosure using UAS (e.g. Realtek RTL9210B) was shown as an internal
   NVMe disk.
