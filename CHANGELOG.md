@@ -113,8 +113,19 @@ prepared in June was never released; its work is part of 2.0.)
   anything is set; after the drive rejects the unlock password the unlock is
   not offered again for that disk in the session; the window cannot be closed
   while an SSD erases itself or is being unlocked.
+- A disk is refused when one of its volumes also lies on another disk (it is
+  never force-dismounted), and the disk's identity is checked again after its
+  volumes are locked, so a stick swapped at the last moment is never wiped.
 
 ### Fixed
+
+- **Disks made with Rufus can be wiped.** Rufus adds a small read-only
+  partition („UEFI_NTFS“) at the end of the disk; Windows refused every write
+  into it, so wipes stopped at about 99.99 % (no certificate was issued).
+  StickShredder now removes the partition table right before overwriting, so
+  no partition can block writes or be mounted again during the wipe. If
+  Windows still blocks a write, the message says so plainly. Affects 1.1.x as
+  well.
 
 - A USB enclosure using UAS (e.g. Realtek RTL9210B) was shown as an internal
   NVMe disk.
