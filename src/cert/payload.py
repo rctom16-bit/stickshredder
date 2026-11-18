@@ -65,14 +65,18 @@ def result_status(data: CertificateData) -> ResultStatus:
     """Three-level result: ``failed`` > ``limited`` > ``ok``.
 
     * ``failed``  – the wipe failed, or a verification ran and failed.
-    * ``limited`` – unwritable sectors remain, or a hidden area (HPA/DCO) was
-      found and not removed.
-    * ``ok``      – otherwise (a skipped verification is not a failure).
+    * ``limited`` – unwritable sectors remain, a hidden area (HPA/DCO) was
+      found and not removed, or a hardware erase was not verified (only the
+      drive's own report backs it).
+    * ``ok``      – otherwise (a skipped verification of an overwrite is not
+      a failure).
     """
     if not data.wipe_success:
         return "failed"
     if _verify_mode(data) != "none" and not data.verification_passed:
         return "failed"
+    if data.secure_erase_used and _verify_mode(data) == "none":
+        return "limited"
     if data.bad_sector_count > 0:
         return "limited"
     if _hidden_area_found(data) and not data.hidden_area_removed:

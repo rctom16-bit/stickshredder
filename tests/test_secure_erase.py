@@ -384,3 +384,295 @@ def test_erase_issues_no_command_when_the_transport_check_raises(
     assert result.success is False
     mock_identify.assert_not_called()
     mock_send.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# The drive's own time estimate (IDENTIFY words 89/90) — shown while it erases
+# ─────────────────────────────────────────────────────────────────────
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_supported_reports_the_normal_erase_time_estimate(mock_identify, mock_send):
+    mock_identify.return_value = make_identify(erase_unit_minutes=4)
+    result = secure_erase_supported(HANDLE)
+    assert result.method == "ata-secure-erase"
+    assert result.estimated_minutes == 4
+    mock_send.assert_not_called()
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_supported_reports_the_enhanced_erase_time_estimate(mock_identify, mock_send):
+    words = [0] * 256
+    words[90] = 3  # word 90: enhanced erase time, 2-minute units -> 6 minutes
+    identify = make_identify(enhanced_erase_supported=True, erase_unit_minutes=4)
+    identify.raw_words = tuple(words)
+    mock_identify.return_value = identify
+    result = secure_erase_supported(HANDLE)
+    assert result.method == "ata-enhanced"
+    assert result.estimated_minutes == 6
+    mock_send.assert_not_called()
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_supported_without_estimate_reports_zero(mock_identify, mock_send):
+    mock_identify.return_value = make_identify(security_frozen=True, erase_unit_minutes=4)
+    assert secure_erase_supported(HANDLE).estimated_minutes == 0
+    mock_identify.return_value = make_identify(enhanced_erase_supported=True)
+    assert secure_erase_supported(HANDLE).estimated_minutes == 0  # no word 90
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Review fixes: a locked drive, and the temporary password after a failure
+# ─────────────────────────────────────────────────────────────────────
+
+def _commands(mock_send):
+    return [c.kwargs["command"] for c in mock_send.call_args_list]
+
+
+F1, F2, F3, F4, F6 = 0xF1, 0xF2, 0xF3, 0xF4, 0xF6
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_supported_reports_a_locked_drive(mock_identify, mock_send):
+    mock_identify.return_value = make_identify(security_enabled=True, security_locked=True)
+    result = secure_erase_supported(HANDLE)
+    assert result.method == "locked"
+    assert result.supported is True and result.frozen is False
+    mock_send.assert_not_called()
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_failed_erase_unit_removes_the_password_again(mock_identify, mock_send):
+    mock_identify.side_effect = [make_identify(), make_identify(security_enabled=True),
+                                 make_identify(security_enabled=False)]
+    mock_send.side_effect = [ok_command(), ok_command(), fail_command(), ok_command()]
+    result = secure_erase(HANDLE)
+    assert result.success is False and result.method == "error"
+    assert _commands(mock_send) == [F1, F3, F4, F6]
+    assert mock_send.call_args_list[3].kwargs["data_out"] == _build_security_block("StickShredder")
+    assert result.password_set is False
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_failed_prepare_removes_the_password_again(mock_identify, mock_send):
+    mock_identify.side_effect = [make_identify(), make_identify(security_enabled=True),
+                                 make_identify(security_enabled=False)]
+    mock_send.side_effect = [ok_command(), fail_command(), ok_command()]
+    result = secure_erase(HANDLE)
+    assert _commands(mock_send) == [F1, F3, F6]
+    assert result.password_set is False
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_password_stays_reported_when_the_drive_is_already_locked(mock_identify, mock_send):
+    mock_identify.side_effect = [make_identify(),
+                                 make_identify(security_enabled=True, security_locked=True)]
+    mock_send.side_effect = [ok_command(), ok_command(), fail_command()]
+    result = secure_erase(HANDLE)
+    assert _commands(mock_send) == [F1, F3, F4]   # no DISABLE PASSWORD on a locked drive
+    assert result.password_set is True
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_password_stays_reported_when_disable_fails(mock_identify, mock_send):
+    mock_identify.side_effect = [make_identify(), make_identify(security_enabled=True)]
+    mock_send.side_effect = [ok_command(), ok_command(), fail_command(), fail_command()]
+    result = secure_erase(HANDLE)
+    assert _commands(mock_send) == [F1, F3, F4, F6]
+    assert result.password_set is True
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_password_stays_reported_when_the_drive_cannot_be_asked(mock_identify, mock_send):
+    mock_identify.side_effect = [make_identify(), None]
+    mock_send.side_effect = [ok_command(), ok_command(), fail_command()]
+    result = secure_erase(HANDLE)
+    assert _commands(mock_send) == [F1, F3, F4]
+    assert result.password_set is True
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_failed_set_password_without_a_password_on_the_drive(mock_identify, mock_send):
+    mock_identify.side_effect = [make_identify(), make_identify(security_enabled=False)]
+    mock_send.side_effect = [fail_command()]
+    result = secure_erase(HANDLE)
+    assert _commands(mock_send) == [F1]
+    assert result.password_set is False
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_exception_after_the_password_was_sent_still_cleans_up(mock_identify, mock_send):
+    mock_identify.side_effect = [make_identify(), make_identify(security_enabled=True),
+                                 make_identify(security_enabled=False)]
+    mock_send.side_effect = [ok_command(), RuntimeError("bridge gone"), ok_command()]
+    result = secure_erase(HANDLE)
+    assert result.method == "error"
+    assert _commands(mock_send) == [F1, F3, F6]
+    assert result.password_set is False
+
+
+@patch("wipe.passthrough.send_ata_command", side_effect=ok_command)
+@patch("wipe.passthrough.ata_identify")
+def test_successful_erase_leaves_no_password(mock_identify, mock_send):
+    mock_identify.return_value = make_identify()
+    assert secure_erase(HANDLE).password_set is False
+
+
+@patch("wipe.passthrough.ata_identify")
+def test_a_broken_audit_log_does_not_turn_success_into_failure(mock_identify, monkeypatch):
+    import wipe.secure_erase as module
+
+    def broken(_message):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(module, "audit_log", broken)
+    mock_identify.return_value = make_identify()
+    with patch("wipe.passthrough.send_ata_command", side_effect=ok_command):
+        result = secure_erase(HANDLE)
+    assert result.success is True
+
+
+# ─────────────────────────────────────────────────────────────────────
+# unlock_drive — "Gesperrte Platte entsperren": one try, temporary password only
+# ─────────────────────────────────────────────────────────────────────
+
+from wipe.secure_erase import unlock_drive  # noqa: E402
+
+
+def _expired_identify():
+    identify = make_identify(security_enabled=True, security_locked=True)
+    words = [0] * 256
+    words[128] = 0x0017  # supported, enabled, locked, attempt count expired
+    identify.raw_words = tuple(words)
+    return identify
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_unlock_unlocks_and_removes_the_password(mock_identify, mock_send):
+    mock_identify.side_effect = [make_identify(security_enabled=True, security_locked=True),
+                                 make_identify(security_enabled=False)]
+    mock_send.side_effect = [ok_command(), ok_command()]
+    result = unlock_drive(HANDLE)
+    assert (result.success, result.state) == (True, "unlocked")
+    assert _commands(mock_send) == [F2, F6]
+    for call in mock_send.call_args_list:
+        assert call.kwargs["data_out"] == _build_security_block("StickShredder")
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_unlock_of_an_unlocked_drive_only_removes_the_password(mock_identify, mock_send):
+    mock_identify.side_effect = [make_identify(security_enabled=True),
+                                 make_identify(security_enabled=False)]
+    mock_send.side_effect = [ok_command()]
+    result = unlock_drive(HANDLE)
+    assert (result.success, result.state) == (True, "unlocked")
+    assert _commands(mock_send) == [F6]
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_unlock_of_a_drive_without_password_does_nothing(mock_identify, mock_send):
+    mock_identify.return_value = make_identify(security_enabled=False)
+    result = unlock_drive(HANDLE)
+    assert (result.success, result.state) == (True, "no_password")
+    mock_send.assert_not_called()
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_unlock_tries_the_password_only_once(mock_identify, mock_send):
+    mock_identify.return_value = make_identify(security_enabled=True, security_locked=True)
+    mock_send.side_effect = [fail_command()]
+    result = unlock_drive(HANDLE)
+    assert (result.success, result.state) == (False, "wrong_password")
+    assert _commands(mock_send) == [F2]
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_unlock_refuses_a_frozen_drive(mock_identify, mock_send):
+    mock_identify.return_value = make_identify(security_enabled=True, security_frozen=True)
+    result = unlock_drive(HANDLE)
+    assert (result.success, result.state) == (False, "frozen")
+    mock_send.assert_not_called()
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_unlock_refuses_when_the_attempts_are_used_up(mock_identify, mock_send):
+    mock_identify.return_value = _expired_identify()
+    result = unlock_drive(HANDLE)
+    assert (result.success, result.state) == (False, "expired")
+    mock_send.assert_not_called()
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_unlock_reports_an_error_when_the_password_stays(mock_identify, mock_send):
+    mock_identify.side_effect = [make_identify(security_enabled=True, security_locked=True),
+                                 make_identify(security_enabled=True)]
+    mock_send.side_effect = [ok_command(), ok_command()]
+    result = unlock_drive(HANDLE)
+    assert (result.success, result.state) == (False, "error")
+
+
+@pytest.mark.parametrize("transport", ["sat", "nvme", "none"])
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_unlock_sends_nothing_unless_the_transport_is_ata(
+        mock_identify, mock_send, monkeypatch, transport):
+    _transport_is(monkeypatch, transport, "USB device is not an ATA drive")
+    result = unlock_drive(HANDLE)
+    assert (result.success, result.state) == (False, "unsupported")
+    assert "not an ATA drive" in result.error
+    mock_identify.assert_not_called()
+    mock_send.assert_not_called()
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_supported_refuses_a_drive_that_already_has_a_password(mock_identify, mock_send):
+    mock_identify.return_value = make_identify(security_enabled=True)  # set, not locked
+    result = secure_erase_supported(HANDLE)
+    assert result.method == "has_password"
+    assert result.supported is True and result.frozen is False
+    mock_send.assert_not_called()
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_erase_refuses_a_drive_that_already_has_a_password(mock_identify, mock_send):
+    mock_identify.return_value = make_identify(security_enabled=True)
+    result = secure_erase(HANDLE)
+    assert result.success is False and result.method == "has_password"
+    assert result.password_set is False
+    mock_send.assert_not_called()   # no SET PASSWORD over someone else's
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_unlock_of_an_unlocked_drive_with_a_foreign_password(mock_identify, mock_send):
+    mock_identify.return_value = make_identify(security_enabled=True)
+    mock_send.side_effect = [fail_command()]
+    result = unlock_drive(HANDLE)
+    assert (result.success, result.state) == (False, "wrong_password")
+    assert _commands(mock_send) == [F6]
+
+
+@patch("wipe.passthrough.ata_identify", side_effect=RuntimeError("boom"))
+def test_unlock_never_raises(mock_identify):
+    result = unlock_drive(HANDLE)
+    assert (result.success, result.state) == (False, "error")
+    assert "boom" in result.error

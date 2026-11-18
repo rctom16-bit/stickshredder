@@ -63,6 +63,9 @@ class AppConfig:
     theme: str = "system"
     # GUI language ("de" | "en"); the certificate language is separate.
     ui_language: str = "de"
+    # „Beta-Funktionen aktivieren“: the hardware erase (Beta) is only offered
+    # when this is on (spec G2). Off by default.
+    beta_features: bool = False
 
     def save(self) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)

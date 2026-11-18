@@ -1,14 +1,18 @@
-"""The two later states of the Löschen page: wipe running and result."""
+"""The later states of the Löschen page (wipe running, result) and the extra
+confirmation for the hardware erase (Beta)."""
 
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QDialog,
     QGridLayout,
     QHBoxLayout,
     QPushButton,
@@ -25,14 +29,17 @@ from gui.widgets import (
     StripedProgressBar,
     Tile,
     make_card,
+    make_chip,
     make_label,
     set_prop,
     uppercase,
 )
 from gui.wipe_options import FS_NAMES, WipeOptions, fs_label, method_short
 from wipe.device import DeviceInfo
+from wipe.hardware_erase import TEMP_PASSWORD
 
 STEPS = ("write", "verify", "format", "cert")
+HARDWARE_STEPS = ("hardware",) + STEPS
 MAX_LOG_LINES = 300
 
 
@@ -59,6 +66,21 @@ def open_path(path: str) -> bool:
         return False
 
 
+def erase_method_text(method: str) -> str:
+    """„Enhanced Secure Erase“ / „Secure Erase“ for a drive's erase variant."""
+    key = f"hw.method.{method}"
+    text = tr(key)
+    return text if text != key else tr("hw.method.ata-secure-erase")
+
+
+def elapsed_text(seconds: float) -> str:
+    """Stopwatch text: ``0:42``, ``12:05``, ``1:02:09``."""
+    total = max(0, int(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
 def read_certificate(cert_path: str) -> tuple[str, dict | None, str]:
     """Token, signed payload and key fingerprint of a certificate PDF."""
     from cert.verify_cert import extract_token_from_pdf, verify_token
@@ -74,6 +96,95 @@ def read_certificate(cert_path: str) -> tuple[str, dict | None, str]:
     if outcome.status == "invalid":
         return token, None, ""
     return token, outcome.payload, outcome.fingerprint or ""
+
+
+# -- Hardware erase (Beta): extra confirmation -------------------------------------------
+
+
+class HardwareEraseDialog(QDialog):
+    """Asked once per disk when the hardware erase is chosen (spec G2)."""
+
+    _POINTS = ("hwdlg.beta", "hwdlg.frozen", "hwdlg.awake")
+
+    def __init__(self, device: DeviceInfo, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(tr("hwdlg.window_title"))
+        self.setMinimumWidth(640)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(28, 24, 28, 24)
+        root.setSpacing(12)
+
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        self.title_label = make_label(tr("hwdlg.title"), "dialog-title", wrap=True)
+        head.addWidget(self.title_label, 1)
+        head.addWidget(make_chip(tr("note.beta"), "accent"), 0, Qt.AlignmentFlag.AlignVCenter)
+        root.addLayout(head)
+        letters = device.disk_letters or ([device.drive_letter] if device.drive_letter else [])
+        parts = [", ".join(letters)] if letters else []
+        parts.append(device.model or device.device_id)
+        if device.serial_number:
+            parts.append(tr("serial", serial=device.serial_number))
+        parts.append(fmt_size(device.capacity_bytes))
+        self.disk_label = make_label(" · ".join(parts), "muted", wrap=True)
+        root.addWidget(self.disk_label)
+        self.text_label = make_label(tr("hwdlg.text"), "dialog-disk", wrap=True)
+        root.addWidget(self.text_label)
+
+        box = make_card("tile")
+        points = QVBoxLayout(box)
+        points.setContentsMargins(16, 14, 16, 14)
+        points.setSpacing(8)
+        self.point_labels = []
+        for key in self._POINTS:
+            label = make_label(f"• {tr(key)}", "warning" if key == "hwdlg.beta" else "hint",
+                               wrap=True)
+            self.point_labels.append(label)
+            points.addWidget(label)
+        self.password_label = make_label(f"• {tr('hwdlg.password', password=TEMP_PASSWORD)}",
+                                         "hint", wrap=True)
+        self.password_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.point_labels.append(self.password_label)
+        points.addWidget(self.password_label)
+        root.addWidget(box)
+
+        self.untested_check = QCheckBox(tr("hwdlg.check"))
+        self.untested_check.toggled.connect(self._sync)
+        root.addWidget(self.untested_check)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.cancel_button = QPushButton(tr("common.cancel"))
+        self.cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.cancel_button.clicked.connect(self.reject)
+        self.cancel_button.setDefault(True)  # Enter cancels; confirming takes a click
+        self.confirm_button = QPushButton(tr("hwdlg.confirm"))
+        self.confirm_button.setProperty("variant", "accent")
+        self.confirm_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.confirm_button.setAutoDefault(False)
+        self.confirm_button.clicked.connect(self.accept)
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.confirm_button)
+        root.addLayout(buttons)
+        self._sync()
+
+    def _sync(self) -> None:
+        self.confirm_button.setEnabled(self.untested_check.isChecked())
+
+    def accept(self) -> None:
+        if not self.untested_check.isChecked():
+            return
+        super().accept()
+
+    def full_text(self) -> str:
+        parts = [self.title_label.text(), self.disk_label.text(), self.text_label.text()]
+        parts += [label.text() for label in self.point_labels]
+        parts.append(self.untested_check.text())
+        return "\n".join(parts)
+
+
+def confirm_hardware_erase(parent: QWidget | None, device: DeviceInfo) -> bool:
+    return HardwareEraseDialog(device, parent).exec() == QDialog.DialogCode.Accepted
 
 
 # -- Running ---------------------------------------------------------------------------
@@ -181,19 +292,95 @@ class RunningView(QWidget):
 
         self._log_labels = []
         self._device: DeviceInfo | None = None
+        self._steps = STEPS
+        # Hardware erase (Beta): while the drive erases itself there is no
+        # percentage; the big number shows the elapsed time instead.
+        self._erase: tuple[str, int] | None = None
+        self._erase_started = 0.0
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.setInterval(1000)
+        self._elapsed_timer.timeout.connect(self._tick_elapsed)
         self.retranslate()
 
     # -- content --
 
     def retranslate(self) -> None:
-        self.stepper.set_labels([tr(f"step.{s}") for s in STEPS])
-        self.speed_tile.set_label(tr("tile.speed"))
-        self.eta_tile.set_label(tr("tile.eta"))
-        self.bad_tile.set_label(tr("tile.bad"))
+        self.stepper.set_labels([tr(f"step.{s}") for s in self._steps])
+        self._label_tiles()
         self.cancel_button.setText(tr("running.cancel"))
         self.protocol_title.setText(tr("protocol.title"))
         if self._device is not None:
             self._set_header(self._device)
+
+    def _label_tiles(self) -> None:
+        if self._erase is None:
+            self.speed_tile.set_label(tr("tile.speed"))
+            self.eta_tile.set_label(tr("tile.eta"))
+            self.bad_tile.set_label(tr("tile.bad"))
+            return
+        method, minutes = self._erase
+        self.speed_tile.set_label(tr("tile.hw_method"))
+        short = f"hw.method_short.{method}"
+        self.speed_tile.set_values(tr(short) if tr(short) != short
+                                   else tr("hw.method_short.ata-secure-erase"))
+        self.eta_tile.set_label(tr("tile.hw_estimate"))
+        self.eta_tile.set_values(tr("hw.estimate_value", n=minutes) if minutes
+                                 else tr("hw.estimate_none"))
+        self.bad_tile.set_label(tr("tile.hw_password"))
+        self.bad_tile.set_values(TEMP_PASSWORD, tr("hw.password_note"))
+        self.hint_label.setText(tr("running.hint_hw_erase"))
+
+    def step_names(self) -> tuple[str, ...]:
+        return self._steps
+
+    def set_step(self, name: str, state: str, fraction: float | None = None) -> None:
+        """Set a step by name (the hardware erase adds one in front)."""
+        if name in self._steps:
+            self.stepper.set_step(self._steps.index(name), state, fraction)
+
+    def is_erasing(self) -> bool:
+        return self._erase is not None
+
+    def begin_hardware_erase(self, method: str, estimated_minutes: int) -> None:
+        """The drive erases itself: elapsed time, its estimate, no cancel."""
+        self._erase = (method, int(estimated_minutes or 0))
+        self._erase_started = time.monotonic()
+        self.set_step("hardware", "active", 0.5)
+        self.percent_unit.hide()
+        self.update_elapsed(0)
+        self._elapsed_timer.start()
+        self.progress_bar.setValue(1.0)  # full and moving: no percentage known
+        self.progress_bar.setTone("accent")
+        self.progress_bar.setAnimated(True)
+        self._label_tiles()
+        self.cancel_button.hide()  # the drive's own erase cannot be stopped
+
+    def end_hardware_erase(self, erased: bool) -> None:
+        """The drive is done; on success the overwrite with its percentage follows."""
+        self._elapsed_timer.stop()
+        if self._erase is None:
+            return
+        self._erase = None
+        self.cancel_button.show()
+        if not erased:
+            self.progress_bar.setAnimated(False)
+            return
+        self.set_step("hardware", "done")
+        self.set_step("write", "active", 0.0)
+        self._label_tiles()
+        self.percent_unit.show()
+        self.set_percent(0.0)
+        self.speed_tile.set_values("–")
+        self.eta_tile.set_values(tr("eta.calculating"))
+        self.bad_tile.set_values("—", tr("tile.bad_pending"))
+        self.hint_label.setText(tr("running.hint_write"))
+        self.cancel_button.setEnabled(True)
+
+    def update_elapsed(self, seconds: float) -> None:
+        self.percent_label.setText(elapsed_text(seconds))
+
+    def _tick_elapsed(self) -> None:
+        self.update_elapsed(time.monotonic() - self._erase_started)
 
     def _set_header(self, device: DeviceInfo) -> None:
         self.title_label.setText(tr("running.title", target=target_name(device)))
@@ -202,28 +389,41 @@ class RunningView(QWidget):
     def start(self, device: DeviceInfo, options: WipeOptions) -> None:
         self._device = device
         self._set_header(device)
+        self._elapsed_timer.stop()
+        self._erase = None
+        self._steps = HARDWARE_STEPS if options.hardware_erase else STEPS
+        self.stepper.set_labels([tr(f"step.{s}") for s in self._steps])
         self.stepper.reset()
         self.stepper.set_step(0, "active", 0.0)
         if options.verify_mode == "none":
-            self.stepper.set_step(1, "skipped")
+            self.set_step("verify", "skipped")
+        self._label_tiles()
+        self.percent_unit.show()
         self.set_percent(0.0)
         self.progress_bar.setTone("accent")
         self.progress_bar.setAnimated(True)
         self.speed_tile.set_values("–")
         self.eta_tile.set_values(tr("eta.calculating"))
         self.bad_tile.set_values("—", tr("tile.bad_pending"))
-        self.hint_label.setText(tr("running.hint_write"))
+        self.hint_label.setText(tr("running.hint_hw_check" if options.hardware_erase
+                                   else "running.hint_write"))
         self.stall_banner.hide()
+        self.cancel_button.show()
         self.cancel_button.setEnabled(True)
         for label in self._log_labels:
             label.deleteLater()
         self._log_labels = []
 
     def stop(self) -> None:
+        """The run is over (the drive's erase, if any, has returned)."""
+        self._elapsed_timer.stop()
+        self._erase = None
         self.progress_bar.setAnimated(False)
         self.cancel_button.setEnabled(False)
 
     def set_percent(self, fraction: float) -> None:
+        if self._erase is not None:
+            return  # the elapsed time stays while the drive erases itself
         fraction = max(0.0, min(1.0, fraction))
         self.percent_label.setText(str(int(fraction * 100 + 1e-6)))
         self.progress_bar.setValue(fraction)
@@ -271,17 +471,27 @@ class WipeOutcome:
     cancelled: bool = False
     history_entry: int = 0
     chain_text: str = ""
+    hardware_erase: bool = False      # the hardware erase (Beta) was chosen
+    hardware: object | None = None    # wipe.hardware_erase.EraseReport from the worker
+    unlock_allowed: bool = True       # False after a wrong password for this disk
 
     def options(self) -> WipeOptions:
         return WipeOptions(method_key=self.method_key, custom_passes=self.custom_passes,
                            custom_pattern=self.custom_pattern, verify_mode=self.verify_mode,
-                           reformat=self.reformat, reformat_label=self.reformat_label)
+                           reformat=self.reformat, reformat_label=self.reformat_label,
+                           hardware_erase=self.hardware_erase)
+
+    def hardware_status(self) -> str:
+        """erased | refused | failed, or "" without a hardware erase."""
+        return str(getattr(self.hardware, "status", "") or "")
 
 
 class ResultView(QWidget):
     """Three-level result with summary, actions and the signed certificate."""
 
     next_requested = Signal()
+    overwrite_requested = Signal()
+    unlock_requested = Signal(object)  # the disk to unlock
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -326,7 +536,16 @@ class ResultView(QWidget):
         self.open_folder_button.setProperty("variant", "large")
         self.next_button = QPushButton()
         self.next_button.setProperty("variant", "large")
-        for button in (self.open_cert_button, self.open_folder_button, self.next_button):
+        # After a refused or failed hardware erase: overwrite the disk instead.
+        self.overwrite_button = QPushButton()
+        self.overwrite_button.setProperty("variant", "accent")
+        self.overwrite_button.hide()
+        # The drive may still have (or is locked by) the temporary password.
+        self.unlock_button = QPushButton()
+        self.unlock_button.setProperty("variant", "large")
+        self.unlock_button.hide()
+        for button in (self.unlock_button, self.overwrite_button, self.open_cert_button,
+                       self.open_folder_button, self.next_button):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             actions.addWidget(button)
         actions.addStretch(1)
@@ -334,6 +553,8 @@ class ResultView(QWidget):
         self.open_cert_button.clicked.connect(self._open_cert)
         self.open_folder_button.clicked.connect(self._open_folder)
         self.next_button.clicked.connect(self.next_requested)
+        self.overwrite_button.clicked.connect(self.overwrite_requested)
+        self.unlock_button.clicked.connect(self._request_unlock)
 
         self.note_card = make_card("note")
         note = QVBoxLayout(self.note_card)
@@ -381,6 +602,8 @@ class ResultView(QWidget):
         self.open_cert_button.setText(tr("result.open_cert"))
         self.open_folder_button.setText(tr("result.open_folder"))
         self.next_button.setText(tr("result.next"))
+        self.overwrite_button.setText(tr("result.overwrite_instead"))
+        self.unlock_button.setText(tr("unlock.button"))
         self.cert_eyebrow.setText(tr("result.cert_eyebrow"))
         self.qr_text_label.setText(tr("result.qr_text"))
         if self._outcome is not None:
@@ -395,14 +618,37 @@ class ResultView(QWidget):
         set_prop(self.eyebrow_label, "tone", status)
         self.icon.set_tone(status)
         self.eyebrow_label.setText(tr(f"result.eyebrow.{status}"))
-        title_key = "result.title.cancelled" if outcome.cancelled else f"result.title.{status}"
+        hardware = outcome.hardware_status()
+        if outcome.cancelled:
+            title_key = "result.title.cancelled"
+        elif hardware == "refused":
+            title_key = "result.title.hw_refused"
+        else:
+            title_key = f"result.title.{status}"
         self.title_label.setText(tr(title_key, target=target))
         self._fill_rows(outcome, status)
 
         note = {"limited": tr("result.note_limited"),
                 "failed": tr("result.note_failed")}.get(status, "")
+        reason = getattr(outcome.hardware, "reason", "") if hardware == "refused" else ""
+        locked = reason == "locked"
+        foreign = reason == "has_password"
+        password = hardware == "failed" and getattr(outcome.hardware, "password_may_be_set", False)
+        if locked:
+            note = tr("result.note_hw_locked")
+        elif foreign:
+            note = tr("result.note_hw_has_password")
+        elif hardware == "refused":
+            note = tr("result.note_hw_refused")
+        elif password:
+            note = tr("result.note_hw_failed", password=TEMP_PASSWORD)
         self.note_label.setText(note)
         self.note_card.setVisible(bool(note))
+        # A locked drive takes no writes: unlock it first. One with a password
+        # that is still unlocked can be overwritten until it is replugged.
+        self.overwrite_button.setVisible(hardware in ("refused", "failed") and not locked)
+        self.unlock_button.setVisible((locked or foreign or password) and outcome.unlock_allowed)
+        self.unlock_button.setEnabled(True)
 
         payload = outcome.payload
         self.cert_eyebrow.setText(tr("result.cert_eyebrow" if payload
@@ -413,7 +659,8 @@ class ResultView(QWidget):
             self.cert_number_label.setText(tr("result.cert_number", n=f"{int(payload.get('n', 0)):04d}"))
             lines = [
                 f"{payload.get('dm') or outcome.device.model} · SN {payload.get('ds') or '—'}",
-                tr("result.cert_class", level=payload.get("sl") or "—", category="Clear"),
+                tr("result.cert_class", level=payload.get("sl") or "—",
+                   category="Purge" if hardware == "erased" else "Clear"),
             ]
             if payload.get("op"):
                 lines.append(tr("result.operator", name=payload["op"]))
@@ -443,6 +690,20 @@ class ResultView(QWidget):
         self._row_labels = []
         payload = outcome.payload or {}
         rows: list[tuple[str, str]] = []
+        hardware = outcome.hardware_status()
+        report = outcome.hardware
+        if hardware == "erased":
+            rows.append((tr("row.hardware"), tr(
+                "val.hw_erased", method=erase_method_text(getattr(report, "method", "")),
+                time=fmt_duration(getattr(report, "duration_seconds", 0.0)))))
+        elif hardware == "refused":
+            reason = f"hw.reason.{getattr(report, 'reason', '')}"
+            rows.append((tr("row.hardware"), tr("val.hw_refused")))
+            rows.append((tr("row.reason"), tr(reason) if tr(reason) != reason
+                         else tr("hw.reason.error")))
+        elif hardware == "failed":
+            rows.append((tr("row.hardware"), tr("val.hw_failed",
+                                                detail=getattr(report, "detail", "") or "—")))
         if payload:
             passes = int(payload.get("p", 1) or 1)
             passes_text = tr("val.pass_one") if passes == 1 else tr("val.passes", n=passes)
@@ -459,7 +720,7 @@ class ResultView(QWidget):
             rows.append((tr("row.bad"), tr("val.bad_none") if bad == 0
                          else tr("val.bad_some", n=bad)))
             rows.append((tr("row.formatted"), self._format_text(outcome, status)))
-        if outcome.error:
+        if outcome.error and hardware not in ("refused", "failed"):
             rows.append((tr("row.error"), outcome.error))
         rows.append((tr("row.duration"), fmt_duration(outcome.duration_seconds)))
         for index, (key, value) in enumerate(rows):
@@ -481,6 +742,14 @@ class ResultView(QWidget):
             return tr("val.not_formatted")
         return tr("val.formatted", fs=FS_NAMES[outcome.reformat],
                   label=fs_label(outcome.options()))
+
+    def _request_unlock(self) -> None:
+        if self._outcome is not None:
+            self.unlock_requested.emit(self._outcome.device)
+
+    def unlock_done(self) -> None:
+        """The disk was unlocked: nothing left to unlock here."""
+        self.unlock_button.hide()
 
     def summary_rows(self) -> dict[str, str]:
         return {key.text(): value.text() for key, value in self._row_labels}

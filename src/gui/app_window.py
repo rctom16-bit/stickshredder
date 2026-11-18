@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 from core.config import APP_VERSION
 from core.log import audit_log
 from gui import i18n, theme
-from gui.dialogs import ask_ok_cancel, ask_yes_no
+from gui.dialogs import ask_ok_cancel, ask_yes_no, show_message
 from gui.i18n import tr
 from gui.pages.certificates_page import CertificatesPage
 from gui.pages.delete_page import DeletePage
@@ -37,6 +37,7 @@ from gui.pages.options_page import OptionsPage
 from gui.theme import ThemeManager
 from gui.widgets import Logo, RailButton, icon_pixmap
 from gui.wipe_options import WipeOptions
+from wipe.hardware_erase import TEMP_PASSWORD
 
 WM_DEVICECHANGE = 0x0219
 _DEVICE_EVENTS = {
@@ -288,11 +289,23 @@ class AppWindow(QMainWindow):
     # ── Closing ───────────────────────────────────────────────────────────────
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        worker = self.delete_page.worker
-        if self.delete_page.is_busy():
+        page = self.delete_page
+        if page.running_view.is_erasing():
+            # The drive's own erase cannot be stopped; quitting changes nothing
+            # for the drive but hides what happens to it.
+            show_message(self, tr("msg.erasing_title"),
+                         tr("msg.erasing_text", password=TEMP_PASSWORD), kind="warning")
+            event.ignore()
+            return
+        if page.is_unlocking():
+            # Seconds only; quitting now would hide whether it worked.
+            show_message(self, tr("msg.unlocking_title"), tr("msg.unlocking_text"),
+                         kind="info")
+            event.ignore()
+            return
+        if page.is_busy():
             if not ask_yes_no(self, tr("msg.busy_title"), tr("msg.busy_text")):
                 event.ignore()
                 return
-            worker.cancel()
-            worker.wait(5000)
+            page.stop_work()
         event.accept()
