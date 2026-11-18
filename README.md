@@ -67,6 +67,8 @@ All screenshots show demo data (made-up disks, a demo wipe of a 10 MB file).
 
 More: [`docs/screenshots/v2/`](docs/screenshots/v2/) (every page in light and dark).
 
+**Sample certificates** (signed, demo data, made with a throwaway key — so they check as *signature valid, key unknown*): [German](docs/examples/sample-certificate-2.0-de.pdf) · [German/English](docs/examples/sample-certificate-2.0-de-en.pdf).
+
 ---
 
 ## Download and install
@@ -218,11 +220,11 @@ StickShredder pre-selects a procedure by device type (Windows' media and bus typ
 |---|---|---|---|
 | Hard disk (HDD) | 1 pass of zeros + full verification | Clear | — |
 | SSD | 1 pass of zeros + full verification | Clear | overwriting cannot reach the SSD's spare areas; protection class 3: destroy physically |
-| SATA SSD connected directly, **Beta features on (GUI)** | hardware erase (Beta), then 1 pass of zeros + full verification | Purge | the hardware erase is recommended but you still have to choose and confirm it |
+| SATA SSD connected directly, **Beta features on (GUI)** | hardware erase (Beta), then 1 pass of zeros + full verification | Purge | the hardware erase is recommended but you still have to choose and confirm it; protection class 3: destroy physically anyway (whether the drive's erase reached the spare areas cannot be checked from outside) |
 | USB stick / SD card | 1 pass of zeros + full verification | Clear | protection class 3: destroy physically |
 | Unknown type | 1 pass of zeros + full verification | Clear | residual data possible if it is an SSD or stick |
 
-The protection class (Schutzklasse) is yours to choose — default 2. In the CLI the recommendation never includes the hardware erase; `wipe` without `--method` uses the recommended overwrite and says so.
+The protection class (Schutzklasse) is yours to choose — default 2. **Protection class 3 on an SSD, USB stick or SD card:** the Löschen page, the CLI and the certificate say that overwriting cannot reach the reserve areas and that the medium has to be destroyed physically — also after a hardware erase. In the CLI the recommendation never includes the hardware erase; `wipe` without `--method` uses the recommended overwrite and says so.
 
 ---
 
@@ -285,7 +287,7 @@ Only runs on real hardware are listed. If you test StickShredder on your own dev
 ## Limitations
 
 - **SSDs and flash (USB sticks, SD cards) — wear levelling.** The controller decides where data physically goes and keeps spare and remapped cells the host cannot address. Overwriting reaches every *addressable* sector; it cannot reach those reserve areas. Full verification proves what the disk *returns*, not what is in every flash cell. Only a working hardware erase reaches them — and it is Beta, SATA-only and untested.
-- **Protection class 3 (very high protection needs):** physically destroy the data carrier (e.g. a DIN 66399-certified shredding service). StickShredder warns about this for SSDs, sticks and SD cards.
+- **Protection class 3 (very high protection needs):** physically destroy the data carrier (e.g. a DIN 66399-certified shredding service). For SSDs, sticks and SD cards StickShredder says so on the Löschen page, in the CLI and on the certificate — also after a hardware erase, because whether the drive's own erase reached the reserve areas cannot be checked from outside.
 - **Hidden areas (HPA/DCO)** are detected on directly connected SATA disks only, and never removed. Like every drive command, this check is not yet tested on real hardware.
 - **Drive commands only on Microsoft's in-box drivers** (`storahci`, `stornvme`); disks behind vendor RAID/VMD drivers get overwrite only.
 - **A working disk is needed.** A broken or read-only disk cannot be wiped by software.
@@ -298,13 +300,13 @@ More detail: [docs/SECURITY.md](docs/SECURITY.md), [docs/DIN66399-INFO.md](docs/
 ## FAQ
 
 ### Can I wipe the Windows disk by accident?
-No. StickShredder refuses the physical disk Windows is installed on — including every other partition on it (e.g. a `D:` next to `C:`) — and every disk Windows reports as boot or system disk. If it cannot tell which disk that is, it refuses all internal disks. Right before writing it reads the disk again and refuses if serial number, model or size changed (e.g. a stick was swapped). It dismounts and locks the target disk's volumes and keeps them locked until the wipe and verification are done. A bootable USB installer stick is not a system disk and stays wipeable.
+No. StickShredder refuses the physical disk Windows is installed on — including every other partition on it (e.g. a `D:` next to `C:`) — and every disk Windows reports as boot or system disk. If it cannot tell which disk that is, it refuses all internal disks. Right before writing it reads the disk again and refuses if serial number, model or size changed (e.g. a stick was swapped). It dismounts and locks every volume of the target disk, with or without a drive letter (also volumes mounted in a folder), and keeps them locked until the wipe and verification are done. A bootable USB installer stick is not a system disk and stays wipeable.
 
 ### Do I need administrator rights?
 Yes — writing to a whole disk needs them. The window asks for elevation (UAC) at start. The CLI does not ask; `wipe` stops with a clear message if the terminal is not elevated.
 
 ### What about BitLocker?
-The disk list marks BitLocker-encrypted volumes with a *BitLocker* chip. The CLI refuses to wipe them ("Decrypt or remove BitLocker protection before wiping"). Detection is best effort (Windows' BitLocker interface, falling back to `manage-bde`) and only works for volumes with a drive letter.
+BitLocker-encrypted disks can be wiped. The disk list marks them with a *BitLocker* chip, and the GUI and the CLI warn that all data will be irrevocably deleted. Detection is best effort (Explorer's BitLocker state, which needs no administrator rights; as administrator, Windows' BitLocker interface as a fallback) and only works for volumes with a drive letter.
 
 ### Why does a wipe say "EINGESCHRÄNKT" (with limitations)?
 The wipe ran, but something could not be fully covered: sectors that could not be written (media errors), a hidden area (HPA/DCO) on the disk, or a hardware erase without verification. The certificate lists which. The CLI exits with code `3`.
@@ -374,6 +376,8 @@ Bug reports: open an issue with your Windows version, the StickShredder version,
 - [Lizenz](#lizenz)
 
 Screenshots: siehe [oben](#screenshots) und [`docs/screenshots/v2/`](docs/screenshots/v2/) (alle mit Demodaten).
+
+**Beispielzertifikate** (signiert, Demodaten, mit einem Wegwerf-Schlüssel erstellt — die Prüfung ergibt daher *Signatur gültig, Schlüssel unbekannt*): [Deutsch](docs/examples/sample-certificate-2.0-de.pdf) · [Deutsch/Englisch](docs/examples/sample-certificate-2.0-de-en.pdf).
 
 ---
 
@@ -530,11 +534,11 @@ StickShredder wählt das Verfahren nach Gerätetyp vor (Medien- und Bustyp laut 
 |---|---|---|---|
 | Festplatte (HDD) | 1× Nullen + vollständige Prüfung | Clear | — |
 | SSD | 1× Nullen + vollständige Prüfung | Clear | Überschreiben erreicht die Reserve-Bereiche der SSD nicht; Schutzklasse 3: physisch vernichten |
-| SATA-SSD direkt angeschlossen, **Beta-Funktionen an (Oberfläche)** | Hardware-Löschung (Beta), danach 1× Nullen + vollständige Prüfung | Purge | empfohlen, aber Sie müssen sie selbst wählen und bestätigen |
+| SATA-SSD direkt angeschlossen, **Beta-Funktionen an (Oberfläche)** | Hardware-Löschung (Beta), danach 1× Nullen + vollständige Prüfung | Purge | empfohlen, aber Sie müssen sie selbst wählen und bestätigen; Schutzklasse 3: trotzdem physisch vernichten (ob die Löschung der Platte die Reserve-Bereiche erreicht hat, lässt sich von außen nicht prüfen) |
 | USB-Stick / SD-Karte | 1× Nullen + vollständige Prüfung | Clear | Schutzklasse 3: physisch vernichten |
 | Typ unbekannt | 1× Nullen + vollständige Prüfung | Clear | bei einer SSD oder einem Stick sind Restdaten möglich |
 
-Die Schutzklasse legen Sie fest — Standard ist 2. In der Kommandozeile enthält die Empfehlung nie die Hardware-Löschung; `wipe` ohne `--method` nimmt das empfohlene Überschreiben und sagt das an.
+Die Schutzklasse legen Sie fest — Standard ist 2. **Schutzklasse 3 bei SSD, USB-Stick oder SD-Karte:** Seite Löschen, Kommandozeile und Zertifikat sagen, dass Überschreiben die Reserve-Bereiche nicht erreicht und der Datenträger physisch vernichtet werden muss — auch nach einer Hardware-Löschung. In der Kommandozeile enthält die Empfehlung nie die Hardware-Löschung; `wipe` ohne `--method` nimmt das empfohlene Überschreiben und sagt das an.
 
 ---
 
@@ -597,7 +601,7 @@ Hier stehen nur Läufe auf echter Hardware. Wenn Sie StickShredder an Ihrem eige
 ### Grenzen
 
 - **SSDs und Flash (USB-Sticks, SD-Karten) — Wear Leveling.** Der Controller entscheidet, wo Daten physisch landen, und hält Reserve- und umgelagerte Zellen vor, die der PC nicht ansprechen kann. Überschreiben erreicht jeden *adressierbaren* Sektor, diese Reserve-Bereiche aber nicht. Die vollständige Prüfung belegt, was die Platte *zurückliefert*, nicht den Inhalt jeder Flash-Zelle. Nur eine funktionierende Hardware-Löschung erreicht sie — und die ist Beta, nur SATA und ungetestet.
-- **Schutzklasse 3 (sehr hoher Schutzbedarf):** Datenträger physisch vernichten (z. B. über einen nach DIN 66399 zertifizierten Vernichtungsdienst). StickShredder weist bei SSDs, Sticks und SD-Karten darauf hin.
+- **Schutzklasse 3 (sehr hoher Schutzbedarf):** Datenträger physisch vernichten (z. B. über einen nach DIN 66399 zertifizierten Vernichtungsdienst). Bei SSDs, Sticks und SD-Karten sagt StickShredder das auf der Seite Löschen, in der Kommandozeile und auf dem Zertifikat — auch nach einer Hardware-Löschung, denn ob die Löschung der Platte die Reserve-Bereiche erreicht hat, lässt sich von außen nicht prüfen.
 - **Versteckte Bereiche (HPA/DCO)** werden nur bei direkt angeschlossenen SATA-Platten erkannt und nie entfernt. Wie alle Laufwerksbefehle ist diese Abfrage noch nicht auf echter Hardware getestet.
 - **Laufwerksbefehle nur über Microsofts eingebaute Treiber** (`storahci`, `stornvme`); Platten hinter RAID-/VMD-Treibern von Herstellern werden nur überschrieben.
 - **Die Platte muss funktionieren.** Eine defekte oder schreibgeschützte Platte kann Software nicht löschen.
@@ -610,13 +614,13 @@ Mehr dazu: [docs/SECURITY.md](docs/SECURITY.md), [docs/DIN66399-INFO.md](docs/DI
 ### Häufige Fragen
 
 #### Kann ich versehentlich die Windows-Platte löschen?
-Nein. StickShredder verweigert die physische Platte, auf der Windows installiert ist — samt aller weiteren Partitionen darauf (z. B. ein `D:` neben `C:`) — und jede Platte, die Windows als Boot- oder Systemplatte meldet. Kann es das nicht feststellen, verweigert es alle internen Platten. Unmittelbar vor dem Schreiben liest es die Platte erneut und bricht ab, wenn sich Seriennummer, Modell oder Größe geändert haben (z. B. Stick getauscht). Es hängt die Volumes der Zielplatte aus, sperrt sie und hält sie gesperrt, bis Löschen und Prüfung fertig sind. Ein bootfähiger USB-Installationsstick ist keine Systemplatte und bleibt löschbar.
+Nein. StickShredder verweigert die physische Platte, auf der Windows installiert ist — samt aller weiteren Partitionen darauf (z. B. ein `D:` neben `C:`) — und jede Platte, die Windows als Boot- oder Systemplatte meldet. Kann es das nicht feststellen, verweigert es alle internen Platten. Unmittelbar vor dem Schreiben liest es die Platte erneut und bricht ab, wenn sich Seriennummer, Modell oder Größe geändert haben (z. B. Stick getauscht). Es hängt jedes Volume der Zielplatte aus, mit oder ohne Laufwerksbuchstaben (auch in einen Ordner eingebundene), sperrt es und hält es gesperrt, bis Löschen und Prüfung fertig sind. Ein bootfähiger USB-Installationsstick ist keine Systemplatte und bleibt löschbar.
 
 #### Brauche ich Administratorrechte?
 Ja, ohne sie lässt sich keine ganze Platte beschreiben. Das Programmfenster fragt beim Start nach (UAC). Die Kommandozeile fragt nicht; `wipe` bricht in einem Terminal ohne Administratorrechte mit einer klaren Meldung ab.
 
 #### Was ist mit BitLocker?
-Die Plattenliste kennzeichnet BitLocker-verschlüsselte Volumes mit *BitLocker*. Die Kommandozeile verweigert das Löschen („Decrypt or remove BitLocker protection before wiping“). Die Erkennung ist nach bestem Bemühen (BitLocker-Schnittstelle von Windows, ersatzweise `manage-bde`) und klappt nur bei Volumes mit Laufwerksbuchstaben.
+BitLocker-verschlüsselte Platten lassen sich löschen. Die Plattenliste kennzeichnet sie mit *BitLocker*, und Oberfläche wie Kommandozeile warnen, dass alle Daten unwiderruflich gelöscht werden. Die Erkennung ist nach bestem Bemühen (BitLocker-Status des Explorers, ohne Administratorrechte; als Administrator ersatzweise die BitLocker-Schnittstelle von Windows) und klappt nur bei Volumes mit Laufwerksbuchstaben.
 
 #### Warum steht bei einer Löschung „EINGESCHRÄNKT“?
 Das Löschen lief, aber etwas ließ sich nicht vollständig abdecken: nicht beschreibbare Sektoren (Medienfehler), ein versteckter Bereich (HPA/DCO) oder eine Hardware-Löschung ohne Prüfung. Was genau, steht auf dem Zertifikat. Die Kommandozeile endet mit Exitcode `3`.
