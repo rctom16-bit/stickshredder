@@ -600,3 +600,110 @@ def test_worker_releases_the_gate_locks_before_reformatting(qtbot, app_config):
     assert seen_at_reformat == [[7, 9]]
     assert released == [7, 9]
     assert results == [(0, True)]
+
+
+# -- Partition table removed right before the first write ---------------------
+
+
+def _run_real_device_worker(qtbot, app_config, events, *, clear_ok=True, cancel=False):
+    """Run the worker on a fake real disk; every step is recorded in ``events``."""
+    from types import SimpleNamespace
+    from gui.wipe_worker import WipeWorker
+
+    def gate(device):
+        events.append("gate")
+        return [7, 8]
+
+    def opener(device_id):
+        events.append("open")
+        return 1
+
+    def clear(handle):
+        events.append(("clear", handle))
+        return clear_ok
+
+    def fake_execute(handle, *_a, **_k):
+        events.append(("write", handle))
+        return _ok_wipe_result()
+
+    no_hidden = SimpleNamespace(supported=False, hpa_present=False, dco_present=False,
+                                hpa_hidden_sectors=0, dco_hidden_sectors=0)
+    worker_box: list = []
+
+    def probe(handle):
+        if cancel:  # the user cancels while the disk is being looked at
+            worker_box[0].cancel()
+        return no_hidden
+
+    results: list[tuple[int, bool]] = []
+    with patch("gui.wipe_worker.prepare_target", side_effect=gate), \
+         patch("gui.wipe_worker.release_volumes",
+               side_effect=lambda locks: events.append(("release", list(locks)))), \
+         patch("gui.wipe_worker.open_physical_drive", side_effect=opener), \
+         patch("gui.wipe_worker.clear_partition_table", side_effect=clear), \
+         patch("gui.wipe_worker.get_drive_size", return_value=1024**2), \
+         patch("gui.wipe_worker.detect_hidden_areas", side_effect=probe), \
+         patch("gui.wipe_worker.close_drive"), \
+         patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"), \
+         patch("gui.wipe_worker.log_wipe_to_csv"), \
+         patch("gui.wipe_worker.get_next_cert_number", return_value=1), \
+         patch("gui.wipe_worker.audit_log"):
+        worker = WipeWorker(devices=[_gui_lock_test_device()],
+                            wipe_method=_gui_lock_test_method(fake_execute),
+                            config=app_config, verify_mode="none")
+        worker_box.append(worker)
+        worker.device_completed.connect(lambda i, ok, _p: results.append((i, ok)))
+        with qtbot.waitSignal(worker.all_completed, timeout=5000):
+            worker.start()
+        worker.wait(2000)
+    # The cleanup also hands over the (by then empty) rest of the locks.
+    events[:] = [e for e in events if e != ("release", [])]
+    return results
+
+
+def test_worker_removes_the_partition_table_after_the_gate_and_before_writing(
+        qtbot, app_config):
+    """A Rufus disk's read-only UEFI_NTFS partition blocks raw writes even
+    with every volume locked; the layout goes first, while the locks hold."""
+    events: list = []
+    results = _run_real_device_worker(qtbot, app_config, events)
+
+    assert events == ["gate", "open", ("clear", 1), ("write", 1), ("release", [7, 8])]
+    assert results == [(0, True)]
+
+
+def test_worker_wipes_on_when_the_partition_table_cannot_be_removed(qtbot, app_config):
+    events: list = []
+    results = _run_real_device_worker(qtbot, app_config, events, clear_ok=False)
+
+    assert events == ["gate", "open", ("clear", 1), ("write", 1), ("release", [7, 8])]
+    assert results == [(0, True)]
+
+
+def test_worker_cancelled_before_writing_keeps_the_partition_table(qtbot, app_config):
+    events: list = []
+    results = _run_real_device_worker(qtbot, app_config, events, cancel=True)
+
+    assert not any(isinstance(e, tuple) and e[0] in ("clear", "write") for e in events)
+    assert results == [(0, False)]
+
+
+def test_demo_wipe_never_removes_a_partition_table(qtbot, app_config, demo_device):
+    from gui.wipe_worker import WipeWorker
+    from wipe.methods import ZeroFill
+
+    clear = MagicMock(return_value=True)
+    with patch("gui.wipe_worker.clear_partition_table", clear), \
+         patch("gui.wipe_worker.create_demo_file", return_value="fake.bin"), \
+         patch("gui.wipe_worker.wipe_demo_file", return_value=_ok_wipe_result()), \
+         patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"), \
+         patch("gui.wipe_worker.log_wipe_to_csv"), \
+         patch("gui.wipe_worker.get_next_cert_number", return_value=1), \
+         patch("os.remove"):
+        worker = WipeWorker(devices=[demo_device], wipe_method=ZeroFill(),
+                            config=app_config, verify_mode="none")
+        with qtbot.waitSignal(worker.all_completed, timeout=5000):
+            worker.start()
+        worker.wait(2000)
+
+    clear.assert_not_called()

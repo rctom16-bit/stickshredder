@@ -107,7 +107,9 @@ def _profile_in_tmp(tmp_path, monkeypatch):
 _KERNEL32_MODULES = ("wipe.device", "wipe.methods", "wipe.passthrough", "wipe.verify",
                      "wipe.drive_probe")
 # Modules that send drive commands (firmware commands and storage queries).
-_DRIVE_COMMAND_MODULES = ("wipe.passthrough", "wipe.sat", "wipe.nvme", "wipe.transport")
+# wipe.device: the partition table is removed before every write.
+_DRIVE_COMMAND_MODULES = ("wipe.passthrough", "wipe.sat", "wipe.nvme", "wipe.transport",
+                          "wipe.device")
 _ERROR_ACCESS_DENIED = 5
 
 

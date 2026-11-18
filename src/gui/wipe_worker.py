@@ -17,6 +17,7 @@ from cert.generator import CertificateData, generate_certificate, format_capacit
 from cert.signing import SigningKeyError
 from wipe.device import (
     DeviceInfo,
+    clear_partition_table,
     prepare_target,
     release_volumes,
     open_physical_drive,
@@ -522,6 +523,12 @@ class WipeWorker(QThread):
                         self.status_message.emit(
                             f"Wiping {device.friendly_name} with {self.wipe_method.name}..."
                         )
+                        # A read-only partition (Rufus' UEFI_NTFS) blocks raw
+                        # writes even with its volume locked. Removing the
+                        # partition table lifts that; a failure is logged and
+                        # the wipe goes on. The hardware erase does this itself
+                        # once the drive has erased.
+                        clear_partition_table(handle)
                         wipe_result = self.wipe_method.execute(
                             handle,
                             drive_size,
