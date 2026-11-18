@@ -201,6 +201,22 @@ class TrustStore:
         self._save()
         return True
 
+    def rename(self, fingerprint: str, name: str) -> bool:
+        """Give a trusted key a new display name. Returns ``False`` if it is not trusted."""
+        entry = self._entries.get((fingerprint or "").strip().upper())
+        if entry is None:
+            return False
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("Name darf nicht leer sein / Name must not be empty")
+        entry["name"] = name
+        self._save()
+        return True
+
+    def entries(self) -> list[dict[str, str]]:
+        """Copies of the trusted keys (fingerprint, public_key, name, added), oldest first."""
+        return [dict(entry) for entry in self._entries.values()]
+
     def as_dict(self) -> dict[str, str]:
         """Fingerprint → display name, suitable for :func:`verify_token`."""
         return {fp: entry["name"] for fp, entry in self._entries.items()}

@@ -40,51 +40,57 @@ def test_rail_has_the_four_items_and_starts_on_delete(window):
     assert window.rail.width() == 88
 
 
-def test_keys_page_is_a_placeholder(qtbot, window):
-    qtbot.mouseClick(window.rail_buttons["keys"], Qt.MouseButton.LeftButton)
-    assert window.pages.currentWidget() is window.keys_page
-    assert window.keys_page.title_label.text() == "Kommt in Kürze"
+@pytest.mark.parametrize("key, attr", [
+    ("certificates", "certificates_page"),
+    ("keys", "keys_page"),
+    ("options", "options_page"),
+    ("delete", "delete_page"),
+])
+def test_every_rail_item_opens_its_page(qtbot, window, key, attr):
+    qtbot.mouseClick(window.rail_buttons["options"], Qt.MouseButton.LeftButton)
+    qtbot.mouseClick(window.rail_buttons[key], Qt.MouseButton.LeftButton)
+    assert window.pages.currentWidget() is getattr(window, attr)
+    assert [k for k, b in window.rail_buttons.items() if b.isChecked()] == [key]
 
 
-def test_certificates_opens_the_history_dialog(qtbot, window, monkeypatch):
-    import gui.app_window as app_window
+def test_rail_has_no_menus_or_dialogs_left(window):
+    for button in window.rail_buttons.values():
+        assert button.menu() is None
+    assert not hasattr(window, "options_menu")
+    assert not hasattr(window, "open_history")
+    assert not hasattr(window, "open_settings")
 
-    opened = []
 
-    class FakeDialog:
-        def __init__(self, config, parent=None):
-            opened.append(config)
+def test_certificates_page_reloads_the_history_when_opened(qtbot, window):
+    from core.log import log_wipe_to_csv
 
-        def exec(self):
-            return 0
-
-    monkeypatch.setattr(app_window, "HistoryDialog", FakeDialog)
+    assert window.certificates_page.table.rowCount() == 0
+    log_wipe_to_csv({"date": "2026-11-18 12:00:00", "device_model": "SanDisk",
+                     "serial_number": "123", "result": "OK", "cert_number": 1})
     qtbot.mouseClick(window.rail_buttons["certificates"], Qt.MouseButton.LeftButton)
-    assert opened == [window.config]
-    assert window.pages.currentWidget() is window.delete_page  # stays put
+    assert window.certificates_page.table.rowCount() == 1
 
 
-def test_options_menu_offers_settings_and_demo(window):
-    texts = [a.text() for a in window.options_menu.actions() if a.text()]
-    assert "Einstellungen …" in texts
-    assert "Demo-Modus" in texts
+def test_saving_options_updates_the_delete_page(window):
+    page = window.options_page
+    page.method_combo.setCurrentIndex(page.method_combo.findData("bsi"))
+    page.verify_combo.setCurrentIndex(page.verify_combo.findData("sample"))
+    page.save_button.click()
+    assert window.delete_page.options.method_key == "bsi"
+    assert window.delete_page.options.verify_mode == "sample"
 
 
-def test_settings_opens_the_existing_dialog(window, monkeypatch):
-    import gui.app_window as app_window
-
-    opened = []
-
-    class FakeDialog:
-        def __init__(self, config, parent=None):
-            opened.append(config)
-
-        def exec(self):
-            return 0
-
-    monkeypatch.setattr(app_window, "SettingsDialog", FakeDialog)
-    window.settings_action.trigger()
-    assert opened == [window.config]
+def test_options_page_and_rail_share_theme_and_language(qtbot, window):
+    page = window.options_page
+    page.theme_buttons["light"].click()
+    assert (window.config.theme, window.theme.mode) == ("light", "light")
+    page.language_buttons["en"].click()
+    assert window.rail_buttons["options"].text() == "Options"
+    assert page.save_button.text() == "Save"
+    qtbot.mouseClick(window.theme_button, Qt.MouseButton.LeftButton)
+    assert page.theme_buttons["dark"].isChecked()
+    qtbot.mouseClick(window.language_button, Qt.MouseButton.LeftButton)
+    assert page.language_buttons["de"].isChecked()
 
 
 def test_language_switch_changes_visible_labels_and_is_saved(qtbot, window, isolated_profile):
@@ -167,7 +173,9 @@ def test_demo_flow_reaches_the_successful_result(qtbot, window, monkeypatch):
     from gui.app_window import AppWindow
 
     monkeypatch.setattr(AppWindow, "confirm_demo", lambda self: True)
-    window.demo_action.trigger()
+    qtbot.mouseClick(window.rail_buttons["options"], Qt.MouseButton.LeftButton)
+    window.options_page.demo_button.click()
+    assert window.pages.currentWidget() is window.delete_page
     page = window.delete_page
     assert page.selected_device.device_id.startswith("\\\\.\\DemoDevice")
 
