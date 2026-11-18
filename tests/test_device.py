@@ -93,7 +93,12 @@ def test_connection_usb():
 
 
 def test_connection_nvme():
-    assert _connection_type_from_interface("SCSI") == "NVMe"
+    assert _connection_type_from_interface("NVMe") == "NVMe"
+
+
+def test_connection_scsi_is_not_guessed_as_nvme():
+    # UAS USB enclosures report "SCSI" too; only MSFT_Disk.BusType knows.
+    assert _connection_type_from_interface("SCSI") == "SCSI"
 
 
 def test_connection_sata():

@@ -64,6 +64,46 @@ def _signing_key_in_tmp(tmp_path, monkeypatch):
     monkeypatch.setattr(core.config, "TRUST_FILE", keys / "trusted_keys.json", raising=False)
 
 
+# Paths under core.config.CONFIG_DIR (%USERPROFILE%\.stickshredder) that
+# modules write to. Modules import them by name (``from core.config import
+# AUDIT_LOG_FILE``), so every module's copy is redirected, not just config's.
+_PROFILE_PATH_NAMES = ("CONFIG_DIR", "CONFIG_FILE", "AUDIT_LOG_FILE", "CERT_COUNTER_FILE",
+                       "WIPE_HISTORY_FILE", "DEFAULT_CERT_OUTPUT")
+
+
+@pytest.fixture(autouse=True)
+def _profile_in_tmp(tmp_path, monkeypatch):
+    """Unit tests never write into the real %USERPROFILE%\\.stickshredder.
+
+    The audit log, config file, certificate counter, wipe history and
+    default certificate folder all point into ``tmp_path``. Tests that set
+    their own paths still override these.
+    """
+    import core.config
+
+    # Import the modules holding copies now, so a later import inside a test
+    # cannot bind (and keep) the redirected path of that one test.
+    for name in ("core.log", "cli"):
+        try:
+            importlib.import_module(name)
+        except Exception:  # noqa: BLE001 — module may not import off Windows
+            pass
+
+    real_dir = Path(core.config.CONFIG_DIR)
+    fake_dir = tmp_path / "_profile"
+    redirect = {}
+    for name in _PROFILE_PATH_NAMES:
+        real = Path(getattr(core.config, name))
+        redirect[real] = fake_dir / real.relative_to(real_dir)
+    for mod in list(sys.modules.values()):
+        if not str(getattr(mod, "__file__", "") or "").startswith(str(SRC_DIR)):
+            continue
+        for name in _PROFILE_PATH_NAMES:
+            value = getattr(mod, name, None)
+            if isinstance(value, Path) and value in redirect:
+                monkeypatch.setattr(mod, name, redirect[value])
+
+
 _KERNEL32_MODULES = ("wipe.device", "wipe.methods", "wipe.passthrough", "wipe.verify",
                      "wipe.drive_probe")
 # Modules that send drive commands (firmware commands and storage queries).
