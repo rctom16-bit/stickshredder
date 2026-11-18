@@ -493,8 +493,6 @@ def test_cli_passes_reformat_args_to_worker(monkeypatch):
             patch.object(cli, "prepare_target"),
             patch.object(cli, "open_physical_drive", return_value=99999),
             patch.object(cli, "close_drive"),
-            patch.object(cli, "lock_volume"),
-            patch.object(cli, "unlock_volume"),
             patch.object(cli, "get_drive_size", return_value=1024 * 1024),
             patch.object(cli, "get_next_cert_number", return_value=1),
             patch.object(cli, "generate_certificate", return_value="C:/tmp/fake.pdf"),

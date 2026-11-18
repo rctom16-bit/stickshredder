@@ -21,14 +21,14 @@ from cert.verify_cert import (
     TrustStore, extract_key_from_keycard_pdf, extract_token_from_pdf, verify_token,
 )
 from core.config import AppConfig, get_next_cert_number, DEFAULT_CERT_OUTPUT, load_signing_key
+from core.protection_class import class3_note
 from core.log import (
     audit_log, history_result_status, history_result_value, log_wipe_to_csv,
     read_wipe_history, setup_logging, verify_wipe_history,
 )
 from wipe.device import (
     DeviceInfo, UnsafeTargetError, list_devices, open_physical_drive, close_drive,
-    get_drive_size, is_safe_to_wipe, lock_volume, unlock_volume, prepare_target,
-    release_volumes,
+    get_drive_size, is_safe_to_wipe, prepare_target, release_volumes, unique_disks,
 )
 from wipe.methods import ZeroFill, RandomThreePass, BsiVsitr, CustomWipe, WipeResult
 from wipe.verify import VerifyResult
@@ -652,16 +652,18 @@ def cmd_list(args: argparse.Namespace) -> None:
     devices = list_devices()
     _print_device_table(devices)
 
-    removable = [d for d in devices if d.safe_to_wipe and d.is_removable]
+    # One row per drive letter, but a wipe always takes the whole disk:
+    # count physical disks, not letters.
+    removable = unique_disks([d for d in devices if d.safe_to_wipe and d.is_removable])
     if removable:
-        _info(f"Found {len(removable)} removable device(s) ready for wiping.")
+        _info(f"Found {len(removable)} removable disk(s) ready for wiping.")
     else:
         _warn("No safe removable devices found.")
 
-    internal = [d for d in devices if d.is_internal and not d.is_system_drive]
+    internal = unique_disks([d for d in devices if d.is_internal and not d.is_system_drive])
     if internal:
         _warn(
-            f"{len(internal)} internal drive(s) detected (shown as INTERNAL). "
+            f"{len(internal)} internal disk(s) detected (shown as INTERNAL). "
             "Wipe them with 'wipe --allow-internal --device PhysicalDriveN'. "
             "The Windows system disk is always protected."
         )
@@ -709,11 +711,14 @@ def cmd_wipe(args: argparse.Namespace) -> None:
 
     # -- Resolve method and parameters --------------------------------------
     schutzklasse: int = getattr(args, "schutzklasse", 2) or 2
+    # Media type (WMI, read-only): drives the recommendation, the hardware
+    # erase check and the protection class 3 note on screen and certificate.
+    media = media_type_of(device)
     recommendation: Recommendation | None = None
     if not getattr(args, "method", None):
         # No --method: the recommended procedure for this device type (WMI
         # only; a hardware erase is never chosen automatically).
-        recommendation = recommend(device, media_type_of(device), False, schutzklasse)
+        recommendation = recommend(device, media, False, schutzklasse)
         args.method = recommendation.method_key
     is_secure_erase = args.method == "secure-erase"
     if is_secure_erase and not getattr(args, "experimental", False):
@@ -723,7 +728,6 @@ def cmd_wipe(args: argparse.Namespace) -> None:
             "--experimental to acknowledge the risk."
         )
     if is_secure_erase:
-        media = media_type_of(device)
         if not hardware_erase.fits(device, media):
             _die(
                 "Hardware-Löschung nur für SSDs, die direkt per SATA angeschlossen sind "
@@ -804,6 +808,13 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     elif args.method in _MULTI_PASS_METHODS:
         _info(f"Hinweis: --method {args.method} {MULTI_PASS_NOTE_DE}. Empfohlen: zero.")
         _info(f"Note: --method {args.method} {MULTI_PASS_NOTE_EN}. Recommended: zero.")
+        print()
+    # Protection class 3 on an SSD or stick (the recommendation above
+    # already carries this note).
+    class3 = class3_note(media, schutzklasse, hardware_erase=is_secure_erase)
+    if class3 is not None and recommendation is None:
+        _warn(class3[0])
+        print(f"  {' ' * len('WARNING: ')}{class3[1]}")
         print()
 
     # -- SSD warning --------------------------------------------------------
@@ -1002,12 +1013,6 @@ def cmd_wipe(args: argparse.Namespace) -> None:
                 )
         print()
 
-        # -- Unlock --------------------------------------------------------
-        try:
-            unlock_volume(handle)
-        except OSError:
-            pass
-
     except OSError as exc:
         _die(f"Drive access error: {exc}")
 
@@ -1017,6 +1022,11 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         release_volumes(volume_locks)
 
     # -- Reformat (optional) ------------------------------------------------
+    # Runs after the finally above: the physical handle is closed and every
+    # volume lock released, so PowerShell's Clear-Disk gets the disk. The
+    # wipe result is final here — a skipped or failed reformat only means
+    # the certificate names no new file system.
+    format_result = None
     if args.reformat != "none" and wipe_result.success:
         _info(f"Reformatting drive to {args.reformat.upper()}...")
         from wipe.format import reformat_drive
@@ -1029,32 +1039,33 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         try:
             release_volumes(prepare_target(device))
             unsafe = None
-        except UnsafeTargetError as exc:
+        except Exception as exc:  # noqa: BLE001 — only skips the reformat
             unsafe = exc
         if unsafe is not None:
             _warn(f"Reformat skipped / Formatieren übersprungen: {unsafe}")
-            format_result = None
         elif not m:
             _warn("Could not parse disk number; skipping reformat")
-            format_result = None
         else:
             disk_number = int(m.group(1))
-            format_result = reformat_drive(
-                disk_number=disk_number,
-                filesystem=args.reformat,
-                label=args.reformat_label,
-                partition_style=args.reformat_partition,
-                progress_callback=lambda msg: _info(f"  {msg}"),
-            )
-            if format_result.success:
+            try:
+                format_result = reformat_drive(
+                    disk_number=disk_number,
+                    filesystem=args.reformat,
+                    label=args.reformat_label,
+                    partition_style=args.reformat_partition,
+                    progress_callback=lambda msg: _info(f"  {msg}"),
+                )
+            except Exception as exc:  # noqa: BLE001 — the wipe result stands
+                audit_log(f"CLI reformat crashed for {device.device_id}: {exc}")
+                _warn(f"Reformat failed / Formatieren fehlgeschlagen: {exc}")
+                format_result = None
+            if format_result is not None and format_result.success:
                 _success(
                     f"Reformat completed: {format_result.filesystem} "
                     f"label={format_result.label!r} in {format_result.duration_seconds:.1f}s"
                 )
-            else:
+            elif format_result is not None:
                 _warn(f"Reformat failed: {format_result.error_message}")
-    else:
-        format_result = None
 
     # -- Generate certificate -----------------------------------------------
     cert_number = get_next_cert_number()
@@ -1102,6 +1113,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
         bad_sector_count=wipe_result.bad_sector_count,
         bad_sector_bytes=wipe_result.bad_sector_bytes,
         bad_sector_offsets=list(wipe_result.bad_sector_offsets),
+        media_type=media,
         hidden_area_probed=bool(hidden is not None and hidden.supported),
         hpa_present=bool(hidden and hidden.hpa_present),
         hpa_hidden_bytes=(
@@ -1129,7 +1141,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
             "bad_sector_count", "bad_sector_bytes", "bad_sector_offsets",
             "hidden_area_probed", "hpa_present", "hpa_hidden_bytes",
             "dco_present", "dco_hidden_bytes",
-            "secure_erase_used", "secure_erase_method", "wipe_success",
+            "secure_erase_used", "secure_erase_method", "wipe_success", "media_type",
         ):
             cert_kwargs.pop(_key, None)
         cert_data = CertificateData(**cert_kwargs)

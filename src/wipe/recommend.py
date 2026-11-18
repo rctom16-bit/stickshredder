@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from core.log import audit_log
+from core.protection_class import class3_note
 from wipe.device import (
     DeviceInfo,
     _get_storage_wmi_connection,
@@ -36,16 +37,6 @@ _MEDIA_SSD = 4
 _BUS_USB = 7
 _BUS_SD = 12
 _BUS_MMC = 13
-
-_DESTROY_DE = (
-    "Hinweis: für Schutzklasse 3 physisch vernichten — Überschreiben "
-    "erreicht nicht sicher alle Flash-Zellen."
-)
-_DESTROY_EN = (
-    "For protection class 3, destroy physically: overwriting cannot reliably "
-    "reach every flash cell."
-)
-
 
 @dataclass
 class Recommendation:
@@ -85,6 +76,10 @@ def recommend(
             ),
         )
 
+    # SSDs and flash with protection class 3: only destruction is enough.
+    note = class3_note(media, schutzklasse, hardware_erase=hardware_erase_available)
+    class3_de, class3_en = ([note[0]], [note[1]]) if note else ([], [])
+
     if media == "ssd" and hardware_erase_available:
         return Recommendation(
             method_key="zero", verify_mode="full", hardware_erase="secure-erase",
@@ -98,6 +93,7 @@ def recommend(
                 "SSD: hardware erase (Beta) also reaches spare areas; then one "
                 "pass of zeros and a full verify (NIST 800-88 \"Purge\")."
             ),
+            warnings_de=class3_de, warnings_en=class3_en,
         )
 
     if media == "ssd":
@@ -109,23 +105,15 @@ def recommend(
             "No hardware erase available: overwriting cannot reach the SSD's "
             "spare areas, residual data is possible."
         ]
-        if schutzklasse >= 3:
-            warnings_de.append(_DESTROY_DE)
-            warnings_en.append(_DESTROY_EN)
         return Recommendation(
             method_key="zero", verify_mode="full", hardware_erase=None,
             nist_category="Clear",
             reason_de="SSD: Überschreiben mit Nullen und vollständige Prüfung.",
             reason_en="SSD: overwrite with zeros and a full verify.",
-            warnings_de=warnings_de, warnings_en=warnings_en,
+            warnings_de=warnings_de + class3_de, warnings_en=warnings_en + class3_en,
         )
 
     if media == "flash":
-        warnings_de: list[str] = []
-        warnings_en: list[str] = []
-        if schutzklasse >= 3:
-            warnings_de.append(_DESTROY_DE)
-            warnings_en.append(_DESTROY_EN)
         return Recommendation(
             method_key="zero", verify_mode="full", hardware_erase=None,
             nist_category="Clear",
@@ -134,7 +122,7 @@ def recommend(
                 "Prüfung."
             ),
             reason_en="USB stick/SD card: overwrite with zeros and a full verify.",
-            warnings_de=warnings_de, warnings_en=warnings_en,
+            warnings_de=class3_de, warnings_en=class3_en,
         )
 
     return Recommendation(

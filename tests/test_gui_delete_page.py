@@ -206,6 +206,8 @@ def test_options_reach_the_worker(page, monkeypatch):
     assert (captured["verify_mode"], captured["schutzklasse"], captured["operator"]) == (
         "sample", 3, "Robin")
     assert (captured["reformat"], captured["reformat_label"]) == ("exfat", "ABC")
+    # The certificate notes protection class 3 limits from the media type.
+    assert captured["media_types"] == {stick.device_id: "flash"}
     assert page.current_view() == "running"
 
 

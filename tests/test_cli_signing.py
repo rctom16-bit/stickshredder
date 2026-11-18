@@ -120,8 +120,6 @@ def _wipe(app_config, *, generate=None, log_csv=None, extra=None):
         patch.object(cli, "prepare_target"),
         patch.object(cli, "open_physical_drive", return_value=12345),
         patch.object(cli, "close_drive"),
-        patch.object(cli, "lock_volume"),
-        patch.object(cli, "unlock_volume"),
         patch.object(cli, "get_drive_size", return_value=1024 * 1024),
         patch.object(
             cli, "detect_hidden_areas",

@@ -161,3 +161,36 @@ def _no_real_device_handles(monkeypatch):
             return _real(path, *rest)
 
         monkeypatch.setattr(k32, "CreateFileW", guarded)
+
+
+_ERROR_NO_MORE_FILES = 18
+
+
+@pytest.fixture(autouse=True)
+def _no_real_volume_enumeration(monkeypatch):
+    """Unit tests see no volumes of the host (prepare_target's volume scan).
+
+    FindFirstVolumeW answers "no volumes" and no mount point resolves to a
+    volume. Tests that need volumes patch these (or the helpers) themselves.
+    """
+    try:
+        mod = importlib.import_module("wipe.device")
+    except Exception:  # noqa: BLE001 — module may not import off Windows
+        return
+
+    def no_volumes(*_args):
+        ctypes.set_last_error(_ERROR_NO_MORE_FILES)
+        return -1  # INVALID_HANDLE_VALUE
+
+    def no_mount_point(*_args):
+        ctypes.set_last_error(_ERROR_NO_MORE_FILES)
+        return 0
+
+    monkeypatch.setattr(mod.kernel32, "FindFirstVolumeW", no_volumes)
+    monkeypatch.setattr(mod.kernel32, "GetVolumeNameForVolumeMountPointW", no_mount_point)
+
+    def no_shell():
+        raise RuntimeError("Explorer's shell is not used in unit tests")
+
+    # The BitLocker probe reads the host's volumes through Explorer's shell.
+    monkeypatch.setattr(mod, "_shell_application", no_shell)

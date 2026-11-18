@@ -983,6 +983,7 @@ class DeletePage(QWidget):
             reformat=o.reformat,
             reformat_label=o.reformat_label,
             hardware_erase=o.hardware_erase,
+            media_types={device.device_id: self._media_type(device)},
             parent=self,
         )
         if o.hardware_erase:

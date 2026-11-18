@@ -251,8 +251,6 @@ def _wipe(argv_extra, *, wipe_result=None, media="flash", extra=None):
         patch.object(cli, "prepare_target"),
         patch.object(cli, "open_physical_drive", return_value=12345),
         patch.object(cli, "close_drive"),
-        patch.object(cli, "lock_volume"),
-        patch.object(cli, "unlock_volume"),
         patch.object(cli, "get_drive_size", return_value=1024 * 1024),
         patch.object(
             cli, "detect_hidden_areas",
@@ -516,3 +514,36 @@ def test_recommendation_dataclass_is_what_info_uses():
     assert isinstance(
         cli.recommend(_fake_device(), "hdd", False, 2), Recommendation
     )
+
+
+# ── Protection class 3 on an SSD (2.0 polish) ────────────────────────
+
+def test_wipe_with_method_on_ssd_class_3_says_destruction_is_required(app_config, capsys):
+    cert = MagicMock(return_value="x.pdf")
+    run = _wipe(["--method", "zero", "--schutzklasse", "3"], media="ssd",
+                extra=[patch.object(cli, "generate_certificate", cert)])
+    out = capsys.readouterr().out
+    assert run.code == 0
+    assert "Reserve-Bereiche der SSD nicht" in out
+    assert "physically destroying the SSD" in out
+    assert cert.call_args.args[0].media_type == "ssd"
+    assert cert.call_args.args[0].schutzklasse == 3
+
+
+def test_wipe_recommendation_on_ssd_class_3_names_it_once(app_config, capsys):
+    _wipe(["--schutzklasse", "3"], media="ssd")
+    out = capsys.readouterr().out
+    assert out.count("Für Schutzklasse 3 muss die SSD physisch vernichtet werden") == 1
+
+
+def test_wipe_on_ssd_class_2_has_no_destruction_note(app_config, capsys):
+    _wipe(["--method", "zero", "--schutzklasse", "2"], media="ssd")
+    assert "vernichtet" not in capsys.readouterr().out
+
+
+def test_info_on_ssd_class_3_says_destruction_is_required(app_config, capsys):
+    dev = _fake_device(drive_letter="F:")
+    _run_info(["--device", "F:", "--schutzklasse", "3"], [dev], media="ssd")
+    out = capsys.readouterr().out
+    assert "Reserve-Bereiche der SSD nicht" in out
+    assert "physically destroying the SSD" in out

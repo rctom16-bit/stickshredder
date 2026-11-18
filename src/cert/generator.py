@@ -30,6 +30,7 @@ from reportlab.platypus import (
 from cert.payload import RESULT_LABELS, build_payload, nist_category, result_status
 from core.config import APP_VERSION
 from core.log import audit_log
+from core.protection_class import class3_note
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
     from cert.signing import SigningKey
@@ -147,6 +148,11 @@ class CertificateData:
     # HPA/DCO has been removed and wiped as well.
     wipe_success: bool = True
     hidden_area_removed: bool = False
+
+    # Media type of the wiped disk ("ssd" | "flash" | "hdd" | "unknown", or
+    # "" when not known). With protection class 3 an SSD or flash medium gets
+    # the note that only physical destruction is enough. Not signed.
+    media_type: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -1048,6 +1054,13 @@ def generate_certificate(
                 lang,
             )
         elements.append(Paragraph(se_note, styles["result_skipped"]))
+
+    # Protection class 3 on an SSD or flash medium: overwriting can't reach
+    # the reserve areas, so the certificate says physical destruction is needed.
+    note = class3_note(data.media_type, data.schutzklasse, data.secure_erase_used)
+    if note is not None:
+        elements.append(Paragraph(_safe(_label(note[0], note[1], lang)),
+                                  styles["result_limited"]))
     elements.append(Spacer(1, 2 * mm))
 
     # ------------------------------------------------------------------

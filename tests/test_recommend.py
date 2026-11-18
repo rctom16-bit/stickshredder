@@ -92,7 +92,35 @@ def test_flash_never_gets_hardware_erase():
 
 def test_ssd_without_hardware_erase_schutzklasse_3_also_says_destroy():
     r = recommend(_dev(), "ssd", hardware_erase_available=False, schutzklasse=3)
-    assert any("physisch vernichten" in w for w in r.warnings_de)
+    assert any("Reserve-Bereiche der SSD nicht" in w and "physisch vernichtet" in w
+               for w in r.warnings_de)
+    assert any("spare areas" in w and "physically destroying" in w for w in r.warnings_en)
+
+
+def test_ssd_with_hardware_erase_schutzklasse_3_still_says_destroy():
+    # The drive's own erase (Beta) can't be checked from outside.
+    r = recommend(_dev(), "ssd", hardware_erase_available=True, schutzklasse=3)
+    assert r.hardware_erase == "secure-erase"
+    assert len(r.warnings_de) == 1 and len(r.warnings_en) == 1
+    assert "Hardware-Löschen (Beta)" in r.warnings_de[0]
+    assert "physisch vernichtet" in r.warnings_de[0]
+    assert "physically destroying the SSD" in r.warnings_en[0]
+
+
+@pytest.mark.parametrize("hardware", [True, False])
+def test_ssd_schutzklasse_2_has_no_destroy_note(hardware):
+    r = recommend(_dev(), "ssd", hardware_erase_available=hardware, schutzklasse=2)
+    assert not any("vernichtet" in w for w in r.warnings_de)
+
+
+def test_class3_note_only_for_flash_media():
+    from core.protection_class import class3_note
+    assert class3_note("hdd", 3) is None
+    assert class3_note("unknown", 3) is None
+    assert class3_note("ssd", 2) is None
+    assert class3_note("ssd", 3) != class3_note("ssd", 3, hardware_erase=True)
+    de, en = class3_note("flash", 3)
+    assert "physisch vernichten" in de and "destroy physically" in en
 
 
 def test_unknown_media_falls_back_to_overwrite_with_warning():

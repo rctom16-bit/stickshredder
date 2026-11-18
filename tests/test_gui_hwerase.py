@@ -216,10 +216,13 @@ def test_overwrite_only_with_protection_class_3_still_advises_destruction(page, 
     page.set_options(replace(page.options, schutzklasse=3))
     show_ssd(page)
     text = page.warning_label.text()
-    assert "Reserve-Bereiche" in text and "physisch vernichten" in text
+    assert "Reserve-Bereiche" in text and "physisch vernichtet" in text
     assert "Kein Hardware-Löschen verfügbar" not in text
-    choose_hardware(page, monkeypatch)  # the drive's own erase reaches the spare areas
-    assert "physisch vernichten" not in page.warning_label.text()
+    # The drive's own erase (Beta) can't be checked from outside: class 3
+    # still needs physical destruction, the note now names the erase.
+    choose_hardware(page, monkeypatch)
+    text = page.warning_label.text()
+    assert "Hardware-Löschen (Beta)" in text and "physisch vernichtet" in text
 
 
 def test_choosing_another_disk_turns_the_hardware_erase_off(page, monkeypatch):
@@ -413,7 +416,6 @@ def fake_disk(monkeypatch):
     monkeypatch.setattr(wipe_worker, "get_drive_size", lambda handle: 8 * 1024 * 1024)
     monkeypatch.setattr(wipe_worker, "detect_hidden_areas", lambda handle: no_hidden)
     monkeypatch.setattr(wipe_worker, "close_drive", lambda handle: state.closed.append(handle))
-    monkeypatch.setattr(wipe_worker, "unlock_volume", lambda handle: None)
     monkeypatch.setattr(secure_erase, "secure_erase_supported", supported)
     monkeypatch.setattr(secure_erase, "secure_erase", erase)
     monkeypatch.setattr(hardware_erase, "_set_execution_state",
@@ -1200,3 +1202,35 @@ def test_unlock_worker_stops_at_a_refusing_gate(qtbot, fake_disk, monkeypatch):
     worker.wait(2000)
     assert results[0].state == "error" and "is no longer it" in results[0].error
     assert fake_disk.closed == []
+
+
+# -- Protection class 3 on an SSD (2.0 polish) ----------------------------------
+
+
+def test_ssd_class_3_overwrite_says_destruction_is_required(page, no_drive_commands):
+    from dataclasses import replace
+
+    page.set_options(replace(page.options, schutzklasse=3))
+    show_ssd(page)
+    text = page.warning_label.text()
+    assert page.warning_label.isVisible()
+    assert "Reserve-Bereiche der SSD nicht" in text
+    assert "physisch vernichtet" in text
+
+
+def test_ssd_class_3_hardware_erase_still_says_destruction_is_required(
+        page, monkeypatch, no_drive_commands):
+    from dataclasses import replace
+
+    page.set_options(replace(page.options, schutzklasse=3))
+    show_ssd(page)
+    choose_hardware(page, monkeypatch)
+    assert page.options.hardware_erase is True
+    text = page.warning_label.text()
+    assert "Hardware-Löschen (Beta)" in text
+    assert "physisch vernichtet" in text
+
+
+def test_ssd_class_2_has_no_destruction_note(page, no_drive_commands):
+    show_ssd(page)
+    assert "vernichtet" not in page.warning_label.text()
