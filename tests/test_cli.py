@@ -404,3 +404,41 @@ def test_cmd_wipe_confirmation_names_every_letter_of_the_disk(capsys, monkeypatc
             cli.cmd_wipe(args)
 
     assert "E:, G:" in capsys.readouterr().out
+
+
+def test_cmd_wipe_holds_volume_locks_until_the_wipe_is_done():
+    """1.1.2: CLI keeps the locks from prepare_target during execute()."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_REQUIRED_WIPE_ARGS + ["--yes"])
+    released: list[int] = []
+    held: list[bool] = []
+
+    fake_method = MagicMock()
+    fake_method.name = "ZeroFill"
+    fake_method.passes = 1
+    fake_method.sicherheitsstufe = "1-2"
+
+    def fake_execute(**_k):
+        held.append(released == [])
+        return _fake_wipe_result()
+
+    fake_method.execute.side_effect = fake_execute
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[_fake_device()]),
+        patch.object(cli, "_resolve_wipe_method", return_value=fake_method),
+        patch.object(cli, "prepare_target", return_value=[5]),
+        patch.object(cli, "release_volumes", side_effect=released.extend),
+        patch.object(cli, "open_physical_drive", return_value=12345),
+        patch.object(cli, "close_drive"),
+        patch.object(cli, "unlock_volume"),
+        patch.object(cli, "get_drive_size", return_value=1024 * 1024),
+        patch.object(cli, "get_next_cert_number", return_value=1),
+        patch.object(cli, "generate_certificate", return_value="C:/tmp/fake.pdf"),
+        patch.object(cli, "log_wipe_to_csv"),
+        patch.object(cli, "audit_log"),
+    ):
+        cli.cmd_wipe(args)
+
+    assert held == [True]
+    assert released == [5]

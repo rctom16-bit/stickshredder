@@ -255,7 +255,7 @@ def test_version_is_consistent_everywhere():
     iss = (root / "installer" / "stickshredder.iss").read_text(encoding="utf-8")
     iss_version = re.search(r'#define MyAppVersion "([^"]+)"', iss).group(1)
 
-    assert APP_VERSION == "1.1.1"
+    assert APP_VERSION == "1.1.2"
     assert pyproject["project"]["version"] == APP_VERSION
     assert iss_version == APP_VERSION
     for py in (root / "src").rglob("*.py"):

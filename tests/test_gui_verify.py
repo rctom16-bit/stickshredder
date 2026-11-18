@@ -718,3 +718,52 @@ def test_worker_refuses_real_device_when_target_unsafe(qtbot, app_config):
 
     assert results == [(0, False)]
     opener.assert_not_called()
+
+
+def test_worker_holds_volume_locks_for_the_whole_wipe(qtbot, app_config):
+    """1.1.2: the volume locks from prepare_target stay held while the wipe
+    and verification run, and are released exactly once afterwards."""
+    from gui.wipe_worker import WipeWorker
+    from wipe.device import DeviceInfo
+    from wipe.methods import WipeResult
+
+    device = DeviceInfo(
+        drive_letter="E:", device_id="\\.\PhysicalDrive7", model="Stick",
+        serial_number="SN7", capacity_bytes=1024**2, filesystem="FAT32",
+        connection_type="USB", is_removable=True, is_system_drive=False,
+        disk_letters=["E:"],
+    )
+    released: list[int] = []
+    held_during_execute: list[bool] = []
+
+    method = MagicMock()
+    method.name = "ZeroFill"
+    method.passes = 1
+    method.sicherheitsstufe = "1-2"
+
+    def fake_execute(*_a, **_k):
+        held_during_execute.append(released == [])
+        return WipeResult(
+            method_name="ZeroFill", passes=1, start_time=datetime.now(),
+            end_time=datetime.now(), bytes_written=1024**2, success=True,
+            error_message=None,
+        )
+
+    method.execute.side_effect = fake_execute
+    with patch("gui.wipe_worker.prepare_target", return_value=[7, 8]), \
+         patch("gui.wipe_worker.release_volumes", side_effect=released.extend), \
+         patch("gui.wipe_worker.open_physical_drive", return_value=1), \
+         patch("gui.wipe_worker.get_drive_size", return_value=1024**2), \
+         patch("gui.wipe_worker.close_drive"), \
+         patch("gui.wipe_worker.unlock_volume"), \
+         patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"), \
+         patch("gui.wipe_worker.log_wipe_to_csv"), \
+         patch("gui.wipe_worker.get_next_cert_number", return_value=1), \
+         patch("gui.wipe_worker.audit_log"):
+        worker = WipeWorker(devices=[device], wipe_method=method,
+                            config=app_config, verify_mode="none")
+        with qtbot.waitSignal(worker.all_completed, timeout=5000):
+            worker.start()
+
+    assert held_during_execute == [True]
+    assert released == [7, 8]

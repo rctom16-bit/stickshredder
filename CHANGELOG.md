@@ -4,6 +4,13 @@ All notable changes to StickShredder are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] - 2026-11-18
+
+### Fixed
+
+- **Wipes could fail after a few seconds with "WriteFile failed with error code 5".** StickShredder dismounted the drive's volumes and then released them right away. As soon as anything touched the drive (e.g. Explorer), Windows mounted the file system again and refused every further raw write into it. The volumes now stay locked until wipe and verification are finished. If a volume is in use, the dismount is forced and the lock taken afterwards; if it still cannot be locked, the wipe is refused before anything is written. Found in a real wipe of a 64 GB USB stick; no certificate was issued for the failed attempt.
+- The CLI no longer sends a volume lock to the physical-drive handle (meant for volumes; it could stall some USB controllers). The GUI already skipped it.
+
 ## [1.1.1] - 2026-11-17
 
 ### Security

@@ -16,7 +16,7 @@ from core.config import AppConfig, get_next_cert_number, DEFAULT_CERT_OUTPUT
 from core.log import audit_log, log_wipe_to_csv, read_wipe_history, setup_logging
 from wipe.device import (
     DeviceInfo, UnsafeTargetError, list_devices, open_physical_drive, close_drive,
-    get_drive_size, lock_volume, unlock_volume, prepare_target,
+    get_drive_size, lock_volume, unlock_volume, prepare_target, release_volumes,
 )
 from wipe.methods import ZeroFill, RandomThreePass, BsiVsitr, CustomWipe, WipeResult
 from wipe.verify import VerifyResult
@@ -421,27 +421,24 @@ def cmd_wipe(args: argparse.Namespace) -> None:
 
     # -- Execute wipe -------------------------------------------------------
     handle: int | None = None
+    volume_locks: list[int] = []
     wipe_result: WipeResult | None = None
     verify_result: VerifyResult | None = None
 
     try:
-        # Re-check the disk and dismount every volume on it
+        # Re-check the disk, dismount every volume on it and keep them locked
+        # until wipe + verify are done (else Windows may remount mid-wipe).
         _info("Checking drive and dismounting volumes...")
         try:
-            prepare_target(device)
+            volume_locks = prepare_target(device)
         except UnsafeTargetError as exc:
             _die(str(exc))
 
-        # Open physical drive
+        # Open physical drive (no FSCTL_LOCK_VOLUME on the physical handle:
+        # it is meant for volumes and deadlocks some USB controllers; the
+        # volume locks above already give exclusive access)
         _info(f"Opening physical drive {device.device_id}...")
         handle = open_physical_drive(device.device_id)
-
-        # Lock volume
-        _info("Locking volume...")
-        try:
-            lock_volume(handle)
-        except OSError as exc:
-            _warn(f"Lock failed (non-fatal): {exc}")
 
         # Get drive size
         drive_size = get_drive_size(handle)
@@ -464,6 +461,8 @@ def cmd_wipe(args: argparse.Namespace) -> None:
             verify_mode=verify_mode,
             verify_progress_callback=verify_cb,
         )
+        release_volumes(volume_locks)
+        volume_locks = []
 
         # Clear the progress bar line (covers both wipe and verify bars)
         sys.stdout.write("\r" + " " * shutil.get_terminal_size((80, 24)).columns + "\r")
@@ -522,6 +521,7 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     finally:
         if handle is not None:
             close_drive(handle)
+        release_volumes(volume_locks)
 
     # -- Reformat (optional) ------------------------------------------------
     if args.reformat != "none" and wipe_result.success:

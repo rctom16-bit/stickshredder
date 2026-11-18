@@ -364,33 +364,98 @@ def test_prepare_target_fails_when_a_volume_stays_mounted(gate):
         prepare_target(_usb_target())
 
 
-def _fake_volume_ioctls(monkeypatch, lock_ok: bool, dismount_ok: bool):
+def _fake_volume_ioctls(monkeypatch, lock_results, dismount_ok: bool = True):
+    """Fake volume IOCTLs. ``lock_results``: bool or list of bools (one per lock call).
+
+    Returns a dict recording the call sequence and closed handles.
+    """
     import wipe.device as device_mod
+    record = {"calls": [], "closed": []}
+    locks = list(lock_results) if isinstance(lock_results, (list, tuple)) else None
     monkeypatch.setattr(device_mod, "audit_log", lambda *a, **k: None)
     monkeypatch.setattr(device_mod.kernel32, "CreateFileW", lambda *a: 42)
-    monkeypatch.setattr(device_mod.kernel32, "CloseHandle", lambda h: True)
+    monkeypatch.setattr(device_mod.kernel32, "CloseHandle",
+                        lambda h: record["closed"].append(h) or True)
 
     def ioctl(handle, code, *rest):
         if code == device_mod.FSCTL_LOCK_VOLUME:
-            return lock_ok
+            record["calls"].append("lock")
+            return locks.pop(0) if locks is not None else lock_results
         if code == device_mod.FSCTL_DISMOUNT_VOLUME:
+            record["calls"].append("dismount")
             return dismount_ok
         return True
 
     monkeypatch.setattr(device_mod.kernel32, "DeviceIoControl", ioctl)
+    return record
 
 
-def test_dismount_continues_when_lock_fails(monkeypatch):
+def test_dismount_keeps_the_volume_locked_and_open(monkeypatch):
+    """1.1.2: the lock must last for the whole wipe, or Windows remounts the
+    volume mid-wipe and every further write fails with error 5."""
     from wipe.device import dismount_volume
-    _fake_volume_ioctls(monkeypatch, lock_ok=False, dismount_ok=True)
-    dismount_volume("E:")  # must not raise
+    rec = _fake_volume_ioctls(monkeypatch, lock_results=True)
+    assert dismount_volume("E:") == 42
+    assert rec["calls"] == ["lock", "dismount"]
+    assert rec["closed"] == []
+
+
+def test_dismount_relocks_after_forced_dismount(monkeypatch):
+    """Lock blocked by an open handle (e.g. Explorer): force the dismount,
+    which invalidates that handle, then take the lock."""
+    from wipe.device import dismount_volume
+    rec = _fake_volume_ioctls(monkeypatch, lock_results=[False, True])
+    assert dismount_volume("E:") == 42
+    assert rec["calls"] == ["lock", "dismount", "lock"]
+    assert rec["closed"] == []
+
+
+def test_dismount_fails_when_the_volume_cannot_be_locked(monkeypatch):
+    from wipe.device import dismount_volume
+    rec = _fake_volume_ioctls(monkeypatch, lock_results=[False, False])
+    with pytest.raises(OSError):
+        dismount_volume("E:")
+    assert rec["closed"] == [42]
 
 
 def test_dismount_raises_when_dismount_fails(monkeypatch):
     from wipe.device import dismount_volume
-    _fake_volume_ioctls(monkeypatch, lock_ok=True, dismount_ok=False)
+    rec = _fake_volume_ioctls(monkeypatch, lock_results=True, dismount_ok=False)
     with pytest.raises(OSError):
         dismount_volume("E:")
+    assert rec["closed"] == [42]
+
+
+def test_prepare_target_returns_the_volume_locks(gate):
+    from wipe.device import prepare_target
+    gate.side_effect = lambda letter: {"E:": 101, "G:": 102}[letter]
+    assert prepare_target(_usb_target()) == [101, 102]
+
+
+def test_prepare_target_releases_locks_when_a_later_volume_fails(gate, monkeypatch):
+    import wipe.device as device_mod
+    from wipe.device import prepare_target, UnsafeTargetError
+    released = []
+    monkeypatch.setattr(device_mod, "release_volumes", lambda hs: released.extend(hs))
+
+    def dismount(letter):
+        if letter == "G:":
+            raise OSError("busy")
+        return 101
+
+    gate.side_effect = dismount
+    with pytest.raises(UnsafeTargetError, match="G:"):
+        prepare_target(_usb_target())
+    assert released == [101]
+
+
+def test_release_volumes_closes_every_handle(monkeypatch):
+    import wipe.device as device_mod
+    closed = []
+    monkeypatch.setattr(device_mod, "audit_log", lambda *a, **k: None)
+    monkeypatch.setattr(device_mod.kernel32, "CloseHandle", lambda h: closed.append(h) or True)
+    device_mod.release_volumes([101, 102])
+    assert closed == [101, 102]
 
 
 def test_unique_disks_keeps_first_per_device_id():

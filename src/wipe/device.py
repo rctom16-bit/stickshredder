@@ -492,8 +492,15 @@ def unlock_volume(handle: int) -> None:
     _ioctl_no_data(handle, FSCTL_UNLOCK_VOLUME, "FSCTL_UNLOCK_VOLUME")
 
 
-def dismount_volume(drive_letter: str) -> None:
-    """Dismount a volume by its drive letter (e.g. 'E:') so raw writes can proceed."""
+def dismount_volume(drive_letter: str) -> int:
+    """Lock and dismount a volume (e.g. 'E:') and KEEP it locked.
+
+    Returns the open volume handle; the lock lasts until the handle is
+    closed with release_volumes(). Closing it right after the dismount (as
+    up to 1.1.1) let Windows remount the file system as soon as anything
+    touched the drive, and every further raw write into the volume then
+    failed with error 5 (access denied).
+    """
     # Open the volume (not the physical drive)
     volume_path = f"\\\\.\\{drive_letter}"
     handle = kernel32.CreateFileW(
@@ -513,15 +520,31 @@ def dismount_volume(drive_letter: str) -> None:
     try:
         try:
             _ioctl_no_data(handle, FSCTL_LOCK_VOLUME, "Lock before dismount")
+            locked = True
         except OSError as exc:
             # Open handles (e.g. an Explorer window) block the lock. A forced
-            # dismount still invalidates them, so carry on; only a failed
-            # dismount is fatal.
+            # dismount invalidates them; the lock is taken right after.
             audit_log(f"Lock failed for {drive_letter}, forcing dismount: {exc}")
+            locked = False
         _ioctl_no_data(handle, FSCTL_DISMOUNT_VOLUME, "FSCTL_DISMOUNT_VOLUME")
-        audit_log(f"Dismounted volume {drive_letter}")
-    finally:
+        if not locked:
+            _ioctl_no_data(handle, FSCTL_LOCK_VOLUME, "Lock after forced dismount")
+        audit_log(f"Dismounted volume {drive_letter} (kept locked)")
+    except BaseException:
         kernel32.CloseHandle(handle)
+        raise
+    return handle
+
+
+def release_volumes(handles: list[int]) -> None:
+    """Close volume handles from dismount_volume(); closing ends the lock."""
+    for h in handles:
+        try:
+            kernel32.CloseHandle(h)
+        except Exception:  # noqa: BLE001 — releasing must never raise
+            pass
+    if handles:
+        audit_log(f"Released {len(handles)} volume lock(s)")
 
 
 # ── Safety gate before writing ─────────────────────────────────────────
@@ -551,13 +574,16 @@ def _physical_index(device_id: str) -> int:
     return int(device_id[len(prefix):])
 
 
-def prepare_target(device: DeviceInfo) -> None:
+def prepare_target(device: DeviceInfo) -> list[int]:
     """Last check right before the disk is opened for writing.
 
     Re-reads the disk behind ``device.device_id`` and refuses if it is no
     longer the disk the user selected (serial, size or model changed — e.g.
     stick swapped), if it is (or might be) the Windows disk, or if any of
     its volumes cannot be dismounted. Raises UnsafeTargetError.
+
+    Returns the locked volume handles. The caller keeps them for the whole
+    wipe and verification and then passes them to release_volumes().
     """
     index = _physical_index(device.device_id)
     try:
@@ -596,12 +622,15 @@ def prepare_target(device: DeviceInfo) -> None:
             f"{device.device_id} ist die Systemplatte / is the system disk"
         )
 
+    locks: list[int] = []
     for letter in letters:
         try:
-            dismount_volume(letter)
+            locks.append(dismount_volume(letter))
         except OSError as exc:
+            release_volumes(locks)
             raise UnsafeTargetError(
                 f"{letter} konnte nicht ausgehängt werden / "
                 f"could not be dismounted: {exc}"
             ) from exc
-    audit_log(f"Target verified and dismounted: {device.device_id}")
+    audit_log(f"Target verified, dismounted and locked: {device.device_id}")
+    return locks

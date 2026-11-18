@@ -16,6 +16,7 @@ from cert.generator import CertificateData, generate_certificate, format_capacit
 from wipe.device import (
     DeviceInfo,
     prepare_target,
+    release_volumes,
     open_physical_drive,
     close_drive,
     get_drive_size,
@@ -195,6 +196,7 @@ class WipeWorker(QThread):
             )
 
             handle: int | None = None
+            volume_locks: list[int] = []
             demo_file_path: str | None = None
             cert_path = ""
             success = False
@@ -299,7 +301,9 @@ class WipeWorker(QThread):
                     #    the disk. Raises UnsafeTargetError -> device fails.
                     letters = ", ".join(device.disk_letters or [device.drive_letter])
                     self.status_message.emit(f"Checking and dismounting {letters}...")
-                    prepare_target(device)
+                    # The volumes stay locked until the wipe and verification
+                    # are done; otherwise Windows can remount them mid-wipe.
+                    volume_locks = prepare_target(device)
 
                     # 2. Open physical drive
                     self.status_message.emit(f"Opening {device.device_id}...")
@@ -377,6 +381,10 @@ class WipeWorker(QThread):
                         verify_mode=self.verify_mode,
                         verify_progress_callback=_verify_cb,
                     )
+                    # Wipe + verify done: let go of the volumes before any
+                    # reformat (which needs the disk free).
+                    release_volumes(volume_locks)
+                    volume_locks = []
 
                     if not wipe_result.success:
                         raise RuntimeError(
@@ -582,6 +590,8 @@ class WipeWorker(QThread):
                     except OSError:
                         pass
                     close_drive(handle)
+                release_volumes(volume_locks)
+                volume_locks = []
                 # Clean up demo temp file
                 if demo_file_path is not None:
                     try:
