@@ -535,6 +535,41 @@ def test_worker_holds_volume_locks_for_the_whole_wipe(qtbot, app_config):
     assert released == [7, 8]
 
 
+def test_worker_releases_the_locks_when_closing_the_drive_fails(qtbot, app_config):
+    """Review: an exception from close_drive in the cleanup (e.g. its audit
+    log) must not skip release_volumes or end the worker without a result."""
+    from types import SimpleNamespace
+    from gui.wipe_worker import WipeWorker
+
+    released: list[int] = []
+    errors: list[tuple[int, str]] = []
+
+    def failing_execute(*_a, **_k):
+        raise RuntimeError("write failed (error 1167)")
+
+    no_hidden = SimpleNamespace(supported=False, hpa_present=False, dco_present=False,
+                                hpa_hidden_sectors=0, dco_hidden_sectors=0)
+    with patch("gui.wipe_worker.prepare_target", return_value=[7, 8]), \
+         patch("gui.wipe_worker.release_volumes", side_effect=released.extend), \
+         patch("gui.wipe_worker.open_physical_drive", return_value=1), \
+         patch("gui.wipe_worker.get_drive_size", return_value=1024**2), \
+         patch("gui.wipe_worker.detect_hidden_areas", return_value=no_hidden), \
+         patch("gui.wipe_worker.close_drive", side_effect=OSError("log file locked")), \
+         patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"), \
+         patch("gui.wipe_worker.log_wipe_to_csv"), \
+         patch("gui.wipe_worker.get_next_cert_number", return_value=1), \
+         patch("gui.wipe_worker.audit_log"):
+        worker = WipeWorker(devices=[_gui_lock_test_device()],
+                            wipe_method=_gui_lock_test_method(failing_execute),
+                            config=app_config, verify_mode="none")
+        worker.error.connect(lambda i, msg: errors.append((i, msg)))
+        with qtbot.waitSignal(worker.all_completed, timeout=5000):
+            worker.start()
+
+    assert released == [7, 8]
+    assert errors and "1167" in errors[0][1]
+
+
 def test_worker_releases_the_gate_locks_before_reformatting(qtbot, app_config):
     """The safety re-check before reformat locks the volumes again; Clear-Disk
     needs the disk free, so those locks are released before the reformat."""
