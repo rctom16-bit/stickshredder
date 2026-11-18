@@ -476,6 +476,85 @@ STRINGS: dict[str, tuple[str, str]] = {
         "Then you can overwrite it.",
     ),
     "result.overwrite_instead": ("Stattdessen überschreiben", "Overwrite instead"),
+    "hw.hint_beta_off": (
+        "Hardware-Löschung (Beta) ist für diese SSD möglich — einschalten unter "
+        "Optionen → Beta-Funktionen.",
+        "Hardware erase (Beta) is possible for this SSD — switch it on under "
+        "Options → Beta features.",
+    ),
+    "settings.section_beta": ("Beta-Funktionen", "Beta features"),
+    "settings.beta_hint": (
+        "Schaltet die Hardware-Löschung (Beta) für SATA-SSDs frei, die direkt im PC "
+        "angeschlossen sind: Die SSD löscht sich selbst, danach 1× Nullen mit Prüfung. "
+        "Noch nicht auf echter Hardware getestet.",
+        "Unlocks the hardware erase (Beta) for SATA SSDs connected directly inside the "
+        "PC: the SSD erases itself, then 1× zeros with verification. Not tested on real "
+        "hardware yet.",
+    ),
+    "settings.beta_check": ("Beta-Funktionen aktivieren", "Enable Beta features"),
+    "msg.erasing_title": ("Die SSD löscht sich gerade", "The SSD is erasing itself"),
+    "msg.erasing_text": (
+        "StickShredder kann jetzt nicht beendet werden: Die SSD löscht sich mit ihrem "
+        "eigenen Befehl, und der lässt sich nicht abbrechen. Bitte warten, bis sie fertig "
+        "ist — nicht abstecken und den PC nicht ausschalten.\n\n"
+        "Falls die SSD danach gesperrt ist: temporäres Passwort „{password}“.",
+        "StickShredder cannot quit now: the SSD is erasing itself with its own command, "
+        "which cannot be cancelled. Please wait until it is done — do not unplug it and "
+        "do not switch the PC off.\n\n"
+        "If the SSD is locked afterwards: temporary password \"{password}\".",
+    ),
+    "result.note_hw_locked": (
+        "Die SSD ist mit einem Passwort gesperrt und lässt sich so weder löschen noch "
+        "beschreiben. Stammt die Sperre von einer abgebrochenen Hardware-Löschung, kann "
+        "StickShredder sie entsperren.",
+        "The SSD is locked with a password, so it can be neither erased nor written. "
+        "If the lock comes from an interrupted hardware erase, StickShredder can unlock it.",
+    ),
+    "unlock.button": ("SSD entsperren …", "Unlock the SSD …"),
+    "unlock.link": ("Entsperren …", "Unlock …"),
+    "unlock.title": ("SSD entsperren?", "Unlock the SSD?"),
+    "unlock.text": (
+        "StickShredder versucht einmal, {target} mit dem temporären Passwort „{password}“ "
+        "zu entsperren und das Passwort zu entfernen. Stammt die Sperre nicht von "
+        "StickShredder, zählt das als Fehlversuch — nach etwa fünf nimmt die SSD erst "
+        "nach dem Abstecken wieder ein Passwort an.",
+        "StickShredder tries once to unlock {target} with the temporary password "
+        "\"{password}\" and to remove it. If the lock is not StickShredder's, this counts "
+        "as a failed attempt — after about five the SSD only takes a password again once "
+        "it was unplugged.",
+    ),
+    "unlock.done_title": ("SSD entsperren", "Unlock the SSD"),
+    "unlock.state.unlocked": (
+        "Entsperrt: Das temporäre Passwort ist entfernt. Du kannst die SSD jetzt löschen.",
+        "Unlocked: the temporary password is removed. You can wipe the SSD now.",
+    ),
+    "unlock.state.no_password": ("Die SSD hat kein Passwort — sie ist nicht gesperrt.",
+                                 "The SSD has no password — it is not locked."),
+    "unlock.state.frozen": (
+        "Die SSD ist vom PC gesperrt („frozen“). PC in den Standby schicken und wieder "
+        "aufwecken oder die SSD abstecken und wieder anstecken, dann erneut versuchen.",
+        "The SSD is locked by the PC (\"frozen\"). Put the PC to sleep and wake it, or "
+        "unplug the SSD and plug it back in, then try again.",
+    ),
+    "unlock.state.expired": (
+        "Zu viele Fehlversuche: Die SSD nimmt erst wieder ein Passwort an, wenn sie "
+        "abgesteckt und wieder angesteckt wurde.",
+        "Too many failed attempts: the SSD only takes a password again after it was "
+        "unplugged and plugged back in.",
+    ),
+    "unlock.state.wrong_password": (
+        "Das Passwort passt nicht: Die Sperre stammt nicht von StickShredder. Es gibt "
+        "keinen zweiten Versuch.",
+        "The password does not fit: the lock is not StickShredder's. There is no "
+        "second try.",
+    ),
+    "unlock.state.unsupported": (
+        "Der Anschluss reicht den Befehl nicht weiter — das geht nur bei SATA direkt am "
+        "Microsoft-Treiber.",
+        "The connection does not pass the command on — that only works for SATA on "
+        "Microsoft's driver.",
+    ),
+    "unlock.state.error": ("Entsperren fehlgeschlagen: {error}", "Unlock failed: {error}"),
     # --- Wave 4: pages ---
     # Zertifikate
     "certs.title": ("Zertifikate", "Certificates"),

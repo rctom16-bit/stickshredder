@@ -26,11 +26,11 @@ from wipe.device import (
     lock_volume,
     unlock_volume,
 )
-from wipe import hardware_erase
+from wipe import hardware_erase, secure_erase
 from wipe.methods import WipeMethod, WipeResult
 from wipe.demo import create_demo_file, wipe_demo_file, verify_demo_file
 from wipe.hidden_areas import detect_hidden_areas, hidden_bytes
-from wipe.secure_erase import SecureEraseResult
+from wipe.secure_erase import SecureEraseResult, UnlockResult
 
 if TYPE_CHECKING:
     pass
@@ -145,6 +145,9 @@ class WipeWorker(QThread):
                 f"WipeWorker: unknown verify_mode={verify_mode!r}, "
                 f"falling back to 'full'"
             )
+            verify_mode = "full"
+        if hardware_erase and verify_mode != "full":
+            # The overwrite after the drive's own erase is always fully verified.
             verify_mode = "full"
         self.verify_mode = verify_mode
         if reformat not in REFORMAT_MODES:
@@ -503,7 +506,6 @@ class WipeWorker(QThread):
                         self.status_message.emit("Checking hardware erase support...")
                         outcome = hardware_erase.run(
                             handle, drive_size, self.wipe_method,
-                            verify_mode=self.verify_mode,
                             progress_callback=_progress_cb,
                             verify_progress_callback=_verify_cb,
                             on_erase_started=lambda method, minutes, _i=idx:
@@ -817,3 +819,40 @@ class WipeWorker(QThread):
             self.device_completed.emit(idx, success, cert_path)
 
         self.all_completed.emit()
+
+
+class UnlockWorker(QThread):
+    """„Gesperrte Platte entsperren“ off the GUI thread.
+
+    Same gate as a wipe (``prepare_target``), then one try with the temporary
+    password (``secure_erase.unlock_drive``); handle and volume locks are
+    released in ``finally``. Emits ``unlock_finished(UnlockResult)``.
+    """
+
+    unlock_finished = Signal(object)
+
+    def __init__(self, device: DeviceInfo, parent=None) -> None:
+        super().__init__(parent)
+        self.device = device
+
+    def run(self) -> None:
+        handle: int | None = None
+        volume_locks: list[int] = []
+        try:
+            volume_locks = prepare_target(self.device)
+            handle = open_physical_drive(self.device.device_id)
+            result = secure_erase.unlock_drive(handle)
+        except Exception as exc:  # noqa: BLE001 — shown to the user
+            result = UnlockResult(False, "error", str(exc) or type(exc).__name__)
+        finally:
+            if handle is not None:
+                try:
+                    close_drive(handle)
+                except OSError:
+                    pass
+            release_volumes(volume_locks)
+        try:
+            audit_log(f"GUI unlock: device={self.device.device_id} state={result.state}")
+        except OSError:
+            pass
+        self.unlock_finished.emit(result)

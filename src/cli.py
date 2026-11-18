@@ -33,7 +33,7 @@ from wipe.device import (
 from wipe.methods import ZeroFill, RandomThreePass, BsiVsitr, CustomWipe, WipeResult
 from wipe.verify import VerifyResult
 from wipe.hidden_areas import detect_hidden_areas, hidden_bytes
-from wipe import hardware_erase
+from wipe import hardware_erase, secure_erase
 from wipe.recommend import (
     MULTI_PASS_NOTE_DE, MULTI_PASS_NOTE_EN, Recommendation, media_type_of, recommend,
 )
@@ -456,6 +456,48 @@ def _hardware_stop_message(report: hardware_erase.EraseReport) -> str:
     )
 
 
+def _hardware_interrupted_message() -> str:
+    """Ctrl+C during a hardware erase: what state the disk may be in."""
+    return (
+        "Hardware-Löschung abgebrochen (Strg+C) / hardware erase interrupted (Ctrl+C).\n"
+        "  Der Datenträger ist NICHT sicher gelöscht. Hat das Laufwerk schon mit dem "
+        "Löschen begonnen, löscht es eventuell weiter — nicht abstecken, bis es fertig "
+        "ist. Ist es danach gesperrt: temporäres Passwort "
+        f"„{hardware_erase.TEMP_PASSWORD}“, entsperren mit 'stickshredder unlock'. / "
+        "The disk is NOT securely wiped. If the drive had started erasing it may "
+        "still be at work — do not unplug it until it is done. If it is locked "
+        f"afterwards: temporary password \"{hardware_erase.TEMP_PASSWORD}\", "
+        "unlock it with 'stickshredder unlock'."
+    )
+
+
+# Outcome of `stickshredder unlock` (UnlockResult.state), German / English.
+_UNLOCK_TEXT = {
+    "unlocked": (
+        "Entsperrt: Das temporäre Passwort ist entfernt. / Unlocked: the temporary "
+        "password is removed."
+    ),
+    "no_password": (
+        "Das Laufwerk hat kein Passwort — nichts zu tun. / The drive has no "
+        "password — nothing to do."
+    ),
+    "frozen": _HARDWARE_REFUSAL["frozen"],
+    "expired": (
+        "Zu viele Fehlversuche: Das Laufwerk nimmt erst nach dem Aus- und "
+        "Einschalten (abstecken und wieder anstecken) wieder ein Passwort an. / Too "
+        "many failed attempts: the drive only takes a password again after it was "
+        "powered off and on (unplug and plug it back in)."
+    ),
+    "wrong_password": (
+        "Das Passwort passt nicht: Die Sperre stammt nicht von StickShredder. Ein "
+        "Versuch wurde verbraucht, es gibt keinen zweiten. / The password does not fit: "
+        "the lock is not StickShredder's. One attempt was used; there is no second."
+    ),
+    "unsupported": _HARDWARE_REFUSAL["no_path"],
+    "error": "Entsperren fehlgeschlagen / unlock failed.",
+}
+
+
 def _print_erase_started(method: str, estimated_minutes: int) -> None:
     estimate = (f"Schätzung des Laufwerks / drive's estimate: {estimated_minutes} min"
                 if estimated_minutes else "keine Schätzung / no estimate")
@@ -525,6 +567,72 @@ def cmd_info(args: argparse.Namespace) -> None:
     rec = recommend(device, media, False, schutzklasse)
     print(_c(_Ansi.BOLD, f"  Empfehlung / Recommendation (Schutzklasse {schutzklasse}):"))
     _print_recommendation(rec)
+    print()
+
+
+# -- Command: unlock --------------------------------------------------------
+
+def cmd_unlock(args: argparse.Namespace) -> None:
+    """„Gesperrte Platte entsperren“: remove StickShredder's temporary password.
+
+    For a drive an interrupted hardware erase left locked. Same gates as a
+    wipe (administrator, safety check, prepare_target), then one try with
+    the temporary password (SECURITY UNLOCK + DISABLE PASSWORD).
+    """
+    if not is_admin():
+        _die("Administrator privileges required. Please run StickShredder from an "
+             "elevated (Administrator) terminal and try again.")
+    if not getattr(args, "experimental", False):
+        _die("'unlock' sends ATA security commands (Beta, untested on real hardware). "
+             "Re-run with --experimental to acknowledge.")
+    device = _find_device(args.device, list_devices())
+    if device is None:
+        _die(f"Device '{args.device}' not found. Run 'stickshredder list' to see "
+             "available devices.")
+    safe, reason = is_safe_to_wipe(device, allow_internal=getattr(args, "allow_internal", False))
+    if not safe:
+        _die(reason)
+
+    print(_c(_Ansi.BOLD + _Ansi.CYAN, "\n  StickShredder -- Gesperrte Platte entsperren / Unlock"))
+    print(f"    Laufwerk / Drive:  {device.model or 'Unknown'} · SN "
+          f"{device.serial_number or 'N/A'} · {device.device_id}")
+    print(
+        "    StickShredder versucht EINMAL, das Laufwerk mit dem temporären Passwort "
+        f"„{hardware_erase.TEMP_PASSWORD}“ zu entsperren und das Passwort zu entfernen.\n"
+        "    Passt es nicht, zählt das als Fehlversuch. / StickShredder tries ONCE to "
+        f"unlock the drive with the temporary password \"{hardware_erase.TEMP_PASSWORD}\" "
+        "and to remove it.\n    A wrong password counts as a failed attempt."
+    )
+    print()
+    if not getattr(args, "yes", False):
+        resp = input("  Fortfahren? / Continue? [y/N] ").strip().lower()
+        if resp not in ("y", "yes", "j", "ja"):
+            print("  Aborted.")
+            sys.exit(0)
+
+    handle: int | None = None
+    volume_locks: list[int] = []
+    try:
+        try:
+            volume_locks = prepare_target(device)
+        except UnsafeTargetError as exc:
+            _die(str(exc))
+        handle = open_physical_drive(device.device_id)
+        result = secure_erase.unlock_drive(handle)
+    except OSError as exc:
+        _die(f"Drive access error: {exc}")
+    finally:
+        if handle is not None:
+            close_drive(handle)
+        release_volumes(volume_locks)
+
+    audit_log(f"CLI unlock: device={device.device_id} state={result.state}")
+    message = _UNLOCK_TEXT.get(result.state, _UNLOCK_TEXT["error"])
+    if result.state in ("unsupported", "error") and result.error:
+        message = f"{message} ({result.error})"
+    if not result.success:
+        _die(message)
+    _success(message)
     print()
 
 
@@ -608,7 +716,16 @@ def cmd_wipe(args: argparse.Namespace) -> None:
             "hardware; it may render a drive unusable. Re-run with "
             "--experimental to acknowledge the risk."
         )
-    # A hardware erase is followed by one pass of zeros and the chosen
+    if is_secure_erase:
+        media = media_type_of(device)
+        if not hardware_erase.fits(device, media):
+            _die(
+                "Hardware-Löschung nur für SSDs, die direkt per SATA angeschlossen sind "
+                f"(hier: {_MEDIA_LABEL.get(media, media)}, {device.connection_type}). / "
+                "Hardware erase is only for SSDs connected directly via SATA. "
+                "Use --method zero to overwrite instead."
+            )
+    # A hardware erase is followed by one pass of zeros and a full
     # verification (spec G2): the drive's own report alone is never "ok".
     wipe_method = _resolve_wipe_method(
         argparse.Namespace(**{**vars(args), "method": "zero"}) if is_secure_erase else args
@@ -618,6 +735,10 @@ def cmd_wipe(args: argparse.Namespace) -> None:
     output_dir: str = getattr(args, "output_dir", "") or config.cert_output_dir
     language: str = getattr(args, "language", "") or config.cert_language
     verify_mode: str = getattr(args, "verify", "full") or "full"
+    if is_secure_erase and verify_mode != "full":
+        _info("Hardware-Löschung prüft immer jeden Sektor / a hardware erase always "
+              "verifies every sector (--verify ignored).")
+        verify_mode = "full"
     auto_yes: bool = getattr(args, "yes", False)
 
     # -- Signing key ----------------------------------------------------------
@@ -786,14 +907,17 @@ def cmd_wipe(args: argparse.Namespace) -> None:
                 f"CLI hardware erase started: device={device.drive_letter} "
                 f"verify={verify_mode} operator={args.operator}"
             )
-            outcome = hardware_erase.run(
-                handle, drive_size, wipe_method,
-                verify_mode=verify_mode,
-                progress_callback=_progress_bar,
-                verify_progress_callback=_verify_progress_bar if verify_mode == "full" else None,
-                on_erase_started=_print_erase_started,
-                on_erase_finished=_print_erase_finished,
-            )
+            try:
+                outcome = hardware_erase.run(
+                    handle, drive_size, wipe_method,
+                    progress_callback=_progress_bar,
+                    verify_progress_callback=_verify_progress_bar,
+                    on_erase_started=_print_erase_started,
+                    on_erase_finished=_print_erase_finished,
+                )
+            except KeyboardInterrupt:
+                audit_log(f"CLI hardware erase interrupted (Ctrl+C): {device.device_id}")
+                _die(_hardware_interrupted_message())
             secure_erase_result = outcome.erase
             if outcome.report.status != "erased":
                 _die(_hardware_stop_message(outcome.report))
@@ -1659,6 +1783,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="DIN 66399 protection class for the recommendation (default: from config)",
     )
     sub_info.set_defaults(func=cmd_info)
+
+    # ── unlock ────────────────────────────────────────────────────────────
+    sub_unlock = subparsers.add_parser(
+        "unlock",
+        help="Remove the temporary password an interrupted hardware erase left (Beta)",
+        description="Gesperrte Platte entsperren: removes StickShredder's temporary drive "
+                    "password (SECURITY UNLOCK + DISABLE PASSWORD) from a SATA drive an "
+                    "interrupted hardware erase left locked. One try only.",
+    )
+    sub_unlock.add_argument(
+        "--device", required=True, metavar="DRIVE",
+        help="Drive letter (e.g. F:) or disk number (e.g. 2 or PhysicalDrive2)",
+    )
+    sub_unlock.add_argument(
+        "--experimental", action="store_true",
+        help="Acknowledge this Beta feature (required).",
+    )
+    sub_unlock.add_argument(
+        "--allow-internal", action="store_true",
+        help="Allow internal drives (the Windows system disk is always refused).",
+    )
+    sub_unlock.add_argument(
+        "--yes", "-y", action="store_true",
+        help="Skip the confirmation prompt",
+    )
+    sub_unlock.set_defaults(func=cmd_unlock)
 
     # ── history ───────────────────────────────────────────────────────────
     sub_history = subparsers.add_parser(

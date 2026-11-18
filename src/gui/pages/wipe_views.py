@@ -157,9 +157,11 @@ class HardwareEraseDialog(QDialog):
         self.cancel_button = QPushButton(tr("common.cancel"))
         self.cancel_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.cancel_button.clicked.connect(self.reject)
+        self.cancel_button.setDefault(True)  # Enter cancels; confirming takes a click
         self.confirm_button = QPushButton(tr("hwdlg.confirm"))
         self.confirm_button.setProperty("variant", "accent")
         self.confirm_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.confirm_button.setAutoDefault(False)
         self.confirm_button.clicked.connect(self.accept)
         buttons.addWidget(self.cancel_button)
         buttons.addWidget(self.confirm_button)
@@ -413,7 +415,9 @@ class RunningView(QWidget):
         self._log_labels = []
 
     def stop(self) -> None:
+        """The run is over (the drive's erase, if any, has returned)."""
         self._elapsed_timer.stop()
+        self._erase = None
         self.progress_bar.setAnimated(False)
         self.cancel_button.setEnabled(False)
 
@@ -486,6 +490,7 @@ class ResultView(QWidget):
 
     next_requested = Signal()
     overwrite_requested = Signal()
+    unlock_requested = Signal(object)  # the disk to unlock
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -534,8 +539,12 @@ class ResultView(QWidget):
         self.overwrite_button = QPushButton()
         self.overwrite_button.setProperty("variant", "accent")
         self.overwrite_button.hide()
-        for button in (self.overwrite_button, self.open_cert_button, self.open_folder_button,
-                       self.next_button):
+        # The drive may still have (or is locked by) the temporary password.
+        self.unlock_button = QPushButton()
+        self.unlock_button.setProperty("variant", "large")
+        self.unlock_button.hide()
+        for button in (self.unlock_button, self.overwrite_button, self.open_cert_button,
+                       self.open_folder_button, self.next_button):
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             actions.addWidget(button)
         actions.addStretch(1)
@@ -544,6 +553,7 @@ class ResultView(QWidget):
         self.open_folder_button.clicked.connect(self._open_folder)
         self.next_button.clicked.connect(self.next_requested)
         self.overwrite_button.clicked.connect(self.overwrite_requested)
+        self.unlock_button.clicked.connect(self._request_unlock)
 
         self.note_card = make_card("note")
         note = QVBoxLayout(self.note_card)
@@ -592,6 +602,7 @@ class ResultView(QWidget):
         self.open_folder_button.setText(tr("result.open_folder"))
         self.next_button.setText(tr("result.next"))
         self.overwrite_button.setText(tr("result.overwrite_instead"))
+        self.unlock_button.setText(tr("unlock.button"))
         self.cert_eyebrow.setText(tr("result.cert_eyebrow"))
         self.qr_text_label.setText(tr("result.qr_text"))
         if self._outcome is not None:
@@ -618,13 +629,20 @@ class ResultView(QWidget):
 
         note = {"limited": tr("result.note_limited"),
                 "failed": tr("result.note_failed")}.get(status, "")
-        if hardware == "refused":
+        locked = hardware == "refused" and getattr(outcome.hardware, "reason", "") == "locked"
+        password = hardware == "failed" and getattr(outcome.hardware, "password_may_be_set", False)
+        if locked:
+            note = tr("result.note_hw_locked")
+        elif hardware == "refused":
             note = tr("result.note_hw_refused")
-        elif hardware == "failed" and getattr(outcome.hardware, "password_may_be_set", False):
+        elif password:
             note = tr("result.note_hw_failed", password=TEMP_PASSWORD)
         self.note_label.setText(note)
         self.note_card.setVisible(bool(note))
-        self.overwrite_button.setVisible(hardware in ("refused", "failed"))
+        # A locked drive takes no writes: unlock it first.
+        self.overwrite_button.setVisible(hardware in ("refused", "failed") and not locked)
+        self.unlock_button.setVisible(locked or password)
+        self.unlock_button.setEnabled(True)
 
         payload = outcome.payload
         self.cert_eyebrow.setText(tr("result.cert_eyebrow" if payload
@@ -718,6 +736,14 @@ class ResultView(QWidget):
             return tr("val.not_formatted")
         return tr("val.formatted", fs=FS_NAMES[outcome.reformat],
                   label=fs_label(outcome.options()))
+
+    def _request_unlock(self) -> None:
+        if self._outcome is not None:
+            self.unlock_requested.emit(self._outcome.device)
+
+    def unlock_done(self) -> None:
+        """The disk was unlocked: nothing left to unlock here."""
+        self.unlock_button.hide()
 
     def summary_rows(self) -> dict[str, str]:
         return {key.text(): value.text() for key, value in self._row_labels}

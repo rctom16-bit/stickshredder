@@ -37,8 +37,9 @@ disk may receive drive commands at all.
    present disks with the same bus types but handle these requests in their
    own code. Disks behind them get no drive commands.
 4. **Read-only by construction**, except the explicitly enabled, experimental
-   hardware erase. The SAT path refuses every ATA command that is not on a
-   short read-only list before anything is sent.
+   hardware erase and the removal of its temporary password. The SAT path
+   refuses every ATA command that is not on a short read-only list before
+   anything is sent.
 5. **Every structure matches the Windows SDK.** See "How the code is checked".
 
 ## Choosing the path
@@ -80,6 +81,8 @@ was handed an already-open handle; the probe does not even open it.
 | DEVICE CONFIGURATION IDENTIFY | `B1h` / feature `C2h` | reads the factory size (Device Configuration Overlay) | probe, HPA/DCO check |
 | SMART READ DATA | `B0h` / feature `D0h` | reads the health attribute table | probe |
 | SECURITY SET PASSWORD, ERASE PREPARE, ERASE UNIT | `F1h`, `F3h`, `F4h` | **erases the drive** with its built-in Secure Erase | experimental hardware erase only, after explicit opt-in and confirmation |
+| SECURITY DISABLE PASSWORD | `F6h` | removes StickShredder's temporary password again | after a failed erase step, when the drive still has the password and is unlocked; and „Gesperrte Platte entsperren“ |
+| SECURITY UNLOCK | `F2h` | unlocks a drive an interrupted erase left locked, with StickShredder's temporary password — one try, never another password | „Gesperrte Platte entsperren“ (GUI) / `stickshredder unlock --experimental` (CLI), after confirmation |
 
 ### Path `sat` — `IOCTL_SCSI_PASS_THROUGH_DIRECT` with ATA PASS-THROUGH (16)
 

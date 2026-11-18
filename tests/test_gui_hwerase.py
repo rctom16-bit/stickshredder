@@ -43,6 +43,7 @@ def page(qtbot, app_config, gui_reset):
     from gui.theme import ThemeManager
 
     MEDIA.clear()
+    app_config.beta_features = True  # the hardware erase is a Beta feature
     ThemeManager(gui_reset, "dark").apply()
     widget = DeletePage(app_config, list_devices_fn=lambda: [],
                         media_fn=lambda d: MEDIA.get(d.device_id, "flash"))
@@ -620,11 +621,11 @@ def test_after_the_erase_the_overwrite_shows_its_percentage(hw_running):
     assert any("SSD meldet: gelöscht" in line for line in view.protocol_texts())
 
 
-def _hw_outcome(report, status="failed", payload=None, **kwargs):
+def _hw_outcome(report, status="failed", payload=None, device=None, **kwargs):
     from gui.pages.wipe_views import WipeOutcome
 
-    return WipeOutcome(device=sata_ssd(), status=status, payload=payload, hardware_erase=True,
-                       hardware=report, duration_seconds=65, **kwargs)
+    return WipeOutcome(device=device or sata_ssd(), status=status, payload=payload,
+                       hardware_erase=True, hardware=report, duration_seconds=65, **kwargs)
 
 
 def test_result_after_a_frozen_drive_explains_and_offers_to_overwrite(page):
@@ -772,3 +773,364 @@ def test_hardware_views_have_every_text_in_both_languages_and_themes(
                  for w in root.findChildren(QLabel) + root.findChildren(QAbstractButton)]
         assert [t for t in texts if raw_key.fullmatch(t)] == []
     assert not page.grab().isNull() and not dialog.grab().isNull()
+
+
+# -- Review fixes ---------------------------------------------------------------------
+
+
+class _SyncSignal:
+    """Signal stand-in that calls its slots at once."""
+
+    def __init__(self):
+        self._slots = []
+
+    def connect(self, slot):
+        self._slots.append(slot)
+
+    def emit(self, *args):
+        for slot in list(self._slots):
+            slot(*args)
+
+
+def test_hardware_erase_needs_the_beta_switch(page, no_drive_commands):
+    page.config.beta_features = False
+    ssd = show_ssd(page)
+    assert not page.hardware_card.isVisible()
+    assert page.hardware_hint.isVisible()
+    assert "Optionen" in page.hardware_hint.text() and "Beta" in page.hardware_hint.text()
+    page.select_device(make_device("F:", 1))
+    assert "Hardware-Löschung · Beta" not in page.row_for(ssd).chip_texts()
+
+    page.config.beta_features = True
+    page.set_options(page.options)  # what saving the options page does
+    page.select_device(ssd)
+    assert page.hardware_card.isVisible()
+    assert no_drive_commands == []
+
+
+def test_options_page_switches_the_beta_features(qtbot, app_config, gui_reset):
+    from core.config import AppConfig
+    from gui.pages.options_page import OptionsPage
+
+    options = OptionsPage(app_config)
+    qtbot.addWidget(options)
+    assert app_config.beta_features is False
+    assert not options.beta_check.isChecked()
+    options.beta_check.setChecked(True)
+    assert options.save()
+    assert app_config.beta_features is True
+    assert AppConfig.load().beta_features is True
+    app_config.beta_features = False
+    options.load_from_config()
+    assert not options.beta_check.isChecked()
+
+
+def test_old_config_without_the_beta_switch_loads_with_it_off(isolated_profile):
+    import json
+
+    from core.config import AppConfig
+
+    (isolated_profile / "config.json").write_text(
+        json.dumps({"operator_name": "Robin"}), encoding="utf-8")
+    config = AppConfig.load()
+    assert config.operator_name == "Robin" and config.beta_features is False
+
+
+def test_a_new_disk_on_the_same_number_starts_fresh(hw_running):
+    from wipe.hardware_erase import EraseReport
+
+    page = hw_running
+    ssd = page._run.device
+    page._on_hardware_erase_finished(0, EraseReport("refused", "unsupported"))
+    page._on_device_completed(0, False, "")
+    page._on_all_completed()
+    page.result_view.next_button.click()
+    other = replace(ssd, serial_number="S6PNNS0T999999")
+    MEDIA[other.device_id] = "ssd"
+    page.set_devices([make_device("F:", 1), other])
+    page.select_device(other)
+    assert page.hardware_card.isVisible()   # another SSD now has that disk number
+    page.set_devices([make_device("F:", 1), ssd])
+    page.select_device(ssd)
+    assert not page.hardware_card.isVisible()
+
+
+def test_the_hardware_choice_does_not_carry_over_to_a_swapped_disk(page, monkeypatch):
+    ssd = show_ssd(page)
+    choose_hardware(page, monkeypatch)
+    swapped = replace(ssd, serial_number="SWAPPED-0001")
+    MEDIA[swapped.device_id] = "ssd"
+    page.set_devices([make_device("F:", 1), swapped])  # same number, other disk
+    assert page.selected_device is swapped
+    assert not page.options.hardware_erase
+
+
+def test_the_page_runs_the_hardware_erase_with_full_verification(page, monkeypatch):
+    import gui.pages.delete_page as delete_page
+
+    captured = {}
+
+    class FakeWorker:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            for name in _ALL_SIGNALS:
+                setattr(self, name, _FakeSignal())
+
+        def start(self):
+            pass
+
+        def isRunning(self):  # noqa: N802
+            return True
+
+    monkeypatch.setattr(delete_page, "WipeWorker", FakeWorker)
+    page.set_options(replace(page.options, verify_mode="sample"))
+    ssd = show_ssd(page)
+    choose_hardware(page, monkeypatch)
+    assert page.verify_tile.value_text() == "Jeder Sektor"
+    page.start_wipe(ssd)
+    assert captured["verify_mode"] == "full"
+
+
+def test_the_worker_verifies_every_sector_after_a_hardware_erase(qtbot, app_config, fake_disk):
+    from gui.wipe_worker import WipeWorker
+
+    worker = WipeWorker(devices=[sata_ssd()], wipe_method=FakeZeroFill(fake_disk),
+                        config=app_config, verify_mode="sample", hardware_erase=True)
+    assert worker.verify_mode == "full"
+    with qtbot.waitSignal(worker.all_completed, timeout=20000):
+        worker.start()
+    worker.wait(5000)
+    assert ("zero", True, "full") in fake_disk.events
+
+
+def test_window_cannot_close_while_the_ssd_erases_itself(qtbot, app_config, gui_reset,
+                                                          monkeypatch):
+    from PySide6.QtGui import QCloseEvent
+
+    import gui.app_window as app_window
+    import gui.pages.delete_page as delete_page
+    from wipe.hardware_erase import TEMP_PASSWORD
+
+    monkeypatch.setattr(delete_page, "list_devices", lambda: [])
+    shown = []
+    monkeypatch.setattr(app_window, "show_message",
+                        lambda parent, title, text, kind="info": shown.append(text))
+    asked = []
+    monkeypatch.setattr(app_window, "ask_yes_no", lambda *a, **k: asked.append(a) or True)
+    window = app_window.AppWindow(app_config)
+    qtbot.addWidget(window)
+    window.delete_page.running_view.begin_hardware_erase("ata-enhanced", 2)
+
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert not event.isAccepted()
+    assert asked == []                       # no "quit anyway" for this step
+    assert shown and TEMP_PASSWORD in shown[0] and "abstecken" in shown[0]
+
+    window.delete_page.running_view.stop()   # the run is over: closing works again
+    event = QCloseEvent()
+    window.closeEvent(event)
+    assert event.isAccepted()
+
+
+def test_hardware_dialog_defaults_to_cancel(qtbot, gui_reset):
+    from PySide6.QtTest import QTest
+
+    from gui.pages.wipe_views import HardwareEraseDialog
+
+    dlg = HardwareEraseDialog(sata_ssd())
+    qtbot.addWidget(dlg)
+    assert dlg.cancel_button.isDefault()
+    assert not dlg.confirm_button.isDefault() and not dlg.confirm_button.autoDefault()
+    dlg.untested_check.setChecked(True)
+    accepted, rejected = [], []
+    dlg.accepted.connect(lambda: accepted.append(1))
+    dlg.rejected.connect(lambda: rejected.append(1))
+    dlg.show()
+    QTest.keyClick(dlg, Qt.Key.Key_Return)
+    assert accepted == [] and rejected == [1]
+
+
+# -- „Gesperrte Platte entsperren“ ----------------------------------------------------
+
+
+def test_result_offers_to_unlock_after_a_failed_erase_with_the_password(page):
+    from wipe.hardware_erase import EraseReport
+
+    page.show_result(_hw_outcome(EraseReport("failed", "error", detail="x",
+                                             password_may_be_set=True)))
+    assert page.result_view.unlock_button.isVisible()
+    assert page.result_view.overwrite_button.isVisible()
+
+
+def test_a_locked_drive_is_offered_unlock_instead_of_overwrite(page):
+    from wipe.hardware_erase import EraseReport
+
+    page.show_result(_hw_outcome(EraseReport("refused", "locked")))
+    view = page.result_view
+    assert view.unlock_button.isVisible()
+    assert not view.overwrite_button.isVisible()  # a locked drive takes no writes
+    assert "Passwort" in view.note_label.text()
+
+
+@pytest.mark.parametrize("report_args", [
+    ("refused", "frozen", False), ("refused", "unsupported", False), ("failed", "error", False),
+])
+def test_no_unlock_offer_without_a_password(page, report_args):
+    from wipe.hardware_erase import EraseReport
+
+    status, reason, password = report_args
+    page.show_result(_hw_outcome(EraseReport(status, reason, password_may_be_set=password)))
+    assert not page.result_view.unlock_button.isVisible()
+
+
+def _unlock_setup(page, monkeypatch, *, answer=True, result=None):
+    import gui.pages.delete_page as delete_page
+    from wipe.secure_erase import UnlockResult
+
+    state = {"asked": [], "started": [], "messages": []}
+    monkeypatch.setattr(delete_page, "is_safe_to_wipe",
+                        lambda device, allow_internal=False: (True, ""))
+    monkeypatch.setattr(delete_page, "ask_yes_no",
+                        lambda *a, **k: state["asked"].append(a) or answer)
+    monkeypatch.setattr(delete_page, "show_message",
+                        lambda parent, title, text, kind="info":
+                        state["messages"].append((text, kind)))
+
+    class FakeUnlockWorker:
+        def __init__(self, device, parent=None):
+            self.device = device
+            self.unlock_finished = _SyncSignal()
+
+        def start(self):
+            state["started"].append(self.device)
+            self.unlock_finished.emit(result or UnlockResult(True, "unlocked"))
+
+        def isRunning(self):  # noqa: N802
+            return False
+
+        def wait(self, _ms=0):
+            return True
+
+    monkeypatch.setattr(delete_page, "UnlockWorker", FakeUnlockWorker)
+    return state
+
+
+def test_unlock_from_the_result_asks_runs_and_brings_the_offer_back(page, monkeypatch):
+    from wipe.hardware_erase import EraseReport
+
+    state = _unlock_setup(page, monkeypatch)
+    ssd = show_ssd(page)
+    page._remember_refusal(ssd, "locked")
+    page.show_result(_hw_outcome(EraseReport("refused", "locked"), device=ssd))
+    page.result_view.unlock_button.click()
+
+    assert len(state["asked"]) == 1
+    assert state["started"] == [ssd]
+    text, kind = state["messages"][0]
+    assert "Entsperrt" in text and kind == "info"
+    assert not page.result_view.unlock_button.isVisible()
+    page.result_view.next_button.click()
+    page.set_devices([make_device("F:", 1), ssd])
+    page.select_device(ssd)
+    assert page.hardware_card.isVisible()       # unlocked: the offer is back
+
+
+def test_cancelled_unlock_sends_nothing(page, monkeypatch):
+    from wipe.hardware_erase import EraseReport
+
+    state = _unlock_setup(page, monkeypatch, answer=False)
+    page.show_result(_hw_outcome(EraseReport("refused", "locked")))
+    page.result_view.unlock_button.click()
+    assert state["started"] == []
+    assert state["messages"] == []
+
+
+def test_a_wrong_password_is_explained(page, monkeypatch):
+    from wipe.hardware_erase import EraseReport
+    from wipe.secure_erase import UnlockResult
+
+    state = _unlock_setup(page, monkeypatch,
+                          result=UnlockResult(False, "wrong_password", "refused"))
+    page.show_result(_hw_outcome(EraseReport("refused", "locked")))
+    page.result_view.unlock_button.click()
+    text, kind = state["messages"][0]
+    assert "passt nicht" in text and kind == "warning"
+    assert page.result_view.unlock_button.isVisible()
+
+
+def test_a_locked_disk_can_be_unlocked_from_the_selection(page, monkeypatch):
+    state = _unlock_setup(page, monkeypatch)
+    ssd = show_ssd(page)
+    page._remember_refusal(ssd, "locked")
+    page.select_device(ssd)
+    assert "Passwort gesperrt" in page.hardware_hint.text()
+    assert page.unlock_link.isVisible()
+    page.unlock_link.click()
+    assert state["started"] == [ssd]
+    assert page.hardware_card.isVisible() and not page.unlock_link.isVisible()
+
+
+def test_unlock_result_is_handled_on_the_gui_thread(qtbot, page, fake_disk, monkeypatch):
+    """The real worker thread: its result must reach the page on the GUI thread."""
+    from PySide6.QtCore import QThread
+    from PySide6.QtWidgets import QApplication
+
+    import gui.pages.delete_page as delete_page
+    import wipe.secure_erase as secure_erase
+    from wipe.secure_erase import UnlockResult
+
+    monkeypatch.setattr(delete_page, "is_safe_to_wipe",
+                        lambda device, allow_internal=False: (True, ""))
+    monkeypatch.setattr(delete_page, "ask_yes_no", lambda *a, **k: True)
+    monkeypatch.setattr(secure_erase, "unlock_drive",
+                        lambda handle: UnlockResult(True, "unlocked"))
+    threads = []
+    monkeypatch.setattr(delete_page, "show_message",
+                        lambda *a, **k: threads.append(QThread.currentThread()))
+    ssd = show_ssd(page)
+    page.unlock_disk(ssd)
+    qtbot.waitUntil(lambda: bool(threads), timeout=5000)
+    assert threads == [QApplication.instance().thread()]
+    qtbot.waitUntil(lambda: page.unlock_worker is None, timeout=5000)
+
+
+def test_unlock_worker_uses_the_gate_and_releases_everything(qtbot, fake_disk, monkeypatch):
+    import wipe.secure_erase as secure_erase
+    from gui.wipe_worker import UnlockWorker
+    from wipe.secure_erase import UnlockResult
+
+    handles = []
+    monkeypatch.setattr(secure_erase, "unlock_drive",
+                        lambda handle: handles.append(handle) or UnlockResult(True, "unlocked"))
+    worker = UnlockWorker(sata_ssd())
+    results = []
+    worker.unlock_finished.connect(results.append)
+    with qtbot.waitSignal(worker.unlock_finished, timeout=5000):
+        worker.start()
+    worker.wait(2000)
+    assert fake_disk.events == ["gate"] and handles == [777]
+    assert fake_disk.released == [11, 12] and fake_disk.closed == [777]
+    assert results[0].state == "unlocked"
+
+
+def test_unlock_worker_stops_at_a_refusing_gate(qtbot, fake_disk, monkeypatch):
+    import gui.wipe_worker as wipe_worker
+    import wipe.secure_erase as secure_erase
+    from gui.wipe_worker import UnlockWorker
+    from wipe.device import UnsafeTargetError
+
+    def refuse(device):
+        raise UnsafeTargetError("ist nicht mehr das ausgewählte Gerät / is no longer it")
+
+    monkeypatch.setattr(wipe_worker, "prepare_target", refuse)
+    monkeypatch.setattr(secure_erase, "unlock_drive",
+                        lambda handle: pytest.fail("unlock without the gate"))
+    worker = UnlockWorker(sata_ssd())
+    results = []
+    worker.unlock_finished.connect(results.append)
+    with qtbot.waitSignal(worker.unlock_finished, timeout=5000):
+        worker.start()
+    worker.wait(2000)
+    assert results[0].state == "error" and "is no longer it" in results[0].error
+    assert fake_disk.closed == []

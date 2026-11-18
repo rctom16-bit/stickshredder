@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from gui.i18n import tr
+from wipe import hardware_erase
 from wipe.methods import BsiVsitr, CustomWipe, RandomThreePass, WipeMethod, ZeroFill
 from wipe.recommend import recommend
 
@@ -16,11 +17,6 @@ FS_NAMES = {"exfat": "exFAT", "fat32": "FAT32", "ntfs": "NTFS"}
 
 # Conservative MB/s for the time estimate (same figure as the old window).
 ESTIMATE_MBPS = 80.0
-
-# Connections whose disks may reach the drive's own erase: wipe.secure_erase
-# only works on the "ata" path (SATA on Microsoft's storahci driver). USB
-# bridges (SAT) are read-only by design and NVMe has no erase path yet.
-HARDWARE_CONNECTIONS = ("SATA", "ATA")
 
 # Old config keys ("quick" was the GUI's name for the one-pass zero fill).
 _CONFIG_METHODS = {"quick": "zero", "zero": "zero", "standard": "standard", "bsi": "bsi"}
@@ -57,10 +53,16 @@ def hardware_erase_fits(device, media: str, schutzklasse: int = 2) -> bool:
     Never sends a drive command: the worker asks the drive itself after the
     safety gate, and refuses before any write when the drive says no.
     """
-    if device.is_system_drive:
-        return False
-    plausible = (device.connection_type or "").upper() in HARDWARE_CONNECTIONS
-    return recommend(device, media, plausible, schutzklasse).hardware_erase == "secure-erase"
+    plausible = hardware_erase.fits(device, media)
+    return plausible and recommend(
+        device, media, plausible, schutzklasse).hardware_erase == "secure-erase"
+
+
+def run_options(options: WipeOptions) -> WipeOptions:
+    """What actually runs: a hardware erase always verifies every sector."""
+    if options.hardware_erase and options.verify_mode != "full":
+        return replace(options, verify_mode="full")
+    return options
 
 
 def hardware_erase_hint(device, media: str) -> str:
@@ -94,7 +96,7 @@ def estimate_seconds(options: WipeOptions, capacity_bytes: int) -> float:
     """Rough wipe time: every pass plus one full read for a full verify."""
     mb = max(0, capacity_bytes) / (1024 * 1024)
     seconds = mb / ESTIMATE_MBPS * passes_of(options)
-    if options.verify_mode == "full":
+    if run_options(options).verify_mode == "full":
         seconds += mb / ESTIMATE_MBPS
     return seconds
 

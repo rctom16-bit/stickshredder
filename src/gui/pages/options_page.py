@@ -14,6 +14,7 @@ from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -132,6 +133,7 @@ class OptionsPage(QWidget):
         left.addWidget(self._build_wipe_section())
         left.addStretch(1)
         right.addWidget(self._build_look_section())
+        right.addWidget(self._build_beta_section())
         right.addWidget(self._build_demo_section())
         right.addWidget(self._build_about_section())
         right.addStretch(1)
@@ -257,6 +259,13 @@ class OptionsPage(QWidget):
                                                  self.language_requested)
         return card
 
+    def _build_beta_section(self) -> QFrame:
+        card, layout = self._section("settings.section_beta", "settings.beta_hint")
+        self.beta_check = QCheckBox()
+        self.beta_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout.addWidget(self.beta_check)
+        return card
+
     def _build_demo_section(self) -> QFrame:
         card, layout = self._section("demo.title")
         self.demo_text = make_label("", "muted", wrap=True)
@@ -291,6 +300,7 @@ class OptionsPage(QWidget):
         _set_combo(self.method_combo, method)
         _set_combo(self.verify_combo, cfg.default_verify_mode)
         _set_combo(self.sk_combo, int(cfg.default_schutzklasse or 2))
+        self.beta_check.setChecked(bool(getattr(cfg, "beta_features", False)))
         self.sync_appearance(getattr(cfg, "theme", "system"), getattr(cfg, "ui_language", "de"))
         self._status = None
         self.status_label.hide()
@@ -326,6 +336,7 @@ class OptionsPage(QWidget):
         cfg.default_wipe_method = self.method_combo.currentData() or "quick"
         cfg.default_verify_mode = self.verify_combo.currentData() or "full"
         cfg.default_schutzklasse = int(self.sk_combo.currentData() or 2)
+        cfg.beta_features = self.beta_check.isChecked()
         self.cert_dir_edit.setText(cfg.cert_output_dir)
         try:
             cfg.save()
@@ -383,6 +394,7 @@ class OptionsPage(QWidget):
             button.setText(tr(f"settings.theme_{value}"))
         for value, button in self.language_buttons.items():
             button.setText(tr(f"settings.ui_{value}"))
+        self.beta_check.setText(tr("settings.beta_check"))
         self.demo_text.setText(tr("settings.demo_text"))
         self.demo_button.setText(tr("demo.start"))
         self.version_label.setText(f"StickShredder · {tr('settings.version', version=APP_VERSION)}")

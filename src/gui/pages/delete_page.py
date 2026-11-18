@@ -76,8 +76,9 @@ from gui.wipe_options import (
     hardware_erase_fits,
     hardware_erase_hint,
     method_label,
+    run_options,
 )
-from gui.wipe_worker import WipeWorker
+from gui.wipe_worker import UnlockWorker, WipeWorker
 from wipe.demo import DEFAULT_DEMO_SIZE, create_demo_device
 from wipe.device import DeviceInfo, is_safe_to_wipe, list_devices, unique_disks
 from wipe.hardware_erase import TEMP_PASSWORD
@@ -90,6 +91,13 @@ _MiB = 1024 * 1024
 DEMO_SSD_ID = "\\\\.\\DemoDevice1"
 # Refusals that will not change by trying again: hide the offer for that disk.
 _FINAL_REFUSALS = ("no_path", "unsupported", "locked")
+_UNLOCK_KEYS = {f"unlock.state.{s}" for s in (
+    "unlocked", "no_password", "frozen", "expired", "wrong_password", "unsupported", "error")}
+
+
+def disk_key(device: DeviceInfo) -> tuple[str, str]:
+    """A disk's identity: its number can pass to another disk after replugging."""
+    return device.device_id, (device.serial_number or "").strip()
 
 
 def is_demo(device: DeviceInfo) -> bool:
@@ -294,15 +302,16 @@ class DeletePage(QWidget):
         self.options = WipeOptions.from_config(config)
         self.worker: WipeWorker | None = None
         self._devices: list[DeviceInfo] = []
-        self._media: dict[str, str] = {}
+        self._media: dict[tuple[str, str], str] = {}   # disk_key -> media type
         self._selected: DeviceInfo | None = None
         self._rows: list[DiskRow] = []
         self._run: _Run | None = None
         self._fingerprint: str | None = None
         # Hardware erase (Beta): the disk it was confirmed for, and disks whose
-        # drive said a final "no" in this session (device id -> reason).
-        self._hardware_device_id: str | None = None
-        self._no_hardware: dict[str, str] = {}
+        # drive said a final "no" in this session (disk_key -> reason).
+        self._hardware_key: tuple[str, str] | None = None
+        self._no_hardware: dict[tuple[str, str], str] = {}
+        self.unlock_worker: UnlockWorker | None = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -314,6 +323,7 @@ class DeletePage(QWidget):
         self.running_view.cancel_requested.connect(self._on_cancel_clicked)
         self.result_view.next_requested.connect(self.back_to_selection)
         self.result_view.overwrite_requested.connect(self.overwrite_instead)
+        self.result_view.unlock_requested.connect(self.unlock_disk)
         for view in (self.select_view, self.running_view, self.result_view):
             self.stack.addWidget(view)
         self.retranslate()
@@ -395,8 +405,17 @@ class DeletePage(QWidget):
         hardware.addLayout(hardware_head)
         hardware.addWidget(self.hardware_text)
         hero_layout.addWidget(self.hardware_card)
+        hint_row = QHBoxLayout()
+        hint_row.setSpacing(12)
         self.hardware_hint = make_label("", "hint", wrap=True)
-        hero_layout.addWidget(self.hardware_hint)
+        # A disk the drive reported as password-locked: unlock it from here.
+        self.unlock_link = QPushButton()
+        self.unlock_link.setProperty("variant", "link")
+        self.unlock_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.unlock_link.clicked.connect(lambda: self._selected and self.unlock_disk(self._selected))
+        hint_row.addWidget(self.hardware_hint, 1)
+        hint_row.addWidget(self.unlock_link, 0, Qt.AlignmentFlag.AlignTop)
+        hero_layout.addLayout(hint_row)
 
         under_tiles = QHBoxLayout()
         under_tiles.setSpacing(12)
@@ -497,7 +516,17 @@ class DeletePage(QWidget):
                 self.result_view: "result"}[self.stack.currentWidget()]
 
     def is_busy(self) -> bool:
-        return self.worker is not None and self.worker.isRunning()
+        wiping = self.worker is not None and self.worker.isRunning()
+        unlocking = self.unlock_worker is not None and self.unlock_worker.isRunning()
+        return wiping or unlocking
+
+    def stop_work(self) -> None:
+        """Quitting: cancel the wipe and wait for the threads to end."""
+        if self.worker is not None:
+            self.worker.cancel()
+            self.worker.wait(5000)
+        if self.unlock_worker is not None:
+            self.unlock_worker.wait(5000)
 
     def disk_rows(self) -> list[DiskRow]:
         return list(self._rows)
@@ -530,8 +559,8 @@ class DeletePage(QWidget):
     def set_devices(self, devices: list[DeviceInfo]) -> None:
         self._devices = unique_disks(list(devices))
         for device in self._devices:
-            if device.device_id not in self._media:
-                self._media[device.device_id] = self._media_for(device)
+            if disk_key(device) not in self._media:
+                self._media[disk_key(device)] = self._media_for(device)
         allow = self.allow_internal_checkbox.isChecked()
         previous = self._selected
         self._selected = None
@@ -558,11 +587,11 @@ class DeletePage(QWidget):
         """Add the demo stick (selected) and the demo SSD for the hardware erase."""
         demo = create_demo_device()
         self._devices.append(demo)
-        self._media[demo.device_id] = "flash"
+        self._media[disk_key(demo)] = "flash"
         if all(d.device_id != DEMO_SSD_ID for d in self._devices):
             ssd = create_demo_ssd()
             self._devices.append(ssd)
-            self._media[ssd.device_id] = "ssd"
+            self._media[disk_key(ssd)] = "ssd"
         self._selected = demo
         self._render_selection()
         return demo
@@ -603,28 +632,47 @@ class DeletePage(QWidget):
 
     def _recommendation(self):
         device = self._selected
-        return recommend(device, self._media.get(device.device_id, "unknown"),
+        return recommend(device, self._media_type(device),
                          self._hardware_fits(device), self.options.schutzklasse)
 
-    def _hardware_fits(self, device: DeviceInfo | None) -> bool:
-        """Offer the hardware erase? WMI facts only — never a drive command."""
-        if device is None or device.device_id in self._no_hardware:
+    def _media_type(self, device: DeviceInfo) -> str:
+        return self._media.get(disk_key(device), "unknown")
+
+    def _beta_on(self) -> bool:
+        return bool(getattr(self.config, "beta_features", False))
+
+    def _hardware_possible(self, device: DeviceInfo | None) -> bool:
+        """WMI facts and this session's refusals — never a drive command."""
+        if device is None or disk_key(device) in self._no_hardware:
             return False
-        return hardware_erase_fits(device, self._media.get(device.device_id, "unknown"),
+        return hardware_erase_fits(device, self._media_type(device),
                                    self.options.schutzklasse)
+
+    def _hardware_fits(self, device: DeviceInfo | None) -> bool:
+        """Offer the hardware erase? Only with „Beta-Funktionen“ switched on."""
+        return self._beta_on() and self._hardware_possible(device)
 
     def _hardware_hint(self, device: DeviceInfo | None) -> str:
         if device is None:
             return ""
-        reason = self._no_hardware.get(device.device_id)
+        reason = self._no_hardware.get(disk_key(device))
         if reason:
             return tr("hw.hint_refused", reason=tr(f"hw.short.{reason}"))
-        return hardware_erase_hint(device, self._media.get(device.device_id, "unknown"))
+        if not self._beta_on() and self._hardware_possible(device):
+            return tr("hw.hint_beta_off")
+        return hardware_erase_hint(device, self._media_type(device))
+
+    def _remember_refusal(self, device: DeviceInfo, reason: str) -> None:
+        """The drive said a final "no": no offer for this disk in this session."""
+        self._no_hardware[disk_key(device)] = reason
+
+    def _forget_refusal(self, device: DeviceInfo) -> None:
+        self._no_hardware.pop(disk_key(device), None)
 
     def _render_selection(self) -> None:
         device = self._selected
         if self.options.hardware_erase and (
-                device is None or device.device_id != self._hardware_device_id
+                device is None or disk_key(device) != self._hardware_key
                 or not self._hardware_fits(device)):
             # Chosen per disk, after its confirmation: another disk starts without.
             self.options = replace(self.options, hardware_erase=False)
@@ -638,7 +686,7 @@ class DeletePage(QWidget):
             self.hero_letter.setText(first_letter(device))
             set_prop(self.hero_letter, "muted", "false")
             self.hero_title.setText(device.model)
-            media = self._media.get(device.device_id, "unknown")
+            media = self._media_type(device)
             serial = (tr("serial", serial=device.serial_number) if device.serial_number
                       else tr("no_serial"))
             self.hero_subtitle.setText(
@@ -660,6 +708,8 @@ class DeletePage(QWidget):
         hint = "" if fits else self._hardware_hint(device)
         self.hardware_hint.setText(hint)
         self.hardware_hint.setVisible(bool(hint))
+        locked = device is not None and self._no_hardware.get(disk_key(device)) == "locked"
+        self.unlock_link.setVisible(locked)
 
     def _render_tiles(self) -> None:
         o = self.options
@@ -680,7 +730,7 @@ class DeletePage(QWidget):
         else:
             note, tone = "", ""
         self.method_tile.set_values(method_label(o), note, tone)
-        if o.verify_mode == "sample":
+        if run_options(o).verify_mode == "sample":
             self.verify_tile.set_values(tr("verify.sample"), tr("verify.sample_note"))
         else:
             self.verify_tile.set_values(tr("verify.full"), tr("verify.full_note"))
@@ -698,7 +748,7 @@ class DeletePage(QWidget):
             self.estimate_label.setText(tr(key, time=fmt_estimate(seconds)))
 
     def _warnings_for(self, device: DeviceInfo) -> list[str]:
-        media = self._media.get(device.device_id, "unknown")
+        media = self._media_type(device)
         fits = self._hardware_fits(device)
         chosen = fits and self.options.hardware_erase
         rec = recommend(device, media, chosen, self.options.schutzklasse)
@@ -724,7 +774,7 @@ class DeletePage(QWidget):
         for device in self._devices:
             if device.device_id == selected_id:
                 continue
-            row = DiskRow(device, self._media.get(device.device_id, "unknown"), allow,
+            row = DiskRow(device, self._media_type(device), allow,
                           hardware=self._hardware_fits(device))
             row.clicked.connect(self.select_device)
             self._rows_layout.addWidget(row)
@@ -813,6 +863,7 @@ class DeletePage(QWidget):
         self.hardware_title.setText(tr("hw.card_title"))
         self.hardware_badge.setText(tr("note.beta"))
         self.hardware_text.setText(tr("hw.card_text"))
+        self.unlock_link.setText(tr("unlock.link"))
         self.preview_eyebrow.setText(tr("cert_preview.eyebrow"))
         self.preview_qr.set_placeholder_text(tr("cert_preview.qr"))
         self.preview_text.setText(tr("cert_preview.text"))
@@ -840,8 +891,49 @@ class DeletePage(QWidget):
             return
         if not confirm_hardware_erase(self, device):
             return
-        self._hardware_device_id = device.device_id
+        self._hardware_key = disk_key(device)
         self.set_options(replace(self.options, hardware_erase=True))
+
+    def unlock_disk(self, device: DeviceInfo) -> None:
+        """„Gesperrte Platte entsperren“: ask, then one try in a worker thread."""
+        if device is None or self.is_busy():
+            return
+        safe, reason = is_safe_to_wipe(device,
+                                       allow_internal=self.allow_internal_checkbox.isChecked())
+        if not safe:
+            show_message(self, tr("msg.refused_title"),
+                         f"{device.friendly_name or device.model}:\n\n{language_half(reason)}",
+                         kind="error")
+            return
+        if not ask_yes_no(self, tr("unlock.title"),
+                          tr("unlock.text", target=target_name(device), password=TEMP_PASSWORD)):
+            return
+        audit_log(f"Unlock requested (GUI): {device.device_id}")
+        self.result_view.unlock_button.setEnabled(False)
+        self.unlock_link.setEnabled(False)
+        worker = UnlockWorker(device, parent=self)
+        self.unlock_worker = worker
+        # A slot of this page: the result arrives on the GUI thread.
+        worker.unlock_finished.connect(self._on_unlock_finished)
+        worker.start()
+
+    @Slot(object)
+    def _on_unlock_finished(self, result) -> None:
+        worker, self.unlock_worker = self.unlock_worker, None
+        if worker is None:
+            return
+        worker.wait(2000)
+        device = worker.device
+        self.result_view.unlock_button.setEnabled(True)
+        self.unlock_link.setEnabled(True)
+        state = result.state if f"unlock.state.{result.state}" in _UNLOCK_KEYS else "error"
+        text = tr(f"unlock.state.{state}", error=language_half(result.error or "—"))
+        if result.success:
+            self._forget_refusal(device)
+            self.result_view.unlock_done()
+        show_message(self, tr("unlock.done_title"), text,
+                     kind="info" if result.success else "warning")
+        self._render_selection()
 
     def overwrite_instead(self) -> None:
         """After a refused or failed hardware erase: back to overwriting."""
@@ -867,7 +959,7 @@ class DeletePage(QWidget):
 
     def start_wipe(self, device: DeviceInfo) -> None:
         """Run the wipe of ``device`` with the current options (no more questions)."""
-        o = self.options
+        o = run_options(self.options)
         method = build_method(o)
         self._run = _Run(device=device, options=o, passes=max(1, method.passes))
         self.worker = WipeWorker(
@@ -1094,7 +1186,7 @@ class DeletePage(QWidget):
         self.running_view.add_log(
             tr("log.hw_refused" if report.status == "refused" else "log.hw_failed"), "danger")
         if report.status == "refused" and report.reason in _FINAL_REFUSALS:
-            self._no_hardware[run.device.device_id] = report.reason
+            self._remember_refusal(run.device, report.reason)
 
     @Slot(int, int, str)
     def _on_stall_detected(self, device_index: int, seconds_stalled: int, hint: str) -> None:

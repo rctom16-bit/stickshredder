@@ -153,7 +153,7 @@ def test_ready_drive_erases_itself_then_gets_zeros_and_verification(drive):
         pass
 
     outcome = hw.run(
-        HANDLE, SIZE, zero, verify_mode="full",
+        HANDLE, SIZE, zero,
         progress_callback=progress, verify_progress_callback=verify_progress,
         on_erase_started=lambda method, minutes: seen.append(("started", method, minutes)),
         on_erase_finished=lambda report: seen.append(("finished", report.status)),
@@ -228,7 +228,7 @@ def test_the_pc_is_kept_awake_only_while_the_drive_erases(drive, monkeypatch):
 def test_failed_erase_stops_before_the_overwrite_and_warns_about_the_password(drive):
     drive.erase = SecureEraseResult(success=False, method="error", supported=True,
                                     frozen=False, duration_seconds=3.0,
-                                    error="SECURITY ERASE UNIT failed")
+                                    error="SECURITY ERASE UNIT failed", password_set=True)
     zero = FakeZeroFill(drive.events)
     outcome = hw.run(HANDLE, SIZE, zero)
     assert "overwrite" not in drive.events
@@ -256,3 +256,81 @@ def test_exception_in_the_erase_is_a_failure_and_the_pc_may_sleep_again(drive):
     assert "bridge gone" in outcome.report.detail
     assert "overwrite" not in drive.events
     assert drive.power[-1] == hw.ES_CONTINUOUS
+
+
+# ── Review fixes ─────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("minutes, timeout", [
+    (0, 7200), (2, 7200), (60, 7200), (61, 7320), (120, 14400),
+])
+def test_erase_timeout_is_two_hours_or_twice_the_drive_estimate(drive, minutes, timeout):
+    drive.status = _status(estimated_minutes=minutes)
+    hw.run(HANDLE, SIZE, FakeZeroFill(drive.events))
+    assert drive.erase_kwargs["timeout_seconds"] == timeout
+
+
+def test_the_overwrite_after_the_erase_is_always_fully_verified(drive):
+    zero = FakeZeroFill(drive.events)
+    hw.run(HANDLE, SIZE, zero)
+    assert zero.kwargs["verify_mode"] == "full"
+    with pytest.raises(TypeError):
+        hw.run(HANDLE, SIZE, zero, verify_mode="sample")  # not the caller's choice
+
+
+def test_a_locked_drive_is_refused_before_the_password_is_shown(drive):
+    drive.status = _status(method="locked")
+    started = []
+    outcome = hw.run(HANDLE, SIZE, FakeZeroFill(drive.events),
+                     on_erase_started=lambda *a: started.append(a))
+    assert (outcome.report.status, outcome.report.reason) == ("refused", "locked")
+    assert drive.events == ["probe"] and started == []
+    assert not any(hw.TEMP_PASSWORD in line for line in drive.logs)
+
+
+@pytest.mark.parametrize("still_set", [True, False])
+def test_a_failed_erase_takes_the_password_state_from_the_drive(drive, still_set):
+    drive.erase = SecureEraseResult(success=False, method="error", supported=True,
+                                    frozen=False, duration_seconds=1.0,
+                                    error="SECURITY ERASE UNIT failed", password_set=still_set)
+    outcome = hw.run(HANDLE, SIZE, FakeZeroFill(drive.events))
+    assert outcome.report.status == "failed"
+    assert outcome.report.password_may_be_set is still_set
+
+
+@pytest.mark.parametrize("status", [_status(), _status(method="frozen", frozen=True)])
+def test_a_broken_audit_log_still_reports_the_outcome(drive, monkeypatch, status):
+    def broken(_message):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(hw, "audit_log", broken)
+    drive.status = status
+    finished = []
+    outcome = hw.run(HANDLE, SIZE, FakeZeroFill(drive.events),
+                     on_erase_finished=finished.append)
+    assert finished == [outcome.report]
+
+
+def test_the_outcome_is_reported_before_it_is_logged(drive, monkeypatch):
+    order = []
+    monkeypatch.setattr(hw, "audit_log", lambda msg: order.append("log"))
+    hw.run(HANDLE, SIZE, FakeZeroFill(drive.events),
+           on_erase_finished=lambda report: order.append("finished"))
+    assert order == ["log", "finished", "log"]  # password line, outcome, outcome line
+
+
+def test_fits_only_directly_attached_sata_ssds():
+    from dataclasses import replace
+
+    from wipe.device import DeviceInfo
+
+    ssd = DeviceInfo(drive_letter="", device_id="\\\\.\\PhysicalDrive2", model="SSD",
+                     serial_number="S1", capacity_bytes=10, filesystem="RAW",
+                     connection_type="SATA", is_removable=False, is_system_drive=False)
+    assert hw.fits(ssd, "ssd")
+    assert hw.fits(replace(ssd, connection_type="ATA"), "ssd")
+    for connection in ("USB", "NVMe", "RAID", "SCSI", ""):
+        assert not hw.fits(replace(ssd, connection_type=connection), "ssd")
+    for media in ("hdd", "flash", "unknown"):
+        assert not hw.fits(ssd, media)
+    assert not hw.fits(replace(ssd, is_system_drive=True), "ssd")

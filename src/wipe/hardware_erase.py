@@ -10,13 +10,15 @@ same certificate fields (spec G2):
      locked, probe failed) → stop here. Nothing has been written.
   2. Write the temporary drive password into the audit log, keep the PC from
      going to sleep, and let the drive run its ATA Secure Erase (the enhanced
-     variant when the drive offers it).
-  3. One pass of zeros plus the chosen verification. That makes the result
-     checkable byte by byte; the drive's own report alone never makes a wipe
-     "ok" (``cert.payload.result_status``).
+     variant when the drive offers it). The command may take up to two hours,
+     or twice the drive's own estimate if that is longer.
+  3. One pass of zeros plus a full verification — always, whatever the
+     caller's usual verification: that makes the result checkable byte by
+     byte, and the drive's own report alone never makes a wipe "ok".
 
 The caller still owns the safety gate (``prepare_target``), the open handle,
-the volume locks and closing everything in ``finally``.
+the volume locks and closing everything in ``finally``. ``fits`` is the rule
+for which disks get the offer at all (WMI facts only, no drive command).
 """
 
 from __future__ import annotations
@@ -30,12 +32,20 @@ from core.log import audit_log
 from wipe import secure_erase
 from wipe.methods import WipeMethod, WipeResult
 
-# The ATA user password set for the erase (the default of secure_erase()).
-# Shown to the user and logged before it is set: should an erase stop
-# half-way, the drive can be unlocked with it.
-TEMP_PASSWORD = "StickShredder"
+# The ATA user password set for the erase. Shown to the user and logged
+# before it is set: should an erase stop half-way, the drive can be unlocked
+# with it (``secure_erase.unlock_drive``).
+TEMP_PASSWORD = secure_erase.DEFAULT_PASSWORD
 
 READY_METHODS = ("ata-enhanced", "ata-secure-erase")
+
+# Connections whose disks may reach the drive's own erase: wipe.secure_erase
+# only works on the "ata" path (SATA on Microsoft's storahci driver). USB
+# bridges (SAT) are read-only by design and NVMe has no erase path yet.
+HARDWARE_CONNECTIONS = ("SATA", "ATA")
+
+# The ERASE UNIT command may run this long, or twice the drive's estimate.
+MIN_ERASE_TIMEOUT_SECONDS = 7200
 
 # SetThreadExecutionState flags (winbase.h).
 ES_CONTINUOUS = 0x80000000
@@ -69,6 +79,18 @@ class HardwareEraseOutcome:
     wipe_result: WipeResult | None = None
 
 
+def fits(device, media: str) -> bool:
+    """Whether ``device`` may get the hardware erase: a non-system SSD on SATA.
+
+    WMI facts only. The drive itself is asked later, after the safety gate.
+    """
+    return (
+        not device.is_system_drive
+        and media == "ssd"
+        and (device.connection_type or "").upper() in HARDWARE_CONNECTIONS
+    )
+
+
 def check_ready(status: secure_erase.SecureEraseResult) -> Refusal | None:
     """Why the drive's own erase must not start, or ``None`` if it may."""
     if status.method in READY_METHODS and status.supported and not status.frozen:
@@ -87,6 +109,19 @@ def check_ready(status: secure_erase.SecureEraseResult) -> Refusal | None:
 def erase_label(method: str) -> str:
     """Certificate name of the drive's erase variant."""
     return "ATA Secure Erase (enhanced)" if method == "ata-enhanced" else "ATA Secure Erase"
+
+
+def erase_timeout_seconds(estimated_minutes: int) -> int:
+    """Two hours, or twice the drive's own estimate if that is longer."""
+    return max(MIN_ERASE_TIMEOUT_SECONDS, 2 * 60 * int(estimated_minutes or 0))
+
+
+def _log(message: str) -> None:
+    """Audit log that never changes the outcome (disk full, no rights)."""
+    try:
+        audit_log(message)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _set_execution_state(flags: int) -> None:
@@ -115,12 +150,20 @@ def _combined(label: str, started: datetime, wipe) -> WipeResult:
     )
 
 
+def _report(report: EraseReport, on_erase_finished) -> EraseReport:
+    """Tell the caller first, then log (a broken log must not hide the outcome)."""
+    if on_erase_finished is not None:
+        on_erase_finished(report)
+    _log(f"Hardware erase: {report.status} ({report.reason or report.method}) "
+         f"{report.detail}".rstrip())
+    return report
+
+
 def run(
     handle: int,
     drive_size: int,
     overwrite: WipeMethod,
     *,
-    verify_mode: str = "full",
     progress_callback: Callable | None = None,
     verify_progress_callback: Callable | None = None,
     on_erase_started: Callable[[str, int], None] | None = None,
@@ -131,24 +174,26 @@ def run(
     status = secure_erase.secure_erase_supported(handle)
     refusal = check_ready(status)
     if refusal is not None:
-        audit_log(f"Hardware erase refused before any write: {refusal.reason} ({refusal.detail})")
-        report = EraseReport("refused", refusal.reason, detail=refusal.detail)
-        if on_erase_finished is not None:
-            on_erase_finished(report)
+        report = _report(EraseReport("refused", refusal.reason, detail=refusal.detail),
+                         on_erase_finished)
         return HardwareEraseOutcome(report)
 
     enhanced = status.method == "ata-enhanced"
-    audit_log(
+    minutes = int(status.estimated_minutes or 0)
+    _log(
         f"Hardware erase: temporary ATA user password {TEMP_PASSWORD!r} — if the drive "
         f"stays locked after an interrupted erase, unlock it with this password"
     )
     if on_erase_started is not None:
-        on_erase_started(status.method, int(status.estimated_minutes or 0))
+        on_erase_started(status.method, minutes)
 
     erase: secure_erase.SecureEraseResult | None = None
     _set_execution_state(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
     try:
-        erase = secure_erase.secure_erase(handle, enhanced=enhanced, password=TEMP_PASSWORD)
+        erase = secure_erase.secure_erase(
+            handle, enhanced=enhanced, password=TEMP_PASSWORD,
+            timeout_seconds=erase_timeout_seconds(minutes),
+        )
         error = erase.error
     except Exception as exc:  # noqa: BLE001 — secure_erase should never raise
         error = str(exc) or type(exc).__name__
@@ -158,7 +203,7 @@ def run(
     if erase is not None and erase.success:
         report = EraseReport("erased", method=erase.method,
                              duration_seconds=erase.duration_seconds,
-                             estimated_minutes=int(status.estimated_minutes or 0))
+                             estimated_minutes=minutes)
     elif erase is not None and erase.method in ("unsupported", "frozen", "locked"):
         # The drive refused at the last re-check: no erase command was sent.
         refused = check_ready(erase)
@@ -167,13 +212,12 @@ def run(
         report = EraseReport(
             "failed", "error", method=status.method,
             detail=error or "the drive did not confirm the erase",
-            password_may_be_set=True,
+            # From the drive (secure_erase removes the password again when it
+            # can); unknown after an unexpected exception.
+            password_may_be_set=erase.password_set if erase is not None else True,
             duration_seconds=erase.duration_seconds if erase is not None else 0.0,
         )
-    audit_log(f"Hardware erase: {report.status} ({report.reason or report.method}) "
-              f"{report.detail}".rstrip())
-    if on_erase_finished is not None:
-        on_erase_finished(report)
+    _report(report, on_erase_finished)
     if report.status != "erased":
         return HardwareEraseOutcome(report, erase)
 
@@ -181,7 +225,7 @@ def run(
         handle=handle,
         drive_size=drive_size,
         progress_callback=progress_callback,
-        verify_mode=verify_mode,
+        verify_mode="full",
         verify_progress_callback=verify_progress_callback,
     )
     label = f"{erase_label(erase.method)} + {overwrite.name}"

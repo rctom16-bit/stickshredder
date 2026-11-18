@@ -64,6 +64,7 @@ def main() -> int:
     config = AppConfig()
     config.cert_output_dir = str(Path(tempfile.mkdtemp(prefix="stickshredder_certs_")))
     config.operator_name = "Robin"
+    config.beta_features = True  # „Beta-Funktionen aktivieren“: the hardware erase is Beta
     theme = ThemeManager(app, "dark", load_fonts())
     theme.apply()
     window = AppWindow(config, theme)
@@ -122,7 +123,7 @@ def main() -> int:
 
     # Result: a real demo run on the demo SSD (pretend erase + 10 MB overwrite).
     page.stack.setCurrentWidget(page.select_view)
-    page._hardware_device_id = ssd.device_id
+    page._hardware_key = (ssd.device_id, ssd.serial_number)
     page.set_options(options)
     page.start_wipe(ssd)
     loop = QEventLoop()
