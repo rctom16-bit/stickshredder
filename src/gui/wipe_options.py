@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from gui.i18n import tr
 from wipe.methods import BsiVsitr, CustomWipe, RandomThreePass, WipeMethod, ZeroFill
+from wipe.recommend import recommend
 
 METHOD_KEYS = ("zero", "standard", "bsi", "custom")
 MULTI_PASS_KEYS = ("standard", "bsi")
@@ -15,6 +16,11 @@ FS_NAMES = {"exfat": "exFAT", "fat32": "FAT32", "ntfs": "NTFS"}
 
 # Conservative MB/s for the time estimate (same figure as the old window).
 ESTIMATE_MBPS = 80.0
+
+# Connections whose disks may reach the drive's own erase: wipe.secure_erase
+# only works on the "ata" path (SATA on Microsoft's storahci driver). USB
+# bridges (SAT) are read-only by design and NVMe has no erase path yet.
+HARDWARE_CONNECTIONS = ("SATA", "ATA")
 
 # Old config keys ("quick" was the GUI's name for the one-pass zero fill).
 _CONFIG_METHODS = {"quick": "zero", "zero": "zero", "standard": "standard", "bsi": "bsi"}
@@ -30,6 +36,8 @@ class WipeOptions:
     verify_mode: str = "full"        # full | sample
     reformat: str = "none"           # none | exfat | fat32 | ntfs
     reformat_label: str = "USB"
+    # Hardware erase (Beta): the drive erases itself, then 1x zeros + verify.
+    hardware_erase: bool = False
 
     @classmethod
     def from_config(cls, config) -> "WipeOptions":
@@ -43,7 +51,28 @@ class WipeOptions:
         )
 
 
+def hardware_erase_fits(device, media: str, schutzklasse: int = 2) -> bool:
+    """Whether the hardware erase may be offered for ``device`` (WMI facts only).
+
+    Never sends a drive command: the worker asks the drive itself after the
+    safety gate, and refuses before any write when the drive says no.
+    """
+    if device.is_system_drive:
+        return False
+    plausible = (device.connection_type or "").upper() in HARDWARE_CONNECTIONS
+    return recommend(device, media, plausible, schutzklasse).hardware_erase == "secure-erase"
+
+
+def hardware_erase_hint(device, media: str) -> str:
+    """Why an SSD gets no hardware erase ("" when it fits or is no SSD)."""
+    if media != "ssd" or device.is_system_drive or hardware_erase_fits(device, media):
+        return ""
+    return tr("hw.hint_sata_only")
+
+
 def build_method(options: WipeOptions) -> WipeMethod:
+    if options.hardware_erase:
+        return ZeroFill()  # the overwrite after the drive's own erase
     match options.method_key:
         case "standard":
             return RandomThreePass()
@@ -56,6 +85,8 @@ def build_method(options: WipeOptions) -> WipeMethod:
 
 
 def passes_of(options: WipeOptions) -> int:
+    if options.hardware_erase:
+        return 1
     return {"zero": 1, "standard": 3, "bsi": 7}.get(options.method_key, options.custom_passes)
 
 
@@ -70,6 +101,8 @@ def estimate_seconds(options: WipeOptions, capacity_bytes: int) -> float:
 
 def method_label(options: WipeOptions) -> str:
     """Tile text, e.g. ``1× Nullen``."""
+    if options.hardware_erase:
+        return tr("method.hardware")
     if options.method_key == "custom":
         return tr("method.custom", passes=options.custom_passes,
                   pattern=tr(f"pattern.{options.custom_pattern}"))
@@ -78,6 +111,8 @@ def method_label(options: WipeOptions) -> str:
 
 def method_short(options: WipeOptions) -> str:
     """Pattern words for the result summary, e.g. ``Nullen``."""
+    if options.hardware_erase:
+        return tr("pattern.zero")
     if options.method_key == "custom":
         return tr(f"pattern.{options.custom_pattern}")
     if options.method_key == "bsi":

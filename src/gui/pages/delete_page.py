@@ -10,9 +10,10 @@ its public signals, handled the same way the old main window handles them.
 from __future__ import annotations
 
 import html
+import os
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from PySide6.QtCore import QSize, Qt, Signal, Slot
 from PySide6.QtWidgets import (
@@ -37,6 +38,7 @@ from gui.dialogs import (
     show_message,
 )
 from gui.i18n import (
+    fmt_duration,
     fmt_estimate,
     fmt_eta,
     fmt_size,
@@ -50,6 +52,8 @@ from gui.pages.wipe_views import (
     ResultView,
     RunningView,
     WipeOutcome,
+    confirm_hardware_erase,
+    erase_method_text,
     read_certificate,
     short_fingerprint,
     target_name,
@@ -69,18 +73,44 @@ from gui.wipe_options import (
     WipeOptions,
     build_method,
     estimate_seconds,
+    hardware_erase_fits,
+    hardware_erase_hint,
     method_label,
 )
 from gui.wipe_worker import WipeWorker
-from wipe.demo import create_demo_device
+from wipe.demo import DEFAULT_DEMO_SIZE, create_demo_device
 from wipe.device import DeviceInfo, is_safe_to_wipe, list_devices, unique_disks
+from wipe.hardware_erase import TEMP_PASSWORD
 from wipe.recommend import media_type_of, recommend
 
 _MiB = 1024 * 1024
 
+# Demo mode's second disk: an SSD that offers the hardware erase (Beta). The
+# worker fakes the drive's erase for it; nothing real is touched.
+DEMO_SSD_ID = "\\\\.\\DemoDevice1"
+# Refusals that will not change by trying again: hide the offer for that disk.
+_FINAL_REFUSALS = ("no_path", "unsupported", "locked")
+
 
 def is_demo(device: DeviceInfo) -> bool:
     return device.device_id.startswith("\\\\.\\DemoDevice")
+
+
+def create_demo_ssd() -> DeviceInfo:
+    """The demo SSD: fake, 10 MB, SATA, offers the hardware erase."""
+    return DeviceInfo(
+        drive_letter="",
+        device_id=DEMO_SSD_ID,
+        model="StickShredder Demo SSD",
+        serial_number=f"DEMO-SSD-{os.urandom(2).hex().upper()}",
+        capacity_bytes=DEFAULT_DEMO_SIZE,
+        filesystem="RAW",
+        connection_type="SATA",
+        is_removable=False,
+        is_system_drive=False,
+        is_internal=False,
+        friendly_name="Demo SSD",
+    )
 
 
 def is_selectable(device: DeviceInfo, allow_internal: bool) -> bool:
@@ -100,7 +130,7 @@ def first_letter(device: DeviceInfo) -> str:
 def type_text(device: DeviceInfo, media: str) -> str:
     """Gerätetyp as the spec lists it (USB-Stick, USB-SSD, SATA-HDD, NVMe-SSD …)."""
     if is_demo(device):
-        return tr("type.demo")
+        return tr("type.demo_ssd") if device.device_id == DEMO_SSD_ID else tr("type.demo")
     connection = (device.connection_type or "").upper()
     if connection == "USB":
         return {"flash": tr("type.usb_stick"), "hdd": tr("type.usb_hdd"),
@@ -130,6 +160,7 @@ _STATUS = [
     (re.compile(r"^Reformatting (.*) to (.*)\.\.\.$"), "ws.reformat", ("letter", "fs")),
     (re.compile(r"^Demo: reformatted virtual disk to (.*)$"), "ws.demo_reformat", ("fs",)),
     (re.compile(r"^Generating certificate\.\.\.$"), "ws.cert", ()),
+    (re.compile(r"^Checking hardware erase support\.\.\.$"), "ws.hw_check", ()),
     (re.compile(r"^Device (.*) completed successfully\.$"), "ws.done_ok", ("name",)),
     (re.compile(r"^Device (.*) completed with verification errors\.$"), "ws.done_errors",
      ("name",)),
@@ -159,7 +190,7 @@ class DiskRow(QFrame):
     clicked = Signal(object)
 
     def __init__(self, device: DeviceInfo, media: str, allow_internal: bool,
-                 parent=None) -> None:
+                 parent=None, *, hardware: bool = False) -> None:
         super().__init__(parent)
         self.device = device
         self._selectable = is_selectable(device, allow_internal)
@@ -181,7 +212,7 @@ class DiskRow(QFrame):
         layout.addWidget(letter)
         layout.addWidget(text, 1)
         self._chips = []
-        for chip_text, tone in self._chip_specs(device, allow_internal):
+        for chip_text, tone in self._chip_specs(device, allow_internal, hardware):
             chip = make_chip(chip_text, tone)
             self._chips.append(chip)
             layout.addWidget(chip)
@@ -193,7 +224,8 @@ class DiskRow(QFrame):
         self.setAccessibleName(f"{first_letter(device)} {device.model} {size}")
 
     @staticmethod
-    def _chip_specs(device: DeviceInfo, allow_internal: bool) -> list[tuple[str, str]]:
+    def _chip_specs(device: DeviceInfo, allow_internal: bool,
+                    hardware: bool = False) -> list[tuple[str, str]]:
         chips = []
         if device.is_system_drive:
             chips.append((tr("chip.system"), "danger"))
@@ -206,6 +238,8 @@ class DiskRow(QFrame):
             chips.append((tr("chip.bitlocker"), "warning"))
         if device.has_active_processes:
             chips.append((tr("chip.in_use"), "neutral"))
+        if hardware:
+            chips.append((tr("chip.hardware"), "accent"))
         return chips
 
     def is_selectable(self) -> bool:
@@ -244,6 +278,7 @@ class _Run:
     reformat_state: str = ""
     error: str = ""
     cancelled: bool = False
+    hardware_report: object | None = None   # wipe.hardware_erase.EraseReport
 
 
 class DeletePage(QWidget):
@@ -264,6 +299,10 @@ class DeletePage(QWidget):
         self._rows: list[DiskRow] = []
         self._run: _Run | None = None
         self._fingerprint: str | None = None
+        # Hardware erase (Beta): the disk it was confirmed for, and disks whose
+        # drive said a final "no" in this session (device id -> reason).
+        self._hardware_device_id: str | None = None
+        self._no_hardware: dict[str, str] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -274,6 +313,7 @@ class DeletePage(QWidget):
         self.result_view = ResultView()
         self.running_view.cancel_requested.connect(self._on_cancel_clicked)
         self.result_view.next_requested.connect(self.back_to_selection)
+        self.result_view.overwrite_requested.connect(self.overwrite_instead)
         for view in (self.select_view, self.running_view, self.result_view):
             self.stack.addWidget(view)
         self.retranslate()
@@ -333,6 +373,30 @@ class DeletePage(QWidget):
             tiles.addWidget(tile, 0, column)
             tiles.setColumnStretch(column, 1)
         hero_layout.addLayout(tiles)
+
+        # Hardware erase (Beta): only for disks it may fit (WMI facts only).
+        self.hardware_card = make_card("tile")
+        hardware = QVBoxLayout(self.hardware_card)
+        hardware.setContentsMargins(14, 12, 14, 12)
+        hardware.setSpacing(6)
+        hardware_head = QHBoxLayout()
+        hardware_head.setSpacing(10)
+        self.hardware_title = make_label("", "tile-value")
+        self.hardware_badge = make_chip("", "accent")
+        self.hardware_button = QPushButton()
+        self.hardware_button.setProperty("variant", "small")
+        self.hardware_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.hardware_button.clicked.connect(self._on_hardware_button)
+        hardware_head.addWidget(self.hardware_title, 0, Qt.AlignmentFlag.AlignVCenter)
+        hardware_head.addWidget(self.hardware_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        hardware_head.addStretch(1)
+        hardware_head.addWidget(self.hardware_button)
+        self.hardware_text = make_label("", "tile-note", wrap=True)
+        hardware.addLayout(hardware_head)
+        hardware.addWidget(self.hardware_text)
+        hero_layout.addWidget(self.hardware_card)
+        self.hardware_hint = make_label("", "hint", wrap=True)
+        hero_layout.addWidget(self.hardware_hint)
 
         under_tiles = QHBoxLayout()
         under_tiles.setSpacing(12)
@@ -491,9 +555,14 @@ class DeletePage(QWidget):
         return True
 
     def add_demo_device(self) -> DeviceInfo:
+        """Add the demo stick (selected) and the demo SSD for the hardware erase."""
         demo = create_demo_device()
         self._devices.append(demo)
         self._media[demo.device_id] = "flash"
+        if all(d.device_id != DEMO_SSD_ID for d in self._devices):
+            ssd = create_demo_ssd()
+            self._devices.append(ssd)
+            self._media[ssd.device_id] = "ssd"
         self._selected = demo
         self._render_selection()
         return demo
@@ -506,7 +575,11 @@ class DeletePage(QWidget):
         recommended = self._recommendation().method_key if self._selected else "zero"
         dialog = WipeOptionsDialog(self.options, recommended_method=recommended, parent=self)
         if dialog.exec():
-            self.set_options(dialog.options())
+            chosen = dialog.options()
+            if chosen.method_key != self.options.method_key:
+                # Picking an overwrite method there means: overwrite only.
+                chosen = replace(chosen, hardware_erase=False)
+            self.set_options(chosen)
 
     def back_to_selection(self) -> None:
         self.stack.setCurrentWidget(self.select_view)
@@ -521,7 +594,7 @@ class DeletePage(QWidget):
 
     def _media_for(self, device: DeviceInfo) -> str:
         if is_demo(device):
-            return "flash"
+            return "ssd" if device.device_id == DEMO_SSD_ID else "flash"
         try:
             return self._media_of(device)
         except Exception as exc:  # noqa: BLE001 — media type is best effort
@@ -530,11 +603,31 @@ class DeletePage(QWidget):
 
     def _recommendation(self):
         device = self._selected
-        return recommend(device, self._media.get(device.device_id, "unknown"), False,
-                         self.options.schutzklasse)
+        return recommend(device, self._media.get(device.device_id, "unknown"),
+                         self._hardware_fits(device), self.options.schutzklasse)
+
+    def _hardware_fits(self, device: DeviceInfo | None) -> bool:
+        """Offer the hardware erase? WMI facts only — never a drive command."""
+        if device is None or device.device_id in self._no_hardware:
+            return False
+        return hardware_erase_fits(device, self._media.get(device.device_id, "unknown"),
+                                   self.options.schutzklasse)
+
+    def _hardware_hint(self, device: DeviceInfo | None) -> str:
+        if device is None:
+            return ""
+        reason = self._no_hardware.get(device.device_id)
+        if reason:
+            return tr("hw.hint_refused", reason=tr(f"hw.short.{reason}"))
+        return hardware_erase_hint(device, self._media.get(device.device_id, "unknown"))
 
     def _render_selection(self) -> None:
         device = self._selected
+        if self.options.hardware_erase and (
+                device is None or device.device_id != self._hardware_device_id
+                or not self._hardware_fits(device)):
+            # Chosen per disk, after its confirmation: another disk starts without.
+            self.options = replace(self.options, hardware_erase=False)
         mono = theme.fonts().mono
         if device is None:
             self.hero_letter.setText("—")
@@ -553,20 +646,36 @@ class DeletePage(QWidget):
                 f"{html.escape(fmt_size(device.capacity_bytes))} · "
                 f"<span style=\"font-family:'{mono}'\">{html.escape(serial)}</span>")
         self._render_tiles()
+        self._render_hardware()
         self._render_rows()
         self.delete_button.setEnabled(device is not None)
         self._update_preview()
+
+    def _render_hardware(self) -> None:
+        device = self._selected
+        fits = self._hardware_fits(device)
+        chosen = self.options.hardware_erase
+        self.hardware_card.setVisible(fits)
+        self.hardware_button.setText(tr("hw.use_overwrite") if chosen else tr("hw.use"))
+        hint = "" if fits else self._hardware_hint(device)
+        self.hardware_hint.setText(hint)
+        self.hardware_hint.setVisible(bool(hint))
 
     def _render_tiles(self) -> None:
         o = self.options
         device = self._selected
         rec = self._recommendation() if device is not None else None
         recommended_key = rec.method_key if rec else "zero"
-        if o.method_key == "custom":
+        # For a fitting SSD the recommendation is the hardware erase + zeros (G6).
+        hardware_recommended = bool(rec and rec.hardware_erase)
+        if o.hardware_erase:
+            note = tr("note.hardware_recommended" if hardware_recommended else "note.beta")
+            tone = "accent"
+        elif o.method_key == "custom":
             note, tone = tr("note.custom"), ""
         elif o.method_key in MULTI_PASS_KEYS:
             note, tone = tr("note.multi_pass"), "warning"
-        elif o.method_key == recommended_key:
+        elif o.method_key == recommended_key and not hardware_recommended:
             note, tone = tr("note.recommended"), "accent"
         else:
             note, tone = "", ""
@@ -575,7 +684,7 @@ class DeletePage(QWidget):
             self.verify_tile.set_values(tr("verify.sample"), tr("verify.sample_note"))
         else:
             self.verify_tile.set_values(tr("verify.full"), tr("verify.full_note"))
-        category = rec.nist_category if rec else "Clear"
+        category = "Purge" if o.hardware_erase else "Clear"
         self.class_tile.set_values(tr("class.value", category=category),
                                    tr("class.note", sk=o.schutzklasse))
         warnings = self._warnings_for(device) if device is not None else []
@@ -585,12 +694,22 @@ class DeletePage(QWidget):
             self.estimate_label.setText(tr("select.estimate_none"))
         else:
             seconds = estimate_seconds(o, device.capacity_bytes)
-            self.estimate_label.setText(tr("select.estimate", time=fmt_estimate(seconds)))
+            key = "select.estimate_hardware" if o.hardware_erase else "select.estimate"
+            self.estimate_label.setText(tr(key, time=fmt_estimate(seconds)))
 
     def _warnings_for(self, device: DeviceInfo) -> list[str]:
-        rec = recommend(device, self._media.get(device.device_id, "unknown"), False,
-                        self.options.schutzklasse)
+        media = self._media.get(device.device_id, "unknown")
+        fits = self._hardware_fits(device)
+        chosen = fits and self.options.hardware_erase
+        rec = recommend(device, media, chosen, self.options.schutzklasse)
         warnings = list(rec.warnings_en if language() == "en" else rec.warnings_de)
+        if fits and not chosen:
+            # The hardware erase is there, just not chosen: replace "no hardware
+            # erase available" with the reason to choose it; keep the rest.
+            plain = recommend(device, media, False, 1)
+            unavailable = set(plain.warnings_en if language() == "en" else plain.warnings_de)
+            warnings = [tr("hw.overwrite_only_warning")] + [
+                w for w in warnings if w not in unavailable]
         if device.is_internal:
             warnings.append(tr("select.internal_warning"))
         return warnings
@@ -605,7 +724,8 @@ class DeletePage(QWidget):
         for device in self._devices:
             if device.device_id == selected_id:
                 continue
-            row = DiskRow(device, self._media.get(device.device_id, "unknown"), allow)
+            row = DiskRow(device, self._media.get(device.device_id, "unknown"), allow,
+                          hardware=self._hardware_fits(device))
             row.clicked.connect(self.select_device)
             self._rows_layout.addWidget(row)
             self._rows.append(row)
@@ -690,6 +810,9 @@ class DeletePage(QWidget):
         self.no_others_label.setText(tr("select.no_others"))
         self.allow_internal_checkbox.setText(tr("select.allow_internal"))
         self.allow_internal_hint.setText(tr("select.allow_internal_hint"))
+        self.hardware_title.setText(tr("hw.card_title"))
+        self.hardware_badge.setText(tr("note.beta"))
+        self.hardware_text.setText(tr("hw.card_text"))
         self.preview_eyebrow.setText(tr("cert_preview.eyebrow"))
         self.preview_qr.set_placeholder_text(tr("cert_preview.qr"))
         self.preview_text.setText(tr("cert_preview.text"))
@@ -705,6 +828,25 @@ class DeletePage(QWidget):
         self.refresh_button.setIcon(icon_pixmap("refresh", 16, p.text))
         for widget in self.findChildren(QWidget):
             widget.update()
+
+    # ── Hardware erase (Beta) ─────────────────────────────────────────────────
+
+    def _on_hardware_button(self) -> None:
+        if self.options.hardware_erase:
+            self.set_options(replace(self.options, hardware_erase=False))
+            return
+        device = self._selected
+        if device is None or self.is_busy() or not self._hardware_fits(device):
+            return
+        if not confirm_hardware_erase(self, device):
+            return
+        self._hardware_device_id = device.device_id
+        self.set_options(replace(self.options, hardware_erase=True))
+
+    def overwrite_instead(self) -> None:
+        """After a refused or failed hardware erase: back to overwriting."""
+        self.options = replace(self.options, hardware_erase=False)
+        self.back_to_selection()
 
     # ── Wipe ──────────────────────────────────────────────────────────────────
 
@@ -737,8 +879,12 @@ class DeletePage(QWidget):
             verify_mode=o.verify_mode,
             reformat=o.reformat,
             reformat_label=o.reformat_label,
+            hardware_erase=o.hardware_erase,
             parent=self,
         )
+        if o.hardware_erase:
+            self.worker.hardware_erase_started.connect(self._on_hardware_erase_started)
+            self.worker.hardware_erase_finished.connect(self._on_hardware_erase_finished)
         self.worker.progress_updated.connect(self._on_progress)
         self.worker.verify_progress.connect(self._on_verify_progress)
         self.worker.phase_changed.connect(self._on_phase_changed)
@@ -750,12 +896,13 @@ class DeletePage(QWidget):
 
         self.running_view.start(device, o)
         if o.reformat == "none":
-            self.running_view.stepper.set_step(2, "skipped")
+            self.running_view.set_step("format", "skipped")
         self.stack.setCurrentWidget(self.running_view)
         self.busy_changed.emit(True)
         audit_log(
             f"Starting wipe (new GUI): {device.device_id}, method={method.name}, "
-            f"schutzklasse={o.schutzklasse}, verify_mode={o.verify_mode}, reformat={o.reformat}"
+            f"hardware_erase={o.hardware_erase}, schutzklasse={o.schutzklasse}, "
+            f"verify_mode={o.verify_mode}, reformat={o.reformat}"
         )
         self.worker.start()
 
@@ -796,7 +943,7 @@ class DeletePage(QWidget):
         fraction = min(1.0, bytes_written / total_bytes) if total_bytes > 0 else 0.0
         run.write_frac = ((max(1, pass_num) - 1) + fraction) / max(1, run.passes)
         if run.phase == "write":
-            view.stepper.set_step(0, "active", run.write_frac)
+            view.set_step("write", "active", run.write_frac)
         view.speed_tile.set_values(fmt_speed(speed))
         if speed > 0 and total_bytes > 0:
             remaining = (run.passes - pass_num) * total_bytes + (total_bytes - bytes_written)
@@ -813,13 +960,13 @@ class DeletePage(QWidget):
             self.running_view.add_log(tr("log.pass_done", i=run.current_pass, n=run.passes,
                                          size=fmt_size(run.device.capacity_bytes)))
         run.write_frac = 1.0
-        self.running_view.stepper.set_step(0, "done")
+        self.running_view.set_step("write", "done")
 
     def _finish_verify(self) -> None:
         run = self._run
         run.verify_frac = 1.0
         state = "skipped" if run.options.verify_mode == "none" else "done"
-        self.running_view.stepper.set_step(1, state)
+        self.running_view.set_step("verify", state)
 
     @Slot(int, str)
     def _on_phase_changed(self, device_index: int, phase: str) -> None:
@@ -830,7 +977,7 @@ class DeletePage(QWidget):
         if phase == "verifying" and run.phase == "write":
             self._finish_write()
             run.phase = "verify"
-            view.stepper.set_step(1, "active", 0.0)
+            view.set_step("verify", "active", 0.0)
             full = run.options.verify_mode == "full"
             view.add_log(tr("log.verify_full" if full else "log.verify_sample"), "accent")
             view.hint_label.setText(tr("running.hint_verify_full" if full
@@ -840,7 +987,7 @@ class DeletePage(QWidget):
                 self._finish_write()
             self._finish_verify()
             run.phase = "format"
-            view.stepper.set_step(2, "active", 0.5)
+            view.set_step("format", "active", 0.5)
             view.add_log(tr("log.format"))
             view.hint_label.setText(tr("running.hint_format"))
         elif phase == "done" and run.phase != "done":
@@ -851,8 +998,8 @@ class DeletePage(QWidget):
                     self._finish_verify()
                 if run.phase == "format" and run.reformat_state != "skipped":
                     run.reformat_state = "done"
-                view.stepper.set_step(2, "done" if run.reformat_state == "done" else "skipped")
-                view.stepper.set_step(3, "done")
+                view.set_step("format", "done" if run.reformat_state == "done" else "skipped")
+                view.set_step("cert", "done")
                 view.add_log(tr("log.done"), "accent")
             run.phase = "done"
         self._update_overall()
@@ -873,7 +1020,7 @@ class DeletePage(QWidget):
             return
         view = self.running_view
         run.verify_frac = max(0.0, min(1.0, fraction))
-        view.stepper.set_step(1, "active", run.verify_frac)
+        view.set_step("verify", "active", run.verify_frac)
         percent = int(run.verify_frac * 100)
         for milestone in (25, 50, 75):
             if percent >= milestone and milestone not in run.milestones and percent < 100:
@@ -898,9 +1045,9 @@ class DeletePage(QWidget):
                 self._finish_verify()
             if run.phase == "format" and run.reformat_state != "skipped":
                 run.reformat_state = "done"
-            self.running_view.stepper.set_step(
-                2, "done" if run.reformat_state == "done" else "skipped")
-            self.running_view.stepper.set_step(3, "active", 0.5)
+            self.running_view.set_step(
+                "format", "done" if run.reformat_state == "done" else "skipped")
+            self.running_view.set_step("cert", "active", 0.5)
             self.running_view.hint_label.setText(tr("running.hint_cert"))
             run.phase = "cert"
         if key in _QUIET_STATUS or not text:
@@ -919,6 +1066,35 @@ class DeletePage(QWidget):
             return
         run.error = language_half(message)
         self.running_view.add_log(tr("log.error", message=run.error), "danger")
+
+    @Slot(int, str, int)
+    def _on_hardware_erase_started(self, device_index: int, method: str,
+                                   estimated_minutes: int) -> None:
+        """The drive erases itself now: elapsed time, its estimate, no cancel."""
+        run = self._run
+        if run is None:
+            return
+        self.running_view.begin_hardware_erase(method, estimated_minutes)
+        self.running_view.add_log(tr("log.hw_started", method=erase_method_text(method)),
+                                  "accent")
+        self.running_view.add_log(tr("log.hw_password", password=TEMP_PASSWORD))
+
+    @Slot(int, object)
+    def _on_hardware_erase_finished(self, device_index: int, report) -> None:
+        run = self._run
+        if run is None:
+            return
+        run.hardware_report = report
+        erased = report.status == "erased"
+        self.running_view.end_hardware_erase(erased)
+        if erased:
+            self.running_view.add_log(
+                tr("log.hw_erased", time=fmt_duration(report.duration_seconds)), "accent")
+            return
+        self.running_view.add_log(
+            tr("log.hw_refused" if report.status == "refused" else "log.hw_failed"), "danger")
+        if report.status == "refused" and report.reason in _FINAL_REFUSALS:
+            self._no_hardware[run.device.device_id] = report.reason
 
     @Slot(int, int, str)
     def _on_stall_detected(self, device_index: int, seconds_stalled: int, hint: str) -> None:
@@ -954,6 +1130,7 @@ class DeletePage(QWidget):
             reformat=o.reformat, reformat_label=o.reformat_label,
             reformat_state=run.reformat_state, error=run.error, cancelled=run.cancelled,
             history_entry=entry, chain_text=chain,
+            hardware_erase=o.hardware_erase, hardware=run.hardware_report,
         )
         self.running_view.stop()
         self.show_result(outcome)

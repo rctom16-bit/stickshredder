@@ -1023,18 +1023,30 @@ def generate_certificate(
     ]
     elements.append(_kv_table(wipe_rows, styles))
 
-    # Experimental ATA Secure Erase note — make clear this was a firmware
-    # command, not a verified sector-by-sector overwrite.
+    # Hardware erase (Beta) note: name the procedure and say what the
+    # verification below covers (spec G2).
     if data.secure_erase_used:
-        se_note = _label(
-            "Hinweis: Löschung per ATA Secure Erase (Firmware-Befehl, "
-            "EXPERIMENTELL — auf dieser Hardware nicht verifiziert). Kein "
-            "sektorweises Überschreiben.",
-            "Note: erased via ATA Secure Erase (a firmware command, "
-            "EXPERIMENTAL — not verified on this hardware). This is not a "
-            "sector-by-sector overwrite.",
-            lang,
-        )
+        if data.passes > 0:
+            se_note = _label(
+                "Hinweis: Hardware-Löschung (Beta) — das Laufwerk hat sich per "
+                "ATA Secure Erase (Firmware-Befehl) selbst gelöscht, danach wurde "
+                "es mit Nullen überschrieben. Die Prüfung unten bezieht sich auf "
+                "das Überschreiben.",
+                "Note: hardware erase (Beta) — the drive erased itself with ATA "
+                "Secure Erase (a firmware command), then it was overwritten with "
+                "zeros. The verification below covers the overwrite.",
+                lang,
+            )
+        else:
+            se_note = _label(
+                "Hinweis: Hardware-Löschung (Beta) per ATA Secure Erase "
+                "(Firmware-Befehl, EXPERIMENTELL — auf dieser Hardware nicht "
+                "verifiziert). Kein sektorweises Überschreiben.",
+                "Note: hardware erase (Beta) via ATA Secure Erase (a firmware "
+                "command, EXPERIMENTAL — not verified on this hardware). This is "
+                "not a sector-by-sector overwrite.",
+                lang,
+            )
         elements.append(Paragraph(se_note, styles["result_skipped"]))
     elements.append(Spacer(1, 2 * mm))
 

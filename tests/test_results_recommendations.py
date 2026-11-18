@@ -93,6 +93,31 @@ def test_nist_category_hardware_erase_is_purge():
     assert nist_category(data) == "Purge"
 
 
+# ── Hardware erase (Beta): the drive's own report alone is never "ok" ──
+
+def test_hardware_erase_with_passed_verification_is_ok():
+    data = _cert_data(secure_erase_used=True, secure_erase_method="ata-enhanced",
+                      verify_method="full", verification_passed=True)
+    assert result_status(data) == "ok"
+
+
+def test_hardware_erase_without_verification_is_at_most_limited():
+    data = _cert_data(secure_erase_used=True, secure_erase_method="ata-enhanced",
+                      verify_method="none", verification_passed=False)
+    assert result_status(data) == "limited"
+
+
+def test_hardware_erase_with_failed_verification_is_failed():
+    data = _cert_data(secure_erase_used=True, secure_erase_method="ata-enhanced",
+                      verify_method="full", verification_passed=False, verify_error_count=3)
+    assert result_status(data) == "failed"
+
+
+def test_overwrite_without_verification_is_still_ok():
+    data = _cert_data(verify_method="none", verification_passed=False)
+    assert result_status(data) == "ok"
+
+
 def _capture_paragraphs(monkeypatch) -> list[str]:
     import cert.generator as gen
 
@@ -127,6 +152,25 @@ def test_certificate_shows_nist_purge_for_hardware_erase(tmp_path, monkeypatch):
                       secure_erase_method="ata-secure-erase")
     generate_certificate(data, str(tmp_path / "c.pdf"))
     assert _value_after(texts, "NIST SP 800-88") == "Purge"
+
+
+def test_certificate_note_describes_erase_then_zero_pass(tmp_path, monkeypatch):
+    texts = _capture_paragraphs(monkeypatch)
+    data = _cert_data(language="de", secure_erase_used=True, secure_erase_method="ata-enhanced",
+                      wipe_method="ATA Secure Erase (enhanced) + ZeroFill", passes=1)
+    generate_certificate(data, str(tmp_path / "c.pdf"))
+    note = next(t for t in texts if t.startswith("Hinweis: Hardware-Löschung"))
+    assert "Beta" in note and "Nullen" in note
+    assert "Kein sektorweises" not in note
+
+
+def test_certificate_note_for_an_erase_without_overwrite_says_so(tmp_path, monkeypatch):
+    texts = _capture_paragraphs(monkeypatch)
+    data = _cert_data(language="en", secure_erase_used=True, secure_erase_method="ata-secure-erase",
+                      wipe_method="ATA Secure Erase", passes=0, verify_method="none")
+    generate_certificate(data, str(tmp_path / "c.pdf"))
+    note = next(t for t in texts if t.startswith("Note: hardware erase"))
+    assert "not a sector-by-sector overwrite" in note
 
 
 # ── CLI, CSV and certificate agree ───────────────────────────────────
@@ -306,7 +350,7 @@ def _run_info(argv, devices, media="flash"):
         patch.object(cli, "media_type_of", return_value=media) as media_mock,
         patch.object(cli, "open_physical_drive", opener),
         patch.object(cli, "detect_hidden_areas", prober),
-        patch.object(cli, "secure_erase", eraser),
+        patch.object(cli.hardware_erase, "run", eraser),
         patch.object(cli, "recommend", wraps=cli.recommend) as rec,
     ):
         args = cli.build_parser().parse_args(["info", *argv])

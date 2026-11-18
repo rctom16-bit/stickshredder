@@ -26,9 +26,11 @@ from wipe.device import (
     lock_volume,
     unlock_volume,
 )
+from wipe import hardware_erase
 from wipe.methods import WipeMethod, WipeResult
 from wipe.demo import create_demo_file, wipe_demo_file, verify_demo_file
 from wipe.hidden_areas import detect_hidden_areas, hidden_bytes
+from wipe.secure_erase import SecureEraseResult
 
 if TYPE_CHECKING:
     pass
@@ -59,6 +61,18 @@ def _expected_pattern_for(method: WipeMethod) -> bytes:
         return method._expected_final_pattern()  # type: ignore[attr-defined]
     except Exception:  # noqa: BLE001
         return b"\x00"
+
+
+class HardwareEraseStopped(RuntimeError):
+    """The hardware erase stopped before it finished: nothing to certify."""
+
+
+def _stopped_message(report: hardware_erase.EraseReport) -> str:
+    """German / English error text (the page shows the half for its language)."""
+    if report.status == "refused":
+        return ("Hardware-Löschung nicht möglich, nichts wurde geschrieben / "
+                f"Hardware erase not possible, nothing was written: {report.detail}")
+    return f"Hardware-Löschung fehlgeschlagen / Hardware erase failed: {report.detail}"
 
 
 def _verify_ok(result: Any) -> bool | None:
@@ -95,6 +109,13 @@ class WipeWorker(QThread):
     error = Signal(int, str)
     status_message = Signal(str)
     stall_detected = Signal(int, int, str)  # device_index, seconds_stalled, hint
+    # Hardware erase (Beta): the drive starts erasing itself (erase method,
+    # its own estimate in minutes, 0 = none) and is done (an EraseReport).
+    hardware_erase_started = Signal(int, str, int)
+    hardware_erase_finished = Signal(int, object)
+
+    # Demo SSD: how long the pretend drive erase takes.
+    DEMO_ERASE_SECONDS = 3.0
 
     def __init__(
         self,
@@ -107,11 +128,15 @@ class WipeWorker(QThread):
         reformat: str = "none",
         reformat_label: str = "USB",
         reformat_partition: str = "MBR",
+        hardware_erase: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.devices = devices
+        # With hardware_erase the drive erases itself first; wipe_method is
+        # then the overwrite after it (the page passes one pass of zeros).
         self.wipe_method = wipe_method
+        self.hardware_erase = hardware_erase
         self.config = config
         self.schutzklasse = schutzklasse
         self.operator = operator or config.operator_name or "Unknown"
@@ -139,6 +164,7 @@ class WipeWorker(QThread):
         # hang or an AV product silently blocking raw disk writes.
         self._last_progress_time: float | None = None
         self._stall_warned = False
+        self._watchdog_generation = 0
 
     STALL_THRESHOLD_SECONDS = 60
 
@@ -165,10 +191,18 @@ class WipeWorker(QThread):
         """
         import time as _time
 
+        # A newer watchdog (restarted after a hardware erase) retires this one.
+        self._watchdog_generation += 1
+        generation = self._watchdog_generation
+
+        def _current() -> bool:
+            return (not self.is_cancelled and self._last_progress_time is not None
+                    and generation == self._watchdog_generation)
+
         def _watch() -> None:
-            while not self.is_cancelled and self._last_progress_time is not None:
+            while _current():
                 _time.sleep(5)
-                if self.is_cancelled or self._last_progress_time is None:
+                if not _current():
                     return
                 elapsed = _time.monotonic() - self._last_progress_time
                 if elapsed >= self.STALL_THRESHOLD_SECONDS and not self._stall_warned:
@@ -186,6 +220,43 @@ class WipeWorker(QThread):
 
         t = threading.Thread(target=_watch, daemon=True, name="WipeStallWatchdog")
         t.start()
+
+    # -- Hardware erase (Beta) ------------------------------------------------
+
+    def _on_erase_started(self, device_index: int, method: str, minutes: int) -> None:
+        # The drive reports no progress while it erases itself: no stall warning.
+        self._last_progress_time = None
+        self.hardware_erase_started.emit(device_index, method, int(minutes or 0))
+
+    def _on_erase_finished(self, device_index: int, report, device: DeviceInfo,
+                           announce_wipe: bool = True) -> None:
+        self.hardware_erase_finished.emit(device_index, report)
+        if report.status != "erased":
+            return
+        self._note_progress()
+        self._start_stall_watchdog(device_index)
+        if announce_wipe:
+            self.status_message.emit(
+                f"Wiping {device.friendly_name} with {self.wipe_method.name}..."
+            )
+
+    def _demo_hardware_erase(self, device_index: int, device: DeviceInfo) -> SecureEraseResult:
+        """Demo SSD: pretend the drive erases itself for a few seconds."""
+        import time as _time
+
+        method = "ata-enhanced"
+        self.status_message.emit("Checking hardware erase support...")
+        self._on_erase_started(device_index, method, 1)
+        start = _time.monotonic()
+        while _time.monotonic() - start < self.DEMO_ERASE_SECONDS:
+            _time.sleep(0.05)
+        duration = _time.monotonic() - start
+        audit_log(f"Demo: hardware erase simulated ({duration:.1f}s), no drive touched")
+        report = hardware_erase.EraseReport("erased", method=method,
+                                            duration_seconds=duration, estimated_minutes=1)
+        self._on_erase_finished(device_index, report, device, announce_wipe=False)
+        return SecureEraseResult(success=True, method=method, supported=True, frozen=False,
+                                 duration_seconds=duration, error=None)
 
     def run(self) -> None:  # noqa: C901
         """Main worker loop — processes each device sequentially."""
@@ -223,6 +294,7 @@ class WipeWorker(QThread):
             success = False
             verify_result: Any = None
             hidden = None  # HiddenAreaInfo from the real-device HPA/DCO probe
+            secure_erase_result: SecureEraseResult | None = None
             is_demo = device.device_id.startswith(r"\\.\DemoDevice")
 
             # Signal that this device is entering the wipe phase.
@@ -247,6 +319,10 @@ class WipeWorker(QThread):
 
                     if self.is_cancelled:
                         raise InterruptedError("Cancelled before wipe")
+
+                    erase_started_at = datetime.now()
+                    if self.hardware_erase:
+                        secure_erase_result = self._demo_hardware_erase(idx, device)
 
                     def _progress_cb(
                         pass_num: int,
@@ -297,6 +373,13 @@ class WipeWorker(QThread):
                         raise RuntimeError(
                             f"Demo wipe failed: {wipe_result.error_message}"
                         )
+                    if secure_erase_result is not None:
+                        # Named and timed as the whole procedure, like the real one.
+                        wipe_result.method_name = (
+                            f"{hardware_erase.erase_label(secure_erase_result.method)} "
+                            f"+ {self.wipe_method.name}"
+                        )
+                        wipe_result.start_time = erase_started_at
 
                     if self.is_cancelled:
                         raise InterruptedError("Cancelled after wipe")
@@ -413,16 +496,36 @@ class WipeWorker(QThread):
                             _idx, fraction, bytes_done, total_bytes, speed,
                         )
 
-                    self.status_message.emit(
-                        f"Wiping {device.friendly_name} with {self.wipe_method.name}..."
-                    )
-                    wipe_result = self.wipe_method.execute(
-                        handle,
-                        drive_size,
-                        progress_callback=_progress_cb,
-                        verify_mode=self.verify_mode,
-                        verify_progress_callback=_verify_cb,
-                    )
+                    if self.hardware_erase:
+                        # Same procedure as the CLI: the drive's own erase, then
+                        # one pass of zeros + verification. A drive that says
+                        # no is refused before anything is written.
+                        self.status_message.emit("Checking hardware erase support...")
+                        outcome = hardware_erase.run(
+                            handle, drive_size, self.wipe_method,
+                            verify_mode=self.verify_mode,
+                            progress_callback=_progress_cb,
+                            verify_progress_callback=_verify_cb,
+                            on_erase_started=lambda method, minutes, _i=idx:
+                                self._on_erase_started(_i, method, minutes),
+                            on_erase_finished=lambda report, _i=idx, _d=device:
+                                self._on_erase_finished(_i, report, _d),
+                        )
+                        if outcome.report.status != "erased":
+                            raise HardwareEraseStopped(_stopped_message(outcome.report))
+                        secure_erase_result = outcome.erase
+                        wipe_result = outcome.wipe_result
+                    else:
+                        self.status_message.emit(
+                            f"Wiping {device.friendly_name} with {self.wipe_method.name}..."
+                        )
+                        wipe_result = self.wipe_method.execute(
+                            handle,
+                            drive_size,
+                            progress_callback=_progress_cb,
+                            verify_mode=self.verify_mode,
+                            verify_progress_callback=_verify_cb,
+                        )
                     # Wipe + verify done: let go of the volumes before any
                     # reformat (which needs the disk free).
                     locks, volume_locks = volume_locks, []
@@ -578,7 +681,8 @@ class WipeWorker(QThread):
                     capacity_bytes=device.capacity_bytes,
                     filesystem=device.filesystem,
                     connection_type=device.connection_type,
-                    wipe_method=self.wipe_method.name,
+                    # "ATA Secure Erase (enhanced) + ZeroFill" after a hardware erase.
+                    wipe_method=wipe_result.method_name,
                     sicherheitsstufe=self.wipe_method.sicherheitsstufe,
                     schutzklasse=self.schutzklasse,
                     passes=wipe_result.passes,
@@ -607,6 +711,10 @@ class WipeWorker(QThread):
                         getattr(verify_result, "duration_seconds", 0.0) or 0.0
                     ),
                     wipe_success=bool(wipe_result.success),
+                    secure_erase_used=secure_erase_result is not None,
+                    secure_erase_method=(
+                        secure_erase_result.method if secure_erase_result else ""
+                    ),
                 )
 
                 try:
@@ -632,7 +740,7 @@ class WipeWorker(QThread):
                     "device_model": device.model,
                     "serial_number": device.serial_number,
                     "capacity_bytes": device.capacity_bytes,
-                    "method": self.wipe_method.name,
+                    "method": wipe_result.method_name,
                     "passes": wipe_result.passes,
                     "operator": self.operator,
                     "start_time": wipe_result.start_time.isoformat(),

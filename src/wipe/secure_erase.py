@@ -65,6 +65,9 @@ class SecureEraseResult:
     frozen: bool
     duration_seconds: float
     error: str | None
+    # The drive's own erase-time estimate (IDENTIFY word 89, or 90 for the
+    # enhanced erase) in minutes; 0 when unknown. Only the status probe sets it.
+    estimated_minutes: int = 0
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -109,6 +112,7 @@ def _result(
     frozen: bool,
     start: float,
     error: str | None = None,
+    estimated_minutes: int = 0,
 ) -> SecureEraseResult:
     return SecureEraseResult(
         success=success,
@@ -117,7 +121,22 @@ def _result(
         frozen=frozen,
         duration_seconds=time.monotonic() - start,
         error=error,
+        estimated_minutes=estimated_minutes,
     )
+
+
+def _estimated_minutes(identify, *, enhanced: bool) -> int:
+    """The drive's erase-time estimate in minutes (0 if it gives none).
+
+    Word 89 times the normal erase, word 90 the enhanced one; both use the
+    encoding ``passthrough._erase_unit_minutes`` decodes.
+    """
+    if not enhanced:
+        return int(getattr(identify, "erase_unit_minutes", 0) or 0)
+    words = getattr(identify, "raw_words", ()) or ()
+    if len(words) <= 90:
+        return 0
+    return passthrough._erase_unit_minutes(words[90])
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -154,14 +173,12 @@ def secure_erase_supported(handle: int) -> SecureEraseResult:
                 supported=True, frozen=True, start=start,
             )
 
-        method = (
-            "ata-enhanced"
-            if identify.enhanced_erase_supported
-            else "ata-secure-erase"
-        )
+        enhanced = bool(identify.enhanced_erase_supported)
+        method = "ata-enhanced" if enhanced else "ata-secure-erase"
         return _result(
             success=False, method=method,
             supported=True, frozen=False, start=start,
+            estimated_minutes=_estimated_minutes(identify, enhanced=enhanced),
         )
     except Exception as exc:  # never raise across the public surface
         audit_log(f"secure_erase_supported: probe failed: {exc!r}")

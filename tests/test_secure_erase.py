@@ -384,3 +384,40 @@ def test_erase_issues_no_command_when_the_transport_check_raises(
     assert result.success is False
     mock_identify.assert_not_called()
     mock_send.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# The drive's own time estimate (IDENTIFY words 89/90) — shown while it erases
+# ─────────────────────────────────────────────────────────────────────
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_supported_reports_the_normal_erase_time_estimate(mock_identify, mock_send):
+    mock_identify.return_value = make_identify(erase_unit_minutes=4)
+    result = secure_erase_supported(HANDLE)
+    assert result.method == "ata-secure-erase"
+    assert result.estimated_minutes == 4
+    mock_send.assert_not_called()
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_supported_reports_the_enhanced_erase_time_estimate(mock_identify, mock_send):
+    words = [0] * 256
+    words[90] = 3  # word 90: enhanced erase time, 2-minute units -> 6 minutes
+    identify = make_identify(enhanced_erase_supported=True, erase_unit_minutes=4)
+    identify.raw_words = tuple(words)
+    mock_identify.return_value = identify
+    result = secure_erase_supported(HANDLE)
+    assert result.method == "ata-enhanced"
+    assert result.estimated_minutes == 6
+    mock_send.assert_not_called()
+
+
+@patch("wipe.passthrough.send_ata_command")
+@patch("wipe.passthrough.ata_identify")
+def test_supported_without_estimate_reports_zero(mock_identify, mock_send):
+    mock_identify.return_value = make_identify(security_frozen=True, erase_unit_minutes=4)
+    assert secure_erase_supported(HANDLE).estimated_minutes == 0
+    mock_identify.return_value = make_identify(enhanced_erase_supported=True)
+    assert secure_erase_supported(HANDLE).estimated_minutes == 0  # no word 90
