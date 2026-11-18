@@ -561,7 +561,7 @@ def test_reformat_rechecks_target_and_is_skipped_when_refused():
     fake_format_mod.reformat_drive = fake_reformat
     _sys.modules["wipe.format"] = fake_format_mod
 
-    gate = MagicMock(side_effect=[None, cli.UnsafeTargetError("stick swapped")])
+    gate = MagicMock(side_effect=[[], cli.UnsafeTargetError("stick swapped")])
     try:
         with (
             patch.object(cli, "is_admin", return_value=True),
@@ -606,3 +606,156 @@ def test_cmd_wipe_confirmation_names_every_letter_of_the_disk(capsys, monkeypatc
             cli.cmd_wipe(args)
 
     assert "E:, G:" in capsys.readouterr().out
+
+
+def test_cmd_wipe_holds_volume_locks_until_the_wipe_is_done():
+    """1.1.2: CLI keeps the locks from prepare_target during execute()."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_REQUIRED_WIPE_ARGS + ["--yes"])
+    released: list[int] = []
+    held: list[bool] = []
+
+    fake_method = MagicMock()
+    fake_method.name = "ZeroFill"
+    fake_method.passes = 1
+    fake_method.sicherheitsstufe = "1-2"
+
+    def fake_execute(**_k):
+        held.append(released == [])
+        return _fake_wipe_result()
+
+    fake_method.execute.side_effect = fake_execute
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[_fake_device()]),
+        patch.object(cli, "_resolve_wipe_method", return_value=fake_method),
+        patch.object(cli, "prepare_target", return_value=[5]),
+        patch.object(cli, "release_volumes", side_effect=released.extend),
+        patch.object(cli, "open_physical_drive", return_value=12345),
+        patch.object(cli, "close_drive"),
+        patch.object(cli, "unlock_volume"),
+        patch.object(cli, "get_drive_size", return_value=1024 * 1024),
+        patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()),
+        patch.object(cli, "get_next_cert_number", return_value=1),
+        patch.object(cli, "generate_certificate", return_value="C:/tmp/fake.pdf"),
+        patch.object(cli, "log_wipe_to_csv"),
+        patch.object(cli, "audit_log"),
+    ):
+        cli.cmd_wipe(args)
+
+    assert held == [True]
+    assert released == [5]
+
+
+def test_secure_erase_holds_volume_locks_during_the_erase():
+    """1.1.2 on v2: the drive's own erase also runs with the volumes locked,
+    and the locks are released exactly once afterwards."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    released: list[int] = []
+    held: list[bool] = []
+    se_result = SimpleNamespace(
+        success=True, method="ata-secure-erase", supported=True,
+        frozen=False, duration_seconds=1.0, error=None,
+    )
+
+    def fake_secure_erase(*_a, **_k):
+        held.append(released == [])
+        return se_result
+
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[_fake_device()]),
+        patch.object(cli, "prepare_target", return_value=[5, 6]),
+        patch.object(cli, "release_volumes", side_effect=released.extend),
+        patch.object(cli, "open_physical_drive", return_value=12345),
+        patch.object(cli, "close_drive"),
+        patch.object(cli, "unlock_volume"),
+        patch.object(cli, "get_drive_size", return_value=1024 * 1024),
+        patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()),
+        patch.object(cli, "secure_erase", side_effect=fake_secure_erase),
+        patch.object(cli, "get_next_cert_number", return_value=1),
+        patch.object(cli, "generate_certificate", return_value="C:/tmp/fake.pdf"),
+        patch.object(cli, "log_wipe_to_csv"),
+        patch.object(cli, "audit_log"),
+    ):
+        cli.cmd_wipe(args)
+
+    assert held == [True]
+    assert released == [5, 6]
+
+
+def test_secure_erase_releases_volume_locks_when_the_erase_raises():
+    """An unexpected error during the erase still releases the locks."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    released: list[int] = []
+
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[_fake_device()]),
+        patch.object(cli, "prepare_target", return_value=[5]),
+        patch.object(cli, "release_volumes", side_effect=released.extend),
+        patch.object(cli, "open_physical_drive", return_value=12345),
+        patch.object(cli, "close_drive"),
+        patch.object(cli, "get_drive_size", return_value=1024 * 1024),
+        patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()),
+        patch.object(cli, "secure_erase", side_effect=OSError("bridge gone")),
+        patch.object(cli, "audit_log"),
+    ):
+        with pytest.raises(SystemExit):
+            cli.cmd_wipe(args)
+
+    assert released == [5]
+
+
+def test_reformat_releases_the_gate_locks_before_reformatting():
+    """The safety re-check before reformat dismounts and locks the volumes
+    again. Clear-Disk needs the disk free, so those locks are released
+    before the reformat runs; the identity/system check itself stays."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_REQUIRED_WIPE_ARGS + ["--reformat", "exfat", "--yes"])
+    released: list[int] = []
+    seen_at_reformat: list[list[int]] = []
+
+    fake_method = MagicMock()
+    fake_method.name = "ZeroFill"
+    fake_method.passes = 1
+    fake_method.sicherheitsstufe = "1-2"
+    fake_method.execute.return_value = _fake_wipe_result()
+
+    def fake_reformat(**_kw):
+        seen_at_reformat.append(list(released))
+        return _fake_format_result()
+
+    import sys as _sys
+    import types as _types
+    fake_format_mod = _types.ModuleType("wipe.format")
+    fake_format_mod.reformat_drive = MagicMock(side_effect=fake_reformat)
+    _sys.modules["wipe.format"] = fake_format_mod
+
+    gate = MagicMock(side_effect=[[5], [6]])
+    try:
+        with (
+            patch.object(cli, "is_admin", return_value=True),
+            patch.object(cli, "list_devices", return_value=[_fake_device()]),
+            patch.object(cli, "_resolve_wipe_method", return_value=fake_method),
+            patch.object(cli, "prepare_target", gate),
+            patch.object(cli, "release_volumes", side_effect=released.extend),
+            patch.object(cli, "open_physical_drive", return_value=12345),
+            patch.object(cli, "close_drive"),
+            patch.object(cli, "unlock_volume"),
+            patch.object(cli, "get_drive_size", return_value=1024 * 1024),
+            patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()),
+            patch.object(cli, "get_next_cert_number", return_value=1),
+            patch.object(cli, "generate_certificate", return_value="C:/tmp/fake.pdf"),
+            patch.object(cli, "log_wipe_to_csv"),
+            patch.object(cli, "audit_log"),
+        ):
+            cli.cmd_wipe(args)
+    finally:
+        _sys.modules.pop("wipe.format", None)
+
+    assert gate.call_count == 2
+    assert seen_at_reformat == [[5, 6]]
+    assert released == [5, 6]

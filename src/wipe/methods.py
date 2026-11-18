@@ -43,6 +43,25 @@ PROGRESS_INTERVAL = 50 * 1024 * 1024
 MAX_BAD_SECTOR_OFFSETS = 100
 DEFAULT_MAX_BAD_FRACTION = 0.10
 
+# Only these Win32 errors from WriteFile mean "this block of the medium is
+# bad". Anything else (a lost volume lock, write protection, the device gone,
+# a bad parameter) would hit every following block too, so it aborts the wipe
+# as failed instead of being skipped as a bad sector.
+MEDIA_ERROR_CODES = frozenset({
+    23,    # ERROR_CRC
+    27,    # ERROR_SECTOR_NOT_FOUND
+    29,    # ERROR_WRITE_FAULT
+    30,    # ERROR_READ_FAULT
+    31,    # ERROR_GEN_FAILURE
+    483,   # ERROR_DEVICE_HARDWARE_ERROR
+    1117,  # ERROR_IO_DEVICE
+})
+ERROR_ACCESS_DENIED = 5
+REMOUNTED_MESSAGE = (
+    "Zugriff verweigert — Datenträger wurde während des Löschens wieder "
+    "eingebunden / access denied — the drive was remounted during the wipe"
+)
+
 
 # ─────────────────────────────────────────────────────────────────────
 # ctypes prototypes
@@ -132,8 +151,24 @@ def _write_block(handle: int, data: bytes) -> int:
     )
     if not success:
         err = ctypes.get_last_error() or kernel32.GetLastError()
-        raise OSError(f"WriteFile failed with error code {err}")
+        exc = OSError(f"WriteFile failed with error code {err}")
+        exc.winerror = err  # lets the caller tell a bad sector from a lost lock
+        raise exc
     return written.value
+
+
+def _fatal_write_error(exc: OSError, offset: int) -> OSError | None:
+    """None if ``exc`` is a media error (a bad sector), else the error that
+    aborts the wipe. Error 5 means Windows mounted the volume again."""
+    code = getattr(exc, "winerror", None)
+    if code in MEDIA_ERROR_CODES:
+        return None
+    audit_log(f"WriteFile failed at offset {offset} with error {code}: "
+              f"not a media error, wipe aborted")
+    if code == ERROR_ACCESS_DENIED:
+        return OSError(f"{REMOUNTED_MESSAGE} (WriteFile error 5 at byte {offset})")
+    return OSError(f"WriteFile failed at byte {offset} with error code {code} "
+                   f"(not a bad sector, wipe aborted)")
 
 
 class WipeMethod(ABC):
@@ -176,9 +211,10 @@ class WipeMethod(ABC):
     ) -> int:
         """Run a single overwrite pass over the whole drive. Returns bytes written.
 
-        Bad-sector tolerant: a WriteFile failure on a block does not abort the
-        pass. The offset is recorded in ``bad_tracker``, the pass seeks past the
-        failed region and continues. This lets a drive with a handful of
+        Bad-sector tolerant: a WriteFile media error (see MEDIA_ERROR_CODES) on
+        a block does not abort the pass. The offset is recorded in
+        ``bad_tracker``, the pass seeks past the failed region and continues.
+        Any other WriteFile error (e.g. 5 after a remount) raises OSError. This lets a drive with a handful of
         unwritable sectors still be wiped (and the defects reported) instead of
         failing the whole operation on the first bad block. The returned byte
         count covers only the blocks that were written successfully.
@@ -215,6 +251,9 @@ class WipeMethod(ABC):
                 # A cancellation InterruptedError must propagate untouched.
                 if isinstance(exc, InterruptedError):
                     raise
+                fatal = _fatal_write_error(exc, offset)
+                if fatal is not None:
+                    raise fatal from exc
                 # Bad block: record it, skip past it, force a re-seek, keep going.
                 if bad_tracker is not None:
                     bad_tracker.record(offset, chunk)

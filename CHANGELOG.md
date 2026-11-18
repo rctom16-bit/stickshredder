@@ -70,6 +70,15 @@ firmware-level erase. Builds on 1.1.1.
   `sample` stays available as the quicker option. The default method in the
   settings is now the one-pass zero fill.
 - `--method` is optional for `wipe` (defaults to the recommendation).
+- **Includes the 1.1.2 fix:** volumes stay locked through wipe and
+  verification — also during the experimental Secure Erase. The safety
+  re-check before "reformat after wipe" releases its locks before the disk
+  is reformatted.
+- **Only media errors count as bad sectors.** A `WriteFile` failure is
+  skipped as a bad sector only for real media errors (e.g. CRC, I/O device
+  error, hardware error). "Access denied" (error 5 — Windows mounted the
+  drive again) and every other error stop the wipe as failed instead of
+  being reported as thousands of bad sectors.
 - The history's `result` column records `OK` / `LIMITED` / `FAILED`. Older
   entries with `SUCCESS` / `FAILED` are still read and shown correctly; the
   history chain is unaffected.
@@ -96,6 +105,13 @@ firmware-level erase. Builds on 1.1.1.
   ATA pass-through parsing, HPA/DCO detection, secure-erase state machine, CLI
   secure-erase + HPA wiring, the safety gate before secure erase and reformat,
   and the GUI internal-drive safety gate.
+
+## [1.1.2] - 2026-11-18
+
+### Fixed
+
+- **Wipes could fail after a few seconds with "WriteFile failed with error code 5".** StickShredder dismounted the drive's volumes and then released them right away. As soon as anything touched the drive (e.g. Explorer), Windows mounted the file system again and refused every further raw write into it. The volumes now stay locked until wipe and verification are finished. If a volume is in use, the dismount is forced and the lock taken afterwards; if it still cannot be locked, the wipe is refused before anything is written. Found in a real wipe of a 64 GB USB stick; no certificate was issued for the failed attempt.
+- The CLI no longer sends a volume lock to the physical-drive handle (meant for volumes; it could stall some USB controllers). The GUI already skipped it.
 
 ## [1.1.1] - 2026-11-17
 

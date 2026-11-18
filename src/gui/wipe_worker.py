@@ -19,6 +19,7 @@ from wipe.device import (
     DeviceInfo,
     UnsafeTargetError,
     prepare_target,
+    release_volumes,
     open_physical_drive,
     close_drive,
     get_drive_size,
@@ -216,6 +217,7 @@ class WipeWorker(QThread):
             )
 
             handle: int | None = None
+            volume_locks: list[int] = []
             demo_file_path: str | None = None
             cert_path = ""
             success = False
@@ -323,7 +325,9 @@ class WipeWorker(QThread):
                         device.disk_letters or [device.drive_letter or device.device_id]
                     )
                     self.status_message.emit(f"Checking and dismounting {letters}...")
-                    prepare_target(device)
+                    # The volumes stay locked until the wipe and verification
+                    # are done; otherwise Windows can remount them mid-wipe.
+                    volume_locks = prepare_target(device)
 
                     # 2. Open physical drive
                     self.status_message.emit(f"Opening {device.device_id}...")
@@ -419,6 +423,10 @@ class WipeWorker(QThread):
                         verify_mode=self.verify_mode,
                         verify_progress_callback=_verify_cb,
                     )
+                    # Wipe + verify done: let go of the volumes before any
+                    # reformat (which needs the disk free).
+                    locks, volume_locks = volume_locks, []
+                    release_volumes(locks)
 
                     if not wipe_result.success:
                         raise RuntimeError(
@@ -455,8 +463,10 @@ class WipeWorker(QThread):
                         m = re.search(r"PhysicalDrive(\d+)", device.device_id)
                         # Reformatting writes a new partition table: same
                         # gate as the wipe. A refusal only skips the reformat.
+                        # The check locks the volumes again; Clear-Disk needs
+                        # the disk free, so the locks go before the reformat.
                         try:
-                            prepare_target(device)
+                            release_volumes(prepare_target(device))
                             unsafe = None
                         except UnsafeTargetError as exc:
                             unsafe = exc
@@ -682,6 +692,8 @@ class WipeWorker(QThread):
                     except OSError:
                         pass
                     close_drive(handle)
+                locks, volume_locks = volume_locks, []
+                release_volumes(locks)
                 # Clean up demo temp file
                 if demo_file_path is not None:
                     try:

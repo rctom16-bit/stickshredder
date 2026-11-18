@@ -798,7 +798,7 @@ def test_worker_rechecks_target_before_reformat(qtbot, app_config):
     )
     no_hidden = SimpleNamespace(supported=False, hpa_present=False, dco_present=False,
                                 hpa_hidden_sectors=0, dco_hidden_sectors=0)
-    gate = MagicMock(side_effect=[None, UnsafeTargetError("swapped")])
+    gate = MagicMock(side_effect=[[], UnsafeTargetError("swapped")])
     reformat = MagicMock()
     with patch("gui.wipe_worker.prepare_target", gate), \
          patch("gui.wipe_worker.open_physical_drive", return_value=1), \
@@ -821,4 +821,90 @@ def test_worker_rechecks_target_before_reformat(qtbot, app_config):
     assert gate.call_count == 2
     reformat.assert_not_called()
     cert.assert_called_once()
+    assert results == [(0, True)]
+
+
+def _gui_lock_test_device():
+    from wipe.device import DeviceInfo
+    return DeviceInfo(
+        drive_letter="E:", device_id=r"\\.\PhysicalDrive7", model="Stick",
+        serial_number="SN7", capacity_bytes=1024**2, filesystem="FAT32",
+        connection_type="USB", is_removable=True, is_system_drive=False,
+        disk_letters=["E:"],
+    )
+
+
+def _gui_lock_test_method(execute):
+    method = MagicMock()
+    method.name = "ZeroFill"
+    method.passes = 1
+    method.sicherheitsstufe = "H-2"
+    method.execute.side_effect = execute
+    return method
+
+
+def _ok_wipe_result():
+    from wipe.methods import WipeResult
+    now = datetime.now()
+    return WipeResult(
+        method_name="ZeroFill", passes=1, start_time=now, end_time=now,
+        bytes_written=1024**2, success=True, error_message=None,
+    )
+
+
+def test_worker_holds_volume_locks_for_the_whole_wipe(qtbot, app_config):
+    """1.1.2: the volume locks from prepare_target stay held while the wipe
+    and verification run, and are released exactly once afterwards."""
+    from types import SimpleNamespace
+    from gui.wipe_worker import WipeWorker
+
+    released: list[int] = []
+    held_during_execute: list[bool] = []
+
+    def fake_execute(*_a, **_k):
+        held_during_execute.append(released == [])
+        return _ok_wipe_result()
+
+    no_hidden = SimpleNamespace(supported=False, hpa_present=False, dco_present=False,
+                                hpa_hidden_sectors=0, dco_hidden_sectors=0)
+    with patch("gui.wipe_worker.prepare_target", return_value=[7, 8]),          patch("gui.wipe_worker.release_volumes", side_effect=released.extend),          patch("gui.wipe_worker.open_physical_drive", return_value=1),          patch("gui.wipe_worker.get_drive_size", return_value=1024**2),          patch("gui.wipe_worker.detect_hidden_areas", return_value=no_hidden),          patch("gui.wipe_worker.close_drive"),          patch("gui.wipe_worker.unlock_volume"),          patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"),          patch("gui.wipe_worker.log_wipe_to_csv"),          patch("gui.wipe_worker.get_next_cert_number", return_value=1),          patch("gui.wipe_worker.audit_log"):
+        worker = WipeWorker(devices=[_gui_lock_test_device()],
+                            wipe_method=_gui_lock_test_method(fake_execute),
+                            config=app_config, verify_mode="none")
+        with qtbot.waitSignal(worker.all_completed, timeout=5000):
+            worker.start()
+
+    assert held_during_execute == [True]
+    assert released == [7, 8]
+
+
+def test_worker_releases_the_gate_locks_before_reformatting(qtbot, app_config):
+    """The safety re-check before reformat locks the volumes again; Clear-Disk
+    needs the disk free, so those locks are released before the reformat."""
+    from types import SimpleNamespace
+    from gui.wipe_worker import WipeWorker
+
+    released: list[int] = []
+    seen_at_reformat: list[list[int]] = []
+
+    def fake_reformat(**_kw):
+        seen_at_reformat.append(list(released))
+        return SimpleNamespace(success=True, filesystem="exfat", label="USB",
+                               error_message=None)
+
+    no_hidden = SimpleNamespace(supported=False, hpa_present=False, dco_present=False,
+                                hpa_hidden_sectors=0, dco_hidden_sectors=0)
+    gate = MagicMock(side_effect=[[7], [9]])
+    with patch("gui.wipe_worker.prepare_target", gate),          patch("gui.wipe_worker.release_volumes", side_effect=released.extend),          patch("gui.wipe_worker.open_physical_drive", return_value=1),          patch("gui.wipe_worker.get_drive_size", return_value=1024**2),          patch("gui.wipe_worker.detect_hidden_areas", return_value=no_hidden),          patch("gui.wipe_worker.close_drive"),          patch("gui.wipe_worker.unlock_volume"),          patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"),          patch("gui.wipe_worker.log_wipe_to_csv"),          patch("gui.wipe_worker.get_next_cert_number", return_value=1),          patch("gui.wipe_worker.audit_log"),          patch("wipe.format.reformat_drive", side_effect=fake_reformat):
+        worker = WipeWorker(devices=[_gui_lock_test_device()],
+                            wipe_method=_gui_lock_test_method(lambda *a, **k: _ok_wipe_result()),
+                            config=app_config, verify_mode="none", reformat="exfat")
+        results: list[tuple[int, bool]] = []
+        worker.device_completed.connect(lambda i, ok, _p: results.append((i, ok)))
+        with qtbot.waitSignal(worker.all_completed, timeout=5000):
+            worker.start()
+
+    assert gate.call_count == 2
+    assert seen_at_reformat == [[7, 9]]
+    assert released == [7, 9]
     assert results == [(0, True)]
