@@ -318,6 +318,35 @@ QLabel[role="dialog-title"] {{ font-family: "{f.heading}"; font-size: 22px; font
 QLabel[role="dialog-disk"] {{ font-size: 14px; color: {p.text}; }}
 QLabel[role="field-label"] {{ font-size: 13px; font-weight: 600; color: {p.muted}; }}
 
+/* Wave 4: Zertifikate, Schlüssel, Optionen */
+QLabel[role="card-title"] {{ font-family: "{f.heading}"; font-size: 18px; font-weight: 600; }}
+QLabel[role="row-title"] {{ font-size: 15px; font-weight: 600; color: {p.text}; }}
+QLabel[role="fingerprint"] {{ font-family: "{f.mono}"; font-size: 24px; font-weight: 500; color: {p.accent_text}; }}
+QLabel[role="fingerprint"][tone="danger"] {{ font-family: "{f.body}"; font-size: 14px; color: {p.danger}; }}
+QLabel[role="key-mono"] {{ font-family: "{f.mono}"; font-size: 13px; color: {p.muted}; }}
+QLabel[role="verify-title"] {{ font-family: "{f.heading}"; font-size: 24px; font-weight: 700; }}
+QLabel[role="verify-details"] {{ font-family: "{f.mono}"; font-size: 12px; color: {p.muted}; }}
+QLabel[role="status"] {{ font-size: 13px; font-weight: 600; color: {p.muted}; }}
+QLabel[role="status"][tone="ok"] {{ color: {p.accent_text}; }}
+QLabel[role="status"][tone="warning"] {{ color: {p.warning}; }}
+QLabel[role="status"][tone="danger"] {{ color: {p.danger}; }}
+QPushButton[variant="small-danger"] {{
+    font-size: 13px; min-height: 32px; padding: 0px 12px; border-radius: 8px;
+    color: {p.danger}; background: transparent; border: 1px solid {p.danger_border};
+}}
+QPushButton[variant="small-danger"]:hover {{ background: {p.danger_bg}; }}
+QTableWidget[role="history"] {{
+    background: transparent; border: none; selection-background-color: {p.nav_active};
+    selection-color: {p.text}; outline: none;
+}}
+QTableWidget[role="history"]::item {{ padding: 0px 10px; border-bottom: 1px solid {p.border}; }}
+QTableWidget[role="history"]::item:selected {{ background: {p.nav_active}; color: {p.text}; }}
+QTableWidget[role="history"] QHeaderView::section {{
+    background: transparent; color: {p.muted}; font-size: 12px; font-weight: 600;
+    border: none; border-bottom: 1px solid {p.border}; padding: 8px 10px;
+}}
+QLineEdit[readOnly="true"] {{ color: {p.muted}; }}
+
 /* Buttons */
 QPushButton {{
     font-size: 14px; color: {p.text}; background: {p.button_bg};

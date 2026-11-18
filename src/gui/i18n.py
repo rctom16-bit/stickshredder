@@ -24,19 +24,9 @@ STRINGS: dict[str, tuple[str, str]] = {
     "rail.theme_to_dark": ("Dunkles Design einschalten", "Switch to dark theme"),
     "rail.theme_to_light": ("Helles Design einschalten", "Switch to light theme"),
     "rail.theme_hint": ("Rechtsklick: wie Windows", "Right-click: follow Windows"),
-    "menu.settings": ("Einstellungen …", "Settings …"),
-    "menu.demo": ("Demo-Modus", "Demo mode"),
     "menu.theme_system": ("Design wie Windows", "Theme like Windows"),
     "menu.theme_light": ("Helles Design", "Light theme"),
     "menu.theme_dark": ("Dunkles Design", "Dark theme"),
-    "menu.about": ("Über StickShredder", "About StickShredder"),
-    "keys.title": ("Kommt in Kürze", "Coming soon"),
-    "keys.text": (
-        "Schlüsselkarte, vertraute Schlüssel sowie Export und Import ziehen hierher um. "
-        "Bis dahin auf der Kommandozeile: stickshredder keycard, trust und key.",
-        "The key card, trusted keys and key export/import will move here. "
-        "Until then use the command line: stickshredder keycard, trust and key.",
-    ),
     # Selection
     "select.no_disk_title": ("Kein Datenträger gewählt", "No disk selected"),
     "select.no_disk_hint": (
@@ -486,6 +476,220 @@ STRINGS: dict[str, tuple[str, str]] = {
         "Then you can overwrite it.",
     ),
     "result.overwrite_instead": ("Stattdessen überschreiben", "Overwrite instead"),
+    # --- Wave 4: pages ---
+    # Zertifikate
+    "certs.title": ("Zertifikate", "Certificates"),
+    "certs.subtitle": (
+        "Jede Löschung dieses PCs mit ihrem Löschzertifikat.",
+        "Every wipe on this PC with its deletion certificate.",
+    ),
+    "certs.verify_button": ("Zertifikat prüfen", "Check a certificate"),
+    "certs.search": ("Suchen: Gerät, Seriennummer, Zertifikat …",
+                     "Search: device, serial number, certificate …"),
+    "certs.open_pdf": ("PDF öffnen", "Open PDF"),
+    "certs.open_folder": ("Ordner öffnen", "Open folder"),
+    "certs.export": ("CSV exportieren", "Export CSV"),
+    "certs.col.date": ("Datum", "Date"),
+    "certs.col.device": ("Gerät", "Device"),
+    "certs.col.serial": ("Seriennummer", "Serial number"),
+    "certs.col.method": ("Methode", "Method"),
+    "certs.col.result": ("Ergebnis", "Result"),
+    "certs.col.cert": ("Zertifikat", "Certificate"),
+    "certs.result.ok": ("OK", "OK"),
+    "certs.result.limited": ("EINGESCHRÄNKT", "LIMITED"),
+    "certs.result.failed": ("FEHLGESCHLAGEN", "FAILED"),
+    "certs.empty_text": (
+        "Nach der ersten Löschung steht sie hier mit ihrem Zertifikat. Ein Zertifikat "
+        "von einem anderen PC kannst du schon jetzt prüfen.",
+        "After the first wipe it is listed here with its certificate. You can already "
+        "check a certificate from another PC.",
+    ),
+    "certs.no_match": ("Kein Eintrag passt zur Suche.", "No entry matches the search."),
+    "certs.chain_ok": ("Verlauf unverändert · {n} Einträge geprüft",
+                       "History unchanged · {n} entries checked"),
+    "certs.chain_ok_one": ("Verlauf unverändert · 1 Eintrag geprüft",
+                           "History unchanged · 1 entry checked"),
+    "certs.chain_legacy": ("{n} ältere ohne Prüfsumme (vor 2.0)",
+                           "{n} older ones without checksum (before 2.0)"),
+    "certs.chain_broken": ("Verlauf verändert ab Eintrag {n}: {reason}",
+                           "History altered from entry {n}: {reason}"),
+    "certs.no_cert": ("Für diese Löschung gibt es kein Zertifikat.",
+                      "This wipe has no certificate."),
+    "certs.pdf_missing": ("Kein PDF für {cert} im Zertifikatsordner gefunden.",
+                          "No PDF for {cert} found in the certificate folder."),
+    "certs.open_failed": ("Konnte nicht geöffnet werden: {path}", "Could not be opened: {path}"),
+    "certs.exported_one": ("1 Eintrag exportiert: {path}", "1 entry exported: {path}"),
+    "certs.exported": ("{n} Einträge exportiert: {path}", "{n} entries exported: {path}"),
+    "certs.export_failed": ("Export fehlgeschlagen: {error}", "Export failed: {error}"),
+    "certs.export_title": ("Verlauf exportieren", "Export history"),
+    "certs.csv_filter": ("CSV-Dateien (*.csv)", "CSV files (*.csv)"),
+    "certs.pick_title": ("Zertifikat zum Prüfen wählen", "Choose a certificate to check"),
+    "certs.pdf_filter": ("PDF-Dateien (*.pdf)", "PDF files (*.pdf)"),
+    "certs.verify.eyebrow": ("Prüfergebnis", "Check result"),
+    "certs.verify.trusted": ("Echt, von einem vertrauten Schlüssel",
+                             "Genuine, from a trusted key"),
+    "certs.verify.unknown_key": ("Signatur gültig, Schlüssel unbekannt",
+                                 "Signature valid, key unknown"),
+    "certs.verify.invalid": ("Ungültig oder verändert", "Invalid or altered"),
+    "certs.verify.trusted_text": (
+        "Das Zertifikat ist seit der Erstellung unverändert und mit dem vertrauten "
+        "Schlüssel „{name}“ signiert.",
+        "The certificate is unchanged since it was created and signed with the trusted "
+        "key “{name}”.",
+    ),
+    "certs.verify.unknown_text": (
+        "Das Zertifikat ist seit der Erstellung unverändert, aber sein Schlüssel ist hier "
+        "nicht als vertraut hinterlegt. Vergleiche den Fingerabdruck mit der Schlüsselkarte "
+        "der Firma, die es ausgestellt hat.",
+        "The certificate is unchanged since it was created, but its key is not trusted "
+        "here. Compare the fingerprint with the key card of the company that issued it.",
+    ),
+    "certs.verify.invalid_text": ("Diesem Zertifikat nicht vertrauen. Grund: {reason}",
+                                  "Do not trust this certificate. Reason: {reason}"),
+    "certs.verify.note": (
+        "Die Signatur zeigt, dass das Zertifikat unverändert ist — nicht, dass physisch "
+        "gelöscht wurde.",
+        "The signature shows that the certificate is unchanged — not that data was "
+        "physically erased.",
+    ),
+    "certs.verify.close": ("Schließen", "Close"),
+    # Schlüssel
+    "keys.title": ("Schlüssel", "Keys"),
+    "keys.subtitle": (
+        "Mit diesem Schlüssel signiert StickShredder jedes Löschzertifikat dieses PCs.",
+        "StickShredder signs every deletion certificate from this PC with this key.",
+    ),
+    "keys.own_eyebrow": ("Schlüssel dieses PCs · Fingerabdruck", "This PC's key · fingerprint"),
+    "keys.copy": ("Kopieren", "Copy"),
+    "keys.copied": ("Fingerabdruck kopiert", "Fingerprint copied"),
+    "keys.created": ("Auf diesem PC seit {date}", "On this PC since {date}"),
+    "keys.unreadable": ("Schlüssel nicht lesbar: {error}", "Key not readable: {error}"),
+    "keys.private_note": (
+        "Der private Schlüssel verlässt diesen PC nie und wird nirgends angezeigt.",
+        "The private key never leaves this PC and is never shown.",
+    ),
+    "keys.keycard_button": ("Schlüsselkarte erstellen", "Create key card"),
+    "keys.keycard_title": ("Wofür ist die Schlüsselkarte?", "What is the key card for?"),
+    "keys.keycard_text": (
+        "Ein Fingerabdruck auf dem Zertifikat beweist allein nichts — ein Fälscher kann "
+        "seinen eigenen aufdrucken. Die Schlüsselkarte ist eine PDF-Seite mit diesem "
+        "Fingerabdruck. Lege sie in der IT-Dokumentation ab oder gib sie Kunden und "
+        "Prüfern: Damit sehen sie, dass ein Zertifikat wirklich von diesem PC stammt.",
+        "A fingerprint on a certificate proves nothing on its own — a forger can print "
+        "their own. The key card is a one-page PDF with this fingerprint. File it with "
+        "the IT documentation or give it to customers and auditors: it lets them see that "
+        "a certificate really comes from this PC.",
+    ),
+    "keys.company_missing": (
+        "Kein Firmenname eingestellt — er fehlt dann auf der Karte. Unter Optionen eintragen.",
+        "No company name set — it will be missing on the card. Enter it under Options.",
+    ),
+    "keys.keycard_saved": ("Schlüsselkarte gespeichert: {path}", "Key card saved: {path}"),
+    "keys.keycard_failed": ("Schlüsselkarte konnte nicht erstellt werden: {error}",
+                            "Key card could not be created: {error}"),
+    "keys.trusted_title": ("Vertraute Schlüssel", "Trusted keys"),
+    "keys.trusted_text": (
+        "Zertifikate mit einem dieser Schlüssel gelten beim Prüfen als echt.",
+        "Certificates signed with one of these keys count as genuine when checked.",
+    ),
+    "keys.add": ("Aus Schlüsselkarte hinzufügen …", "Add from key card …"),
+    "keys.rename": ("Umbenennen", "Rename"),
+    "keys.remove": ("Entfernen", "Remove"),
+    "keys.own_chip": ("Dieser PC", "This PC"),
+    "keys.added_on": ("vertraut seit {date}", "trusted since {date}"),
+    "keys.none": ("Noch keine vertrauten Schlüssel.", "No trusted keys yet."),
+    "keys.pick_title": ("Schlüsselkarte wählen", "Choose a key card"),
+    "keys.name_title": ("Name für den Schlüssel", "Name for the key"),
+    "keys.name_label": ("Wem gehört dieser Schlüssel? (z. B. Firma oder PC)",
+                        "Whose key is this? (e.g. company or PC)"),
+    "keys.name_empty": ("Der Name darf nicht leer sein.", "The name must not be empty."),
+    "keys.not_a_keycard": ("Das ist keine Schlüsselkarte von StickShredder.",
+                           "This is not a StickShredder key card."),
+    "keys.file_unreadable": ("Datei nicht lesbar: {error}", "File not readable: {error}"),
+    "keys.added": (
+        "„{name}“ ist jetzt vertraut. Vergleiche den Fingerabdruck mit der gedruckten "
+        "Karte: {fingerprint}",
+        "“{name}” is now trusted. Compare the fingerprint with the printed card: "
+        "{fingerprint}",
+    ),
+    "keys.already": ("Dieser Schlüssel ist schon vertraut: „{name}“.",
+                     "This key is already trusted: “{name}”."),
+    "keys.renamed": ("Umbenannt in „{name}“.", "Renamed to “{name}”."),
+    "keys.remove_title": ("Schlüssel entfernen?", "Remove key?"),
+    "keys.remove_text": (
+        "„{name}“ nicht mehr vertrauen? Zertifikate mit diesem Schlüssel zeigen beim "
+        "Prüfen dann „Schlüssel unbekannt“.",
+        "Stop trusting “{name}”? Certificates signed with this key then show "
+        "“key unknown” when checked.",
+    ),
+    "keys.remove_own": ("Das ist der Schlüssel dieses PCs.", "This is this PC's own key."),
+    "keys.removed": ("„{name}“ entfernt.", "“{name}” removed."),
+    "keys.trust_damaged": (
+        "Die Liste vertrauter Schlüssel ist beschädigt und bleibt unverändert: {path}",
+        "The trusted key list is damaged and is left unchanged: {path}",
+    ),
+    # Optionen
+    "settings.title": ("Optionen", "Options"),
+    "settings.subtitle": (
+        "Firmendaten fürs Zertifikat, Voreinstellungen zum Löschen und Darstellung.",
+        "Company details for the certificate, wipe defaults and appearance.",
+    ),
+    "settings.save": ("Speichern", "Save"),
+    "settings.reset": ("Zurücksetzen", "Reset"),
+    "settings.saved": ("Gespeichert", "Saved"),
+    "settings.save_failed": ("Konnte nicht gespeichert werden: {error}",
+                             "Could not be saved: {error}"),
+    "settings.section_cert": ("Zertifikat", "Certificate"),
+    "settings.section_cert_hint": (
+        "Steht auf jedem Löschzertifikat und auf der Schlüsselkarte.",
+        "Shown on every deletion certificate and on the key card.",
+    ),
+    "settings.company": ("Firmenname", "Company name"),
+    "settings.company_placeholder": ("z. B. ACME IT GmbH", "e.g. ACME IT Ltd"),
+    "settings.address": ("Adresse", "Address"),
+    "settings.logo": ("Logo", "Logo"),
+    "settings.logo_placeholder": ("Kein Logo (PNG oder JPG)", "No logo (PNG or JPG)"),
+    "settings.browse": ("Durchsuchen …", "Browse …"),
+    "settings.clear": ("Entfernen", "Remove"),
+    "settings.cert_dir": ("Zertifikatsordner", "Certificate folder"),
+    "settings.cert_language": ("Sprache der Zertifikate", "Certificate language"),
+    "settings.lang_de": ("Deutsch", "German"),
+    "settings.lang_en": ("Englisch", "English"),
+    "settings.lang_both": ("Zweisprachig (Deutsch und Englisch)",
+                           "Bilingual (German and English)"),
+    "settings.section_wipe": ("Voreinstellungen zum Löschen", "Wipe defaults"),
+    "settings.section_wipe_hint": (
+        "Gelten für jeden neuen Löschvorgang. Einzeln änderbar über „Andere Methode …“.",
+        "Apply to every new wipe. Change them per wipe with “Other method …”.",
+    ),
+    "settings.section_look": ("Darstellung", "Appearance"),
+    "settings.section_look_hint": ("Wirkt sofort.", "Takes effect at once."),
+    "settings.theme": ("Design", "Theme"),
+    "settings.theme_light": ("Hell", "Light"),
+    "settings.theme_dark": ("Dunkel", "Dark"),
+    "settings.theme_system": ("Wie Windows", "Like Windows"),
+    "settings.language": ("Sprache", "Language"),
+    "settings.ui_de": ("Deutsch", "Deutsch"),
+    "settings.ui_en": ("English", "English"),
+    "settings.demo_text": (
+        "Probiere den ganzen Ablauf an einer kleinen virtuellen Datei aus. Echte "
+        "Datenträger werden nicht berührt.",
+        "Try the whole flow on a small virtual file. No real disk is touched.",
+    ),
+    "settings.section_about": ("Über StickShredder", "About StickShredder"),
+    "settings.version": ("Version {version}", "Version {version}"),
+    "settings.github": ("Auf GitHub ansehen", "View on GitHub"),
+    "settings.err_company": (
+        "Firmenname fehlt — er ist nötig, wenn eine Adresse eingetragen ist.",
+        "Company name missing — it is required when an address is entered.",
+    ),
+    "settings.err_operator": ("Der Bedienername braucht mindestens 2 Zeichen.",
+                              "The operator name needs at least 2 characters."),
+    "settings.pick_logo": ("Firmenlogo wählen", "Choose company logo"),
+    "settings.image_filter": ("Bilder (*.png *.jpg *.jpeg *.bmp)",
+                              "Images (*.png *.jpg *.jpeg *.bmp)"),
+    "settings.pick_folder": ("Zertifikatsordner wählen", "Choose certificate folder"),
+    # --- end Wave 4: pages ---
 }
 
 

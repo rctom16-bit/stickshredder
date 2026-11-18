@@ -1,8 +1,9 @@
 """The StickShredder 2.0 window: 88 px rail on the left, pages on the right.
 
-Löschen is the new page; Zertifikate opens the existing history dialog,
-Optionen offers the existing settings dialog and the demo mode, Schlüssel is
-a placeholder until the key management page arrives.
+Four pages: Löschen (the wipe flow), Zertifikate (history, certificate check),
+Schlüssel (signing key, key card, trusted keys) and Optionen (settings,
+appearance, demo mode, about). The language and theme toggles at the bottom
+of the rail and the Optionen page stay in sync.
 """
 
 from __future__ import annotations
@@ -18,10 +19,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
     QMenu,
-    QMessageBox,
     QPushButton,
     QStackedWidget,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -30,12 +29,13 @@ from core.config import APP_VERSION
 from core.log import audit_log
 from gui import i18n, theme
 from gui.dialogs import ask_ok_cancel, ask_yes_no
-from gui.history_dialog import HistoryDialog
 from gui.i18n import tr
+from gui.pages.certificates_page import CertificatesPage
 from gui.pages.delete_page import DeletePage
-from gui.settings_dialog import SettingsDialog
+from gui.pages.keys_page import KeysPage
+from gui.pages.options_page import OptionsPage
 from gui.theme import ThemeManager
-from gui.widgets import Logo, RailButton, icon_pixmap, make_card, make_label
+from gui.widgets import Logo, RailButton, icon_pixmap
 from gui.wipe_options import WipeOptions
 
 WM_DEVICECHANGE = 0x0219
@@ -49,31 +49,6 @@ _DEVICE_EVENTS = {
 def is_device_change(message: int, wparam: int) -> bool:
     """True for the Windows broadcasts sent when a disk is plugged in or removed."""
     return message == WM_DEVICECHANGE and int(wparam) in _DEVICE_EVENTS
-
-
-class KeysPlaceholderPage(QWidget):
-    """„Schlüssel“ — replaced by the key management page in the next wave."""
-
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent)
-        self.setObjectName("PageRoot")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(28, 28, 28, 28)
-        card = make_card("surface")
-        inner = QVBoxLayout(card)
-        inner.setContentsMargins(28, 28, 28, 28)
-        inner.setSpacing(10)
-        self.title_label = make_label("", "placeholder-title")
-        self.text_label = make_label("", "muted", wrap=True)
-        inner.addWidget(self.title_label)
-        inner.addWidget(self.text_label)
-        layout.addWidget(card)
-        layout.addStretch(1)
-        self.retranslate()
-
-    def retranslate(self) -> None:
-        self.title_label.setText(tr("keys.title"))
-        self.text_label.setText(tr("keys.text"))
 
 
 class AppWindow(QMainWindow):
@@ -107,11 +82,24 @@ class AppWindow(QMainWindow):
 
         self.pages = QStackedWidget()
         self.delete_page = DeletePage(config)
-        self.keys_page = KeysPlaceholderPage()
-        self.pages.addWidget(self.delete_page)
-        self.pages.addWidget(self.keys_page)
+        self.certificates_page = CertificatesPage(config)
+        self.keys_page = KeysPage(config)
+        self.options_page = OptionsPage(config)
+        self._pages = {
+            "delete": self.delete_page,
+            "certificates": self.certificates_page,
+            "keys": self.keys_page,
+            "options": self.options_page,
+        }
+        for page in self._pages.values():
+            self.pages.addWidget(page)
         layout.addWidget(self.pages, 1)
         self.delete_page.busy_changed.connect(self._on_busy_changed)
+        self.options_page.saved.connect(self._on_options_saved)
+        self.options_page.theme_requested.connect(self.set_theme_setting)
+        self.options_page.language_requested.connect(self.set_language)
+        self.options_page.demo_requested.connect(self.start_demo_mode)
+        self.options_page.sync_appearance(self.theme.setting, i18n.language())
 
         self._device_timer = QTimer(self)
         self._device_timer.setSingleShot(True)
@@ -141,20 +129,11 @@ class AppWindow(QMainWindow):
         self.rail_buttons: dict[str, RailButton] = {}
         for key in ("delete", "certificates", "keys", "options"):
             button = RailButton(key)
-            button.setCheckable(key in ("delete", "keys"))
+            button.clicked.connect(lambda _c=False, k=key: self._show_page(k))
             self.rail_buttons[key] = button
             column.addWidget(button, 0, Qt.AlignmentFlag.AlignHCenter)
-        self.rail_buttons["delete"].clicked.connect(lambda: self._show_page("delete"))
-        self.rail_buttons["keys"].clicked.connect(lambda: self._show_page("keys"))
-        self.rail_buttons["certificates"].clicked.connect(self.open_history)
 
-        self.options_menu = QMenu(self)
-        self.settings_action = QAction(self)
-        self.settings_action.triggered.connect(self.open_settings)
-        self.demo_action = QAction(self)
-        self.demo_action.triggered.connect(self.start_demo_mode)
-        self.about_action = QAction(self)
-        self.about_action.triggered.connect(self.show_about)
+        # Right-click on the theme toggle: light / dark / like Windows.
         self.theme_actions: dict[str, QAction] = {}
         group = QActionGroup(self)
         group.setExclusive(True)
@@ -164,16 +143,6 @@ class AppWindow(QMainWindow):
             action.triggered.connect(lambda _c=False, s=setting: self.set_theme_setting(s))
             group.addAction(action)
             self.theme_actions[setting] = action
-        self.options_menu.addAction(self.settings_action)
-        self.options_menu.addAction(self.demo_action)
-        self.options_menu.addSeparator()
-        for action in self.theme_actions.values():
-            self.options_menu.addAction(action)
-        self.options_menu.addSeparator()
-        self.options_menu.addAction(self.about_action)
-        options = self.rail_buttons["options"]
-        options.setMenu(self.options_menu)
-        options.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
 
         column.addStretch(1)
         self.language_button = QPushButton()
@@ -192,10 +161,18 @@ class AppWindow(QMainWindow):
         return rail
 
     def _show_page(self, name: str) -> None:
-        page = self.keys_page if name == "keys" else self.delete_page
+        page = self._pages.get(name, self.delete_page)
+        if page is self.certificates_page:
+            self.certificates_page.refresh()   # a wipe may have added an entry
+        elif page is self.keys_page:
+            self.keys_page.refresh()
         self.pages.setCurrentWidget(page)
-        self.rail_buttons["delete"].setChecked(name != "keys")
-        self.rail_buttons["keys"].setChecked(name == "keys")
+        for key, button in self.rail_buttons.items():
+            button.setChecked(self._pages[key] is page)
+
+    def current_page(self) -> str:
+        current = self.pages.currentWidget()
+        return next(k for k, page in self._pages.items() if page is current)
 
     def _on_busy_changed(self, busy: bool) -> None:
         """While a wipe runs the rail shows only „Löschen“ (as on the artboard)."""
@@ -204,19 +181,13 @@ class AppWindow(QMainWindow):
         if busy:
             self._show_page("delete")
 
-    # ── Rail actions ──────────────────────────────────────────────────────────
+    # ── Page actions ──────────────────────────────────────────────────────────
 
-    def open_history(self) -> None:
-        HistoryDialog(self.config, self).exec()
-        self.delete_page._update_preview()
-
-    def open_settings(self) -> None:
-        if SettingsDialog(self.config, self).exec():
+    def _on_options_saved(self) -> None:
+        """New defaults reach the Löschen page; the company name the key card."""
+        if not self.delete_page.is_busy():
             self.delete_page.set_options(WipeOptions.from_config(self.config))
-
-    def show_about(self) -> None:
-        QMessageBox.about(self, tr("menu.about"),
-                          f"StickShredder {APP_VERSION}\n\n{tr('about.text')}")
+        self.keys_page.refresh()
 
     def confirm_demo(self) -> bool:
         return ask_ok_cancel(self, tr("demo.title"), tr("demo.text"), tr("demo.start"))
@@ -242,6 +213,7 @@ class AppWindow(QMainWindow):
         self.config.ui_language = i18n.language()
         self._save_config()
         self.retranslate()
+        self.options_page.sync_appearance(self.theme.setting, i18n.language())
 
     def toggle_language(self) -> None:
         self.set_language("de" if i18n.language() == "en" else "en")
@@ -250,6 +222,7 @@ class AppWindow(QMainWindow):
         self.config.theme = setting if setting in theme.THEME_SETTINGS else "system"
         self._save_config()
         self.theme.set_setting(self.config.theme)
+        self.options_page.sync_appearance(self.theme.setting, i18n.language())
 
     def toggle_theme(self) -> None:
         self.set_theme_setting("light" if self.theme.mode == "dark" else "dark")
@@ -264,16 +237,13 @@ class AppWindow(QMainWindow):
         for key, button in self.rail_buttons.items():
             button.setText(tr(f"nav.{key}"))
         self.rail.setAccessibleName(tr("rail.main_menu"))
-        self.settings_action.setText(tr("menu.settings"))
-        self.demo_action.setText(tr("menu.demo"))
-        self.about_action.setText(tr("menu.about"))
         for setting, action in self.theme_actions.items():
             action.setText(tr(f"menu.theme_{setting}"))
         self.language_button.setText(tr("rail.language_button"))
         self.language_button.setToolTip(tr("rail.language_tip"))
         self._update_theme_button()
-        self.delete_page.retranslate()
-        self.keys_page.retranslate()
+        for page in self._pages.values():
+            page.retranslate()
 
     def _update_theme_button(self) -> None:
         p = self.theme.palette
@@ -289,7 +259,8 @@ class AppWindow(QMainWindow):
         for button in self.rail_buttons.values():
             button.refresh_icon()
         self._update_theme_button()
-        self.delete_page.on_theme_changed()
+        for page in self._pages.values():
+            page.on_theme_changed()
         self.logo.update()
 
     # ── Disk plug / unplug ────────────────────────────────────────────────────

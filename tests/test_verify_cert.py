@@ -253,3 +253,33 @@ def test_trust_store_works_with_verify_token(tmp_path):
     assert verify_token(TOKEN, store.as_dict()).status == "unknown_key"
     store.add(b64url_decode(PUBKEY_B64), "Beispiel GmbH")
     assert verify_token(TOKEN, store.as_dict()).status == "trusted"
+
+
+def test_trust_store_entries_list_name_fingerprint_and_date(tmp_path):
+    path = tmp_path / "trusted_keys.json"
+    store = TrustStore.load(path)
+    first = SigningKey.from_seed(bytes([1]) * 32)
+    second = SigningKey.from_seed(bytes([2]) * 32)
+    store.add(first.public_key_bytes(), "Erster")
+    store.add(second.public_key_bytes(), "Zweiter")
+    entries = TrustStore.load(path).entries()
+    assert [(e["name"], e["fingerprint"]) for e in entries] == [
+        ("Erster", first.fingerprint()), ("Zweiter", second.fingerprint())]
+    assert all(e["added"].endswith("Z") for e in entries)
+    entries[0]["name"] = "changed copy"
+    assert TrustStore.load(path).entries()[0]["name"] == "Erster"
+
+
+def test_trust_store_rename_keeps_key_and_date(tmp_path):
+    path = tmp_path / "trusted_keys.json"
+    store = TrustStore.load(path)
+    key = SigningKey.from_seed(bytes([3]) * 32)
+    fingerprint = store.add(key.public_key_bytes(), "Alt")
+    added = store.entries()[0]["added"]
+    assert store.rename(fingerprint.lower(), "Neu") is True
+    reloaded = TrustStore.load(path)
+    assert reloaded.as_dict() == {fingerprint: "Neu"}
+    assert reloaded.entries()[0]["added"] == added
+    assert store.rename("0000-0000", "X") is False
+    with pytest.raises(ValueError):
+        store.rename(fingerprint, "  ")
