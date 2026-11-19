@@ -4,7 +4,7 @@ All notable changes to StickShredder are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0] - 2026-11-18
+## [2.0.0] - 2026-11-19
 
 Driven by the community feedback on 1.x: a certificate you can check, honest
 results, internal disks, hidden areas and bad sectors, and a hardware erase
