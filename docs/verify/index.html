@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<meta name="robots" content="noindex">
+<title>Zertifikat prüfen – StickShredder</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+<script src="vendor/noble-ed25519.js" defer></script>
+<script src="verify.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div>
+        <p class="brand-name">StickShredder</p>
+        <p class="brand-sub" data-i18n="app.subtitle">Löschzertifikat prüfen</p>
+      </div>
+    </div>
+    <button type="button" id="lang-toggle" class="btn btn-small" lang="en" aria-label="Switch to English">EN</button>
+  </div>
+</header>
+
+<main class="wrap">
+  <noscript><p class="banner banner-bad"><span data-i18n="noscript">Diese Seite benötigt JavaScript, um Zertifikate zu prüfen.</span></p></noscript>
+
+  <section id="result" class="card" hidden aria-live="polite">
+    <div id="banner" class="banner"></div>
+    <div id="data"></div>
+  </section>
+
+  <section id="keycard" class="card" hidden aria-live="polite"></section>
+
+  <section class="card" aria-labelledby="check-title">
+    <h2 id="check-title" data-i18n="check.title">Zertifikat prüfen</h2>
+    <p class="muted" data-i18n="check.hint">QR-Code des Zertifikats scannen, Prüflink oder Prüfcode einfügen oder das Zertifikat-PDF hierher ziehen.</p>
+    <form id="check-form" class="check-form" novalidate>
+      <label for="token-input" class="visually-hidden" data-i18n="check.placeholder">Prüflink oder Prüfcode einfügen …</label>
+      <textarea id="token-input" rows="3" spellcheck="false" autocomplete="off" autocapitalize="off" data-i18n-placeholder="check.placeholder" placeholder="Prüflink oder Prüfcode einfügen …"></textarea>
+      <button type="submit" class="btn btn-primary" data-i18n="check.button">Prüfen</button>
+    </form>
+    <div id="drop-zone" class="drop-zone">
+      <label class="btn" for="pdf-input" data-i18n="check.pdf">PDF auswählen</label>
+      <input id="pdf-input" type="file" accept="application/pdf,.pdf" class="visually-hidden">
+      <span class="muted" data-i18n="check.drop">oder Zertifikat-PDF hier ablegen</span>
+    </div>
+    <p id="check-message" class="note note-warn" role="status" hidden></p>
+  </section>
+
+  <section class="card" aria-labelledby="trusted-title">
+    <h2 id="trusted-title" data-i18n="trusted.title">Vertraute Schlüssel</h2>
+    <p id="trusted-empty" class="muted" data-i18n="trusted.empty">Noch keine vertrauten Schlüssel. Scannen Sie den QR-Code einer Schlüsselkarte, um einen hinzuzufügen.</p>
+    <ul id="trusted-list" class="trusted-list"></ul>
+    <p class="muted small" data-i18n="trusted.local">Gespeichert nur in diesem Browser.</p>
+  </section>
+
+  <section class="card about" aria-labelledby="about-title">
+    <h2 id="about-title" data-i18n="about.title">Was die Prüfung beweist — und was nicht</h2>
+    <ul>
+      <li data-i18n="about.1">Eine gültige Signatur beweist, dass das Zertifikat seit seiner Erstellung nicht verändert wurde und von der StickShredder-Installation mit diesem Schlüssel stammt.</li>
+      <li data-i18n="about.2">Der Fingerabdruck auf dem Zertifikat allein beweist nichts — ein Fälscher kann seinen eigenen aufdrucken. Erst der Abgleich mit der unterschriebenen Schlüsselkarte der Firma macht ein Zertifikat vertrauenswürdig.</li>
+      <li data-i18n="about.3">Die Signatur beweist nicht, dass der Datenträger tatsächlich physisch gelöscht wurde.</li>
+    </ul>
+  </section>
+</main>
+
+<footer class="wrap footer">
+  <p class="muted small" data-i18n="privacy">Die Prüfung läuft vollständig in diesem Browser. Es werden keine Daten gesendet.</p>
+</footer>
+</body>
+</html>

@@ -1,10 +1,14 @@
-"""GUI tests for the v1.1 Full-Verification feature.
+"""Worker tests for verification, reformatting, the stall watchdog and the
+volume locks (gui.wipe_worker.WipeWorker).
 
 These tests cover:
-    * Default state of the "Full verification" checkbox in MainWindow
-    * The checkbox propagates to WipeWorker.verify_mode
+    * WipeWorker keeps the verify mode and reformat choice it is given
     * WipeWorker emits phase_changed signals in the expected sequence when
       WipeMethod.execute() is mocked
+    * the stall watchdog and the target re-checks before writing/reformatting
+
+The window-level checks of the old main window moved to the page tests
+(test_gui_delete_page.py, test_gui_wipe_defaults.py).
 
 They use pytest-qt, which is already a dev dependency of the project. If the
 Qt environment cannot start (no QApplication platform available), the tests
@@ -52,107 +56,10 @@ def app_config(tmp_path):
 
 @pytest.fixture()
 def demo_device():
-    """A virtual demo device so MainWindow has something selectable."""
+    """A virtual demo device (a temp file, never a real disk)."""
     from wipe.demo import create_demo_device
 
     return create_demo_device()
-
-
-@pytest.fixture()
-def main_window(qtbot, app_config):
-    """Build a MainWindow without running the deferred device scan."""
-    from gui.main_window import MainWindow
-
-    window = MainWindow(app_config)
-    qtbot.addWidget(window)
-    return window
-
-
-# -- Phase-label helper tests (pure, no Qt event loop needed) -----------------
-
-
-def test_phase_label_helper_returns_dual_language_strings():
-    """Plain unit test for the static phase_text helper."""
-    from gui.main_window import MainWindow
-
-    assert "Bereit" in MainWindow._phase_text("idle")
-    assert "Ready" in MainWindow._phase_text("idle")
-    assert "Wiping" in MainWindow._phase_text("wiping")
-    assert "\u00dcberschreiben" in MainWindow._phase_text("wiping")
-    assert "Verifying" in MainWindow._phase_text("verifying")
-    assert "Verifikation" in MainWindow._phase_text("verifying")
-    assert "Complete" in MainWindow._phase_text("done")
-    assert "Fertig" in MainWindow._phase_text("done")
-
-
-def test_phase_style_helper_returns_different_colors_per_phase():
-    """Each phase should have a visually distinct stylesheet."""
-    from gui.main_window import MainWindow
-
-    styles = {p: MainWindow._phase_style(p) for p in ("idle", "wiping", "verifying", "done")}
-    # Sanity: all four are non-empty and distinct.
-    assert all(styles.values())
-    assert len(set(styles.values())) == 4
-
-
-# -- MainWindow checkbox + wiring --------------------------------------------
-
-
-def test_checkbox_default_unchecked(main_window):
-    """The Full-Verification checkbox must exist and start off."""
-    assert hasattr(main_window, "full_verify_cb")
-    assert main_window.full_verify_cb.isChecked() is False
-
-
-def test_checkbox_has_bilingual_label_and_tooltip(main_window):
-    """Label and tooltip must cover both DE and EN."""
-    cb = main_window.full_verify_cb
-    text = cb.text()
-    assert "Vollst\u00e4ndige Verifikation" in text
-    assert "Full verification" in text
-
-    tooltip = cb.toolTip()
-    assert "jeden Sektor" in tooltip
-    assert "every sector" in tooltip
-
-
-def test_verify_progress_bar_hidden_until_verify_phase(main_window):
-    """The verify progress bar must start hidden."""
-    assert not main_window.verify_progress_bar.isVisible()
-
-
-def test_set_phase_updates_badge_text(main_window):
-    """_set_phase should mutate the phase badge label text."""
-    main_window._set_phase("wiping")
-    assert "Wiping" in main_window.phase_label.text()
-    main_window._set_phase("verifying")
-    assert "Verifying" in main_window.phase_label.text()
-    main_window._set_phase("done")
-    assert "Complete" in main_window.phase_label.text()
-
-
-def test_time_estimate_doubles_with_full_verify(main_window, demo_device):
-    """Ticking the full-verify box should lengthen the ETA string."""
-    from PySide6.QtWidgets import QCheckBox
-
-    # Inject a device and a matching checked checkbox so _selected_devices()
-    # returns it.
-    main_window.devices = [demo_device]
-    main_window._device_checkboxes = []
-    cb = QCheckBox()
-    cb.setChecked(True)
-    main_window._device_checkboxes.append(cb)
-
-    main_window.full_verify_cb.setChecked(False)
-    main_window._update_time_estimate()
-    text_sample = main_window.estimate_label.text()
-
-    main_window.full_verify_cb.setChecked(True)
-    main_window._update_time_estimate()
-    text_full = main_window.estimate_label.text()
-
-    assert "full verify" in text_full
-    assert "full verify" not in text_sample
 
 
 # -- Worker-level tests -------------------------------------------------------
@@ -180,8 +87,8 @@ def test_worker_accepts_verify_mode_kwarg(app_config):
     assert worker_sample.verify_mode == "sample"
 
 
-def test_worker_falls_back_to_sample_on_bad_verify_mode(app_config):
-    """An invalid verify_mode string must fall back to 'sample'."""
+def test_worker_falls_back_to_full_on_bad_verify_mode(app_config):
+    """An invalid verify_mode string must fall back to 'full' (the default)."""
     from gui.wipe_worker import WipeWorker
     from wipe.methods import ZeroFill
 
@@ -191,113 +98,8 @@ def test_worker_falls_back_to_sample_on_bad_verify_mode(app_config):
         config=app_config,
         verify_mode="bogus",
     )
-    assert worker.verify_mode == "sample"
+    assert worker.verify_mode == "full"
 
-
-def test_checkbox_changes_verify_mode(qtbot, main_window, demo_device, monkeypatch):
-    """When the checkbox is checked, _start_wipe must build a worker with
-    verify_mode="full". Unchecked should yield "sample"."""
-    from gui import main_window as mw_module
-
-    captured: dict = {}
-
-    class FakeWorker:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            # Fake signals that accept .connect without doing anything.
-            for name in (
-                "progress_updated",
-                "verify_progress",
-                "phase_changed",
-                "device_completed",
-                "all_completed",
-                "error",
-                "status_message",
-                "stall_detected",
-            ):
-                setattr(self, name, MagicMock())
-
-        def start(self):
-            pass
-
-        def isRunning(self):  # noqa: N802 — Qt API name
-            return False
-
-        def cancel(self):
-            pass
-
-        def wait(self, timeout=0):
-            return True
-
-    monkeypatch.setattr(mw_module, "WipeWorker", FakeWorker)
-
-    # Case 1: unchecked -> sample
-    main_window.full_verify_cb.setChecked(False)
-    main_window._start_wipe([demo_device])
-    assert captured["verify_mode"] == "sample"
-
-    captured.clear()
-
-    # Case 2: checked -> full
-    main_window.full_verify_cb.setChecked(True)
-    main_window._start_wipe([demo_device])
-    assert captured["verify_mode"] == "full"
-
-
-def test_reformat_checkbox_propagates_to_worker(qtbot, main_window, demo_device, monkeypatch):
-    """Ticking the Reformat checkbox + choosing a filesystem + label must make
-    _start_wipe construct the worker with the matching reformat kwargs. A
-    regression test for the silent bug where the reformat UI existed but its
-    value was never read into the WipeWorker.
-    """
-    from gui import main_window as mw_module
-
-    captured: dict = {}
-
-    class FakeWorker:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-            for name in (
-                "progress_updated", "verify_progress", "phase_changed",
-                "device_completed", "all_completed", "error",
-                "status_message", "stall_detected",
-            ):
-                setattr(self, name, MagicMock())
-
-        def start(self): pass
-        def isRunning(self): return False  # noqa: N802
-        def cancel(self): pass
-        def wait(self, timeout=0): return True
-
-    monkeypatch.setattr(mw_module, "WipeWorker", FakeWorker)
-
-    # Case 1: checkbox unchecked -> reformat should be "none"
-    main_window.reformat_cb.setChecked(False)
-    main_window._start_wipe([demo_device])
-    assert captured["reformat"] == "none"
-    captured.clear()
-
-    # Case 2: checkbox checked + exFAT + custom label
-    main_window.reformat_cb.setChecked(True)
-    # Find and select the exFAT item (userData "exfat")
-    for i in range(main_window.reformat_fs_combo.count()):
-        if main_window.reformat_fs_combo.itemData(i) == "exfat":
-            main_window.reformat_fs_combo.setCurrentIndex(i)
-            break
-    main_window.reformat_label_edit.setText("MYSTICK")
-    main_window._start_wipe([demo_device])
-    assert captured["reformat"] == "exfat"
-    assert captured["reformat_label"] == "MYSTICK"
-
-    captured.clear()
-
-    # Case 3: checked + NTFS selection
-    for i in range(main_window.reformat_fs_combo.count()):
-        if main_window.reformat_fs_combo.itemData(i) == "ntfs":
-            main_window.reformat_fs_combo.setCurrentIndex(i)
-            break
-    main_window._start_wipe([demo_device])
-    assert captured["reformat"] == "ntfs"
 
 
 def test_stall_watchdog_fires_when_no_progress(qtbot, app_config, demo_device):
@@ -594,99 +396,7 @@ def test_worker_emits_reformatting_phase_when_requested(
         assert wiping_idx < reformatting_idx < done_idx
 
 
-# -- v1.1: progress regression tests -----------------------------------------
-
-
-def test_progress_bar_updates_when_on_progress_fires(qtbot, main_window):
-    """Regression: a direct call to _on_progress with valid byte counts must
-    move the device progress bar off zero and replace 'Calculating...' with
-    a real ETA. Catches a v1.1 regression where progress stayed stuck at 0%."""
-    # Half-way through a single-pass wipe of a 100 MB chunk.
-    main_window._on_progress(0, 1, 1, 50_000_000, 100_000_000, 100.0)
-    assert main_window.device_progress.value() == 50
-    assert "calculating" not in main_window.eta_label.text().lower()
-
-
-def test_progress_bar_handles_signal_int_overflow(qtbot, main_window):
-    """PySide6 Signal(int, ...) marshals through C int (signed 32-bit), so
-    drives larger than 2 GiB arrive here as negative two's-complement values.
-    _on_progress must re-interpret negatives as their unsigned 32-bit form
-    so the percentage math stays correct on real USB sticks."""
-    total_bytes_real = 3 * 1024 * 1024 * 1024  # 3 GiB
-    bytes_written_real = total_bytes_real // 2
-
-    # Replicate PySide6's int-overflow wrap so the test reflects what the
-    # slot actually receives when the signal carries a >2 GiB value.
-    def wrap_int32(v: int) -> int:
-        v &= 0xFFFFFFFF
-        return v - (1 << 32) if v & 0x80000000 else v
-
-    main_window._on_progress(
-        0, 1, 1,
-        wrap_int32(bytes_written_real),
-        wrap_int32(total_bytes_real),
-        100.0,
-    )
-    assert main_window.device_progress.value() == 50
-    assert "calculating" not in main_window.eta_label.text().lower()
-
-
-# -- v1.1: reformat UI tests --------------------------------------------------
-
-
-def test_reformat_checkbox_default_unchecked(main_window):
-    """The Reformat checkbox must exist and start off."""
-    assert hasattr(main_window, "reformat_cb")
-    assert main_window.reformat_cb.isChecked() is False
-
-
-def test_reformat_controls_disabled_by_default(main_window):
-    """Filesystem combo and label edit must be disabled when checkbox is off."""
-    assert main_window.reformat_fs_combo.isEnabled() is False
-    assert main_window.reformat_label_edit.isEnabled() is False
-
-
-def test_reformat_controls_enable_when_checkbox_toggled(qtbot, main_window):
-    """Toggling the reformat checkbox must enable/disable the dependent
-    filesystem combo and label edit together."""
-    main_window.reformat_cb.setChecked(True)
-    assert main_window.reformat_fs_combo.isEnabled() is True
-    assert main_window.reformat_label_edit.isEnabled() is True
-
-    main_window.reformat_cb.setChecked(False)
-    assert main_window.reformat_fs_combo.isEnabled() is False
-    assert main_window.reformat_label_edit.isEnabled() is False
-
-
-def test_reformat_filesystem_options_and_default(main_window):
-    """The filesystem dropdown must offer exFAT, FAT32, NTFS with userData
-    keys 'exfat'/'fat32'/'ntfs', defaulting to exFAT."""
-    combo = main_window.reformat_fs_combo
-    assert combo.count() == 3
-    keys = [combo.itemData(i) for i in range(combo.count())]
-    assert keys == ["exfat", "fat32", "ntfs"]
-    # Default selection is exFAT.
-    assert combo.currentData() == "exfat"
-
-
-def test_reformat_label_default_and_max_length(main_window):
-    """Volume label defaults to 'USB' and is capped at 32 characters."""
-    edit = main_window.reformat_label_edit
-    assert edit.text() == "USB"
-    assert edit.placeholderText() == "Volume label"
-    assert edit.maxLength() == 32
-
-
-def test_reformat_checkbox_has_bilingual_label_and_tooltip(main_window):
-    """Reformat checkbox label and tooltip must cover both DE and EN."""
-    cb = main_window.reformat_cb
-    text = cb.text()
-    assert "Nach L\u00f6schung formatieren" in text
-    assert "Reformat after wipe" in text
-
-    tooltip = cb.toolTip()
-    assert "fresh partition" in tooltip
-    assert "Windows Explorer" in tooltip
+# -- 1.1.1: target re-checks ----------------------------------------------------
 
 
 def test_worker_refuses_real_device_when_target_unsafe(qtbot, app_config):
@@ -720,50 +430,316 @@ def test_worker_refuses_real_device_when_target_unsafe(qtbot, app_config):
     opener.assert_not_called()
 
 
-def test_worker_holds_volume_locks_for_the_whole_wipe(qtbot, app_config):
-    """1.1.2: the volume locks from prepare_target stay held while the wipe
-    and verification run, and are released exactly once afterwards."""
+def test_worker_rechecks_target_before_reformat(qtbot, app_config):
+    """Reformat rewrites the partition table of a real disk, so the worker runs
+    prepare_target again right before it. A refusal skips the reformat; the
+    wipe itself stays successful and its certificate is still issued."""
+    from types import SimpleNamespace
     from gui.wipe_worker import WipeWorker
-    from wipe.device import DeviceInfo
+    from wipe.device import DeviceInfo, UnsafeTargetError
     from wipe.methods import WipeResult
 
     device = DeviceInfo(
-        drive_letter="E:", device_id="\\.\PhysicalDrive7", model="Stick",
+        drive_letter="E:", device_id=r"\\.\PhysicalDrive7", model="Stick",
         serial_number="SN7", capacity_bytes=1024**2, filesystem="FAT32",
         connection_type="USB", is_removable=True, is_system_drive=False,
         disk_letters=["E:"],
     )
-    released: list[int] = []
-    held_during_execute: list[bool] = []
-
+    now = datetime.now()
     method = MagicMock()
     method.name = "ZeroFill"
     method.passes = 1
-    method.sicherheitsstufe = "1-2"
+    method.sicherheitsstufe = "H-2"
+    method.execute.return_value = WipeResult(
+        method_name="ZeroFill", passes=1, start_time=now, end_time=now,
+        bytes_written=1024**2, success=True, error_message=None,
+    )
+    no_hidden = SimpleNamespace(supported=False, hpa_present=False, dco_present=False,
+                                hpa_hidden_sectors=0, dco_hidden_sectors=0)
+    gate = MagicMock(side_effect=[[], UnsafeTargetError("swapped")])
+    reformat = MagicMock()
+    with patch("gui.wipe_worker.prepare_target", gate), \
+         patch("gui.wipe_worker.open_physical_drive", return_value=1), \
+         patch("gui.wipe_worker.get_drive_size", return_value=1024**2), \
+         patch("gui.wipe_worker.detect_hidden_areas", return_value=no_hidden), \
+         patch("gui.wipe_worker.close_drive"), \
+         patch("gui.wipe_worker.get_next_cert_number", return_value=1), \
+         patch("gui.wipe_worker.generate_certificate", return_value="x.pdf") as cert, \
+         patch("gui.wipe_worker.log_wipe_to_csv"), \
+         patch("gui.wipe_worker.audit_log"), \
+         patch("wipe.format.reformat_drive", reformat):
+        worker = WipeWorker(devices=[device], wipe_method=method, config=app_config,
+                            verify_mode="none", reformat="exfat")
+        results: list[tuple[int, bool]] = []
+        worker.device_completed.connect(lambda i, ok, _p: results.append((i, ok)))
+        with qtbot.waitSignal(worker.all_completed, timeout=5000):
+            worker.start()
+
+    assert gate.call_count == 2
+    reformat.assert_not_called()
+    cert.assert_called_once()
+    assert results == [(0, True)]
+
+
+def _gui_lock_test_device():
+    from wipe.device import DeviceInfo
+    return DeviceInfo(
+        drive_letter="E:", device_id=r"\\.\PhysicalDrive7", model="Stick",
+        serial_number="SN7", capacity_bytes=1024**2, filesystem="FAT32",
+        connection_type="USB", is_removable=True, is_system_drive=False,
+        disk_letters=["E:"],
+    )
+
+
+def _gui_lock_test_method(execute):
+    method = MagicMock()
+    method.name = "ZeroFill"
+    method.passes = 1
+    method.sicherheitsstufe = "H-2"
+    method.execute.side_effect = execute
+    return method
+
+
+def _ok_wipe_result():
+    from wipe.methods import WipeResult
+    now = datetime.now()
+    return WipeResult(
+        method_name="ZeroFill", passes=1, start_time=now, end_time=now,
+        bytes_written=1024**2, success=True, error_message=None,
+    )
+
+
+def test_worker_holds_volume_locks_for_the_whole_wipe(qtbot, app_config):
+    """1.1.2: the volume locks from prepare_target stay held while the wipe
+    and verification run, and are released exactly once afterwards."""
+    from types import SimpleNamespace
+    from gui.wipe_worker import WipeWorker
+
+    released: list[int] = []
+    held_during_execute: list[bool] = []
 
     def fake_execute(*_a, **_k):
         held_during_execute.append(released == [])
-        return WipeResult(
-            method_name="ZeroFill", passes=1, start_time=datetime.now(),
-            end_time=datetime.now(), bytes_written=1024**2, success=True,
-            error_message=None,
-        )
+        return _ok_wipe_result()
 
-    method.execute.side_effect = fake_execute
-    with patch("gui.wipe_worker.prepare_target", return_value=[7, 8]), \
-         patch("gui.wipe_worker.release_volumes", side_effect=released.extend), \
-         patch("gui.wipe_worker.open_physical_drive", return_value=1), \
-         patch("gui.wipe_worker.get_drive_size", return_value=1024**2), \
-         patch("gui.wipe_worker.close_drive"), \
-         patch("gui.wipe_worker.unlock_volume"), \
-         patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"), \
-         patch("gui.wipe_worker.log_wipe_to_csv"), \
-         patch("gui.wipe_worker.get_next_cert_number", return_value=1), \
-         patch("gui.wipe_worker.audit_log"):
-        worker = WipeWorker(devices=[device], wipe_method=method,
+    no_hidden = SimpleNamespace(supported=False, hpa_present=False, dco_present=False,
+                                hpa_hidden_sectors=0, dco_hidden_sectors=0)
+    with patch("gui.wipe_worker.prepare_target", return_value=[7, 8]),          patch("gui.wipe_worker.release_volumes", side_effect=released.extend),          patch("gui.wipe_worker.open_physical_drive", return_value=1),          patch("gui.wipe_worker.get_drive_size", return_value=1024**2),          patch("gui.wipe_worker.detect_hidden_areas", return_value=no_hidden),          patch("gui.wipe_worker.close_drive"),                    patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"),          patch("gui.wipe_worker.log_wipe_to_csv"),          patch("gui.wipe_worker.get_next_cert_number", return_value=1),          patch("gui.wipe_worker.audit_log"):
+        worker = WipeWorker(devices=[_gui_lock_test_device()],
+                            wipe_method=_gui_lock_test_method(fake_execute),
                             config=app_config, verify_mode="none")
         with qtbot.waitSignal(worker.all_completed, timeout=5000):
             worker.start()
 
     assert held_during_execute == [True]
     assert released == [7, 8]
+
+
+def test_worker_releases_the_locks_when_closing_the_drive_fails(qtbot, app_config):
+    """Review: an exception from close_drive in the cleanup (e.g. its audit
+    log) must not skip release_volumes or end the worker without a result."""
+    from types import SimpleNamespace
+    from gui.wipe_worker import WipeWorker
+
+    released: list[int] = []
+    errors: list[tuple[int, str]] = []
+
+    def failing_execute(*_a, **_k):
+        raise RuntimeError("write failed (error 1167)")
+
+    no_hidden = SimpleNamespace(supported=False, hpa_present=False, dco_present=False,
+                                hpa_hidden_sectors=0, dco_hidden_sectors=0)
+    with patch("gui.wipe_worker.prepare_target", return_value=[7, 8]), \
+         patch("gui.wipe_worker.release_volumes", side_effect=released.extend), \
+         patch("gui.wipe_worker.open_physical_drive", return_value=1), \
+         patch("gui.wipe_worker.get_drive_size", return_value=1024**2), \
+         patch("gui.wipe_worker.detect_hidden_areas", return_value=no_hidden), \
+         patch("gui.wipe_worker.close_drive", side_effect=OSError("log file locked")), \
+         patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"), \
+         patch("gui.wipe_worker.log_wipe_to_csv"), \
+         patch("gui.wipe_worker.get_next_cert_number", return_value=1), \
+         patch("gui.wipe_worker.audit_log"):
+        worker = WipeWorker(devices=[_gui_lock_test_device()],
+                            wipe_method=_gui_lock_test_method(failing_execute),
+                            config=app_config, verify_mode="none")
+        worker.error.connect(lambda i, msg: errors.append((i, msg)))
+        with qtbot.waitSignal(worker.all_completed, timeout=5000):
+            worker.start()
+
+    assert released == [7, 8]
+    assert errors and "1167" in errors[0][1]
+
+
+def test_worker_releases_the_gate_locks_before_reformatting(qtbot, app_config):
+    """The safety re-check before reformat locks the volumes again; Clear-Disk
+    needs the disk free, so those locks are released before the reformat."""
+    from types import SimpleNamespace
+    from gui.wipe_worker import WipeWorker
+
+    released: list[int] = []
+    seen_at_reformat: list[list[int]] = []
+
+    def fake_reformat(**_kw):
+        seen_at_reformat.append(list(released))
+        return SimpleNamespace(success=True, filesystem="exfat", label="USB",
+                               error_message=None)
+
+    no_hidden = SimpleNamespace(supported=False, hpa_present=False, dco_present=False,
+                                hpa_hidden_sectors=0, dco_hidden_sectors=0)
+    gate = MagicMock(side_effect=[[7], [9]])
+    with patch("gui.wipe_worker.prepare_target", gate),          patch("gui.wipe_worker.release_volumes", side_effect=released.extend),          patch("gui.wipe_worker.open_physical_drive", return_value=1),          patch("gui.wipe_worker.get_drive_size", return_value=1024**2),          patch("gui.wipe_worker.detect_hidden_areas", return_value=no_hidden),          patch("gui.wipe_worker.close_drive"),                    patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"),          patch("gui.wipe_worker.log_wipe_to_csv"),          patch("gui.wipe_worker.get_next_cert_number", return_value=1),          patch("gui.wipe_worker.audit_log"),          patch("wipe.format.reformat_drive", side_effect=fake_reformat):
+        worker = WipeWorker(devices=[_gui_lock_test_device()],
+                            wipe_method=_gui_lock_test_method(lambda *a, **k: _ok_wipe_result()),
+                            config=app_config, verify_mode="none", reformat="exfat")
+        results: list[tuple[int, bool]] = []
+        worker.device_completed.connect(lambda i, ok, _p: results.append((i, ok)))
+        with qtbot.waitSignal(worker.all_completed, timeout=5000):
+            worker.start()
+
+    assert gate.call_count == 2
+    assert seen_at_reformat == [[7, 9]]
+    assert released == [7, 9]
+    assert results == [(0, True)]
+
+
+# -- Partition table removed right before the first write ---------------------
+
+
+def _run_real_device_worker(qtbot, app_config, events, *, clear_ok=True, cancel=False):
+    """Run the worker on a fake real disk; every step is recorded in ``events``."""
+    from types import SimpleNamespace
+    from gui.wipe_worker import WipeWorker
+
+    def gate(device):
+        events.append("gate")
+        return [7, 8]
+
+    def opener(device_id):
+        events.append("open")
+        return 1
+
+    def clear(handle):
+        events.append(("clear", handle))
+        return clear_ok
+
+    def fake_execute(handle, *_a, **_k):
+        events.append(("write", handle))
+        return _ok_wipe_result()
+
+    no_hidden = SimpleNamespace(supported=False, hpa_present=False, dco_present=False,
+                                hpa_hidden_sectors=0, dco_hidden_sectors=0)
+    worker_box: list = []
+
+    def probe(handle):
+        if cancel:  # the user cancels while the disk is being looked at
+            worker_box[0].cancel()
+        return no_hidden
+
+    results: list[tuple[int, bool]] = []
+    with patch("gui.wipe_worker.prepare_target", side_effect=gate), \
+         patch("gui.wipe_worker.release_volumes",
+               side_effect=lambda locks: events.append(("release", list(locks)))), \
+         patch("gui.wipe_worker.open_physical_drive", side_effect=opener), \
+         patch("gui.wipe_worker.clear_partition_table", side_effect=clear), \
+         patch("gui.wipe_worker.get_drive_size", return_value=1024**2), \
+         patch("gui.wipe_worker.detect_hidden_areas", side_effect=probe), \
+         patch("gui.wipe_worker.close_drive"), \
+         patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"), \
+         patch("gui.wipe_worker.log_wipe_to_csv"), \
+         patch("gui.wipe_worker.get_next_cert_number", return_value=1), \
+         patch("gui.wipe_worker.audit_log"):
+        worker = WipeWorker(devices=[_gui_lock_test_device()],
+                            wipe_method=_gui_lock_test_method(fake_execute),
+                            config=app_config, verify_mode="none")
+        worker_box.append(worker)
+        worker.device_completed.connect(lambda i, ok, _p: results.append((i, ok)))
+        with qtbot.waitSignal(worker.all_completed, timeout=5000):
+            worker.start()
+        worker.wait(2000)
+    # The cleanup also hands over the (by then empty) rest of the locks.
+    events[:] = [e for e in events if e != ("release", [])]
+    return results
+
+
+def test_worker_removes_the_partition_table_after_the_gate_and_before_writing(
+        qtbot, app_config):
+    """A Rufus disk's read-only UEFI_NTFS partition blocks raw writes even
+    with every volume locked; the layout goes first, while the locks hold."""
+    events: list = []
+    results = _run_real_device_worker(qtbot, app_config, events)
+
+    assert events == ["gate", "open", ("clear", 1), ("write", 1), ("release", [7, 8])]
+    assert results == [(0, True)]
+
+
+def test_worker_wipes_on_when_the_partition_table_cannot_be_removed(qtbot, app_config):
+    events: list = []
+    results = _run_real_device_worker(qtbot, app_config, events, clear_ok=False)
+
+    assert events == ["gate", "open", ("clear", 1), ("write", 1), ("release", [7, 8])]
+    assert results == [(0, True)]
+
+
+def test_worker_cancelled_before_writing_keeps_the_partition_table(qtbot, app_config):
+    events: list = []
+    results = _run_real_device_worker(qtbot, app_config, events, cancel=True)
+
+    assert not any(isinstance(e, tuple) and e[0] in ("clear", "write") for e in events)
+    assert results == [(0, False)]
+
+
+def test_demo_wipe_never_removes_a_partition_table(qtbot, app_config, demo_device):
+    from gui.wipe_worker import WipeWorker
+    from wipe.methods import ZeroFill
+
+    clear = MagicMock(return_value=True)
+    with patch("gui.wipe_worker.clear_partition_table", clear), \
+         patch("gui.wipe_worker.create_demo_file", return_value="fake.bin"), \
+         patch("gui.wipe_worker.wipe_demo_file", return_value=_ok_wipe_result()), \
+         patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"), \
+         patch("gui.wipe_worker.log_wipe_to_csv"), \
+         patch("gui.wipe_worker.get_next_cert_number", return_value=1), \
+         patch("os.remove"):
+        worker = WipeWorker(devices=[demo_device], wipe_method=ZeroFill(),
+                            config=app_config, verify_mode="none")
+        with qtbot.waitSignal(worker.all_completed, timeout=5000):
+            worker.start()
+        worker.wait(2000)
+
+    clear.assert_not_called()
+
+
+@pytest.mark.parametrize("letter, disk_letters, named", [
+    ("", [], "\\\\.\\PhysicalDrive7"),
+    ("E:", ["E:"], "E:"),
+])
+def test_lock_skipped_log_names_the_disk_without_a_letter(qtbot, app_config,
+                                                          letter, disk_letters, named):
+    """18.11.2026: "Physical-drive lock skipped for  (...)" had an empty name
+    for a disk without a letter; it names the letter or the device id."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from gui.wipe_worker import WipeWorker
+
+    device = replace(_gui_lock_test_device(), drive_letter=letter, disk_letters=disk_letters)
+    no_hidden = SimpleNamespace(supported=False, hpa_present=False, dco_present=False,
+                                hpa_hidden_sectors=0, dco_hidden_sectors=0)
+    log = MagicMock()
+    with patch("gui.wipe_worker.prepare_target", return_value=[]), \
+         patch("gui.wipe_worker.release_volumes"), \
+         patch("gui.wipe_worker.open_physical_drive", return_value=1), \
+         patch("gui.wipe_worker.get_drive_size", return_value=1024**2), \
+         patch("gui.wipe_worker.detect_hidden_areas", return_value=no_hidden), \
+         patch("gui.wipe_worker.close_drive"), \
+         patch("gui.wipe_worker.generate_certificate", return_value="c.pdf"), \
+         patch("gui.wipe_worker.log_wipe_to_csv"), \
+         patch("gui.wipe_worker.get_next_cert_number", return_value=1), \
+         patch("gui.wipe_worker.audit_log", log):
+        worker = WipeWorker(devices=[device],
+                            wipe_method=_gui_lock_test_method(lambda *a, **k: _ok_wipe_result()),
+                            config=app_config, verify_mode="none")
+        with qtbot.waitSignal(worker.all_completed, timeout=5000):
+            worker.start()
+
+    lines = [c.args[0] for c in log.call_args_list if "lock skipped" in c.args[0]]
+    assert lines == [f"Physical-drive lock skipped for {named} (dismount already exclusive)"]

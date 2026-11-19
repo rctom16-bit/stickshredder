@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import escape as _xml_escape
 
+from typing import TYPE_CHECKING
+
+from reportlab.graphics.barcode.qr import QrCodeWidget
+from reportlab.graphics.shapes import Drawing
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
@@ -15,6 +20,7 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm, mm
 from reportlab.platypus import (
     Image,
+    KeepTogether,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -22,8 +28,21 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+from cert.payload import RESULT_LABELS, build_payload, nist_category, result_status
 from core.config import APP_VERSION
 from core.log import audit_log
+from core.protection_class import class3_note
+from core.serial import serial_text
+
+if TYPE_CHECKING:  # pragma: no cover - import only for type checkers
+    from cert.signing import SigningKey
+
+# PDF Keywords marker the verify page and ``cert.verify_cert`` look for.
+TOKEN_MARKER = "stickshredder-token:"
+
+# Signed certificates carry their data as a machine-readable PDF attachment.
+ATTACHMENT_NAME = "stickshredder-certificate.json"
+ATTACHMENT_FORMAT = "stickshredder-certificate"
 
 # ---------------------------------------------------------------------------
 # Colours
@@ -33,6 +52,7 @@ LIGHT_BLUE_BG = colors.HexColor("#e2e8f0")
 TABLE_BORDER = colors.HexColor("#cbd5e0")
 PASS_GREEN = colors.HexColor("#276749")
 FAIL_RED = colors.HexColor("#c53030")
+LIMITED_AMBER = colors.HexColor("#975a16")
 TEXT_GRAY = colors.HexColor("#4a5568")
 
 PAGE_WIDTH, PAGE_HEIGHT = A4
@@ -104,6 +124,37 @@ class CertificateData:
     reformat_performed: bool = False
     reformat_filesystem: str = ""  # "FAT32" | "exFAT" | "NTFS" or ""
     reformat_label: str = ""
+
+    # Bad sectors (new for v1.2) — optional, section only rendered when count > 0.
+    # count = number of unwritable regions (blocks); bytes = their total size;
+    # offsets = first 100 byte offsets.
+    bad_sector_count: int = 0
+    bad_sector_bytes: int = 0
+    bad_sector_offsets: list[int] = field(default_factory=list)
+
+    # Hidden areas — HPA/DCO (new for v1.2). Section rendered when probed and a
+    # hidden area was found. Bytes = hidden sectors * 512.
+    hidden_area_probed: bool = False
+    hpa_present: bool = False
+    hpa_hidden_bytes: int = 0
+    dco_present: bool = False
+    dco_hidden_bytes: int = 0
+
+    # Secure erase (new for v1.2) — set when the wipe was performed via the
+    # experimental ATA Secure Erase path instead of an overwrite.
+    secure_erase_used: bool = False
+    secure_erase_method: str = ""  # "ata-secure-erase" | "ata-enhanced"
+
+    # Three-level result (v2.0). ``wipe_success`` is False when the overwrite
+    # or erase itself failed; ``hidden_area_removed`` is True once a found
+    # HPA/DCO has been removed and wiped as well.
+    wipe_success: bool = True
+    hidden_area_removed: bool = False
+
+    # Media type of the wiped disk ("ssd" | "flash" | "hdd" | "unknown", or
+    # "" when not known). With protection class 3 an SSD or flash medium gets
+    # the note that only physical destruction is enough. Not signed.
+    media_type: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +309,30 @@ def _build_styles() -> dict[str, ParagraphStyle]:
             leading=12,
             textColor=TEXT_GRAY,
         ),
+        "result_limited": ParagraphStyle(
+            "ResultLimited",
+            parent=base["Normal"],
+            fontName="Helvetica-Bold",
+            fontSize=10,
+            leading=12,
+            textColor=LIMITED_AMBER,
+        ),
+        "auth_text": ParagraphStyle(
+            "AuthText",
+            parent=base["Normal"],
+            fontName="Helvetica",
+            fontSize=7.5,
+            leading=9.5,
+            textColor=TEXT_GRAY,
+        ),
+        "auth_fingerprint": ParagraphStyle(
+            "AuthFingerprint",
+            parent=base["Normal"],
+            fontName="Courier-Bold",
+            fontSize=9,
+            leading=11,
+            textColor=colors.black,
+        ),
         "footer": ParagraphStyle(
             "Footer",
             parent=base["Normal"],
@@ -298,8 +373,8 @@ _COMMON_TABLE_STYLE = [
     ("FONTSIZE", (0, 0), (-1, -1), 8.5),
     ("VALIGN", (0, 0), (-1, -1), "TOP"),
     ("GRID", (0, 0), (-1, -1), 0.4, TABLE_BORDER),
-    ("TOPPADDING", (0, 0), (-1, -1), 3),
-    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ("TOPPADDING", (0, 0), (-1, -1), 2),
+    ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
     ("LEFTPADDING", (0, 0), (-1, -1), 5),
     ("RIGHTPADDING", (0, 0), (-1, -1), 5),
 ]
@@ -315,8 +390,8 @@ def _section_header(text: str, styles: dict[str, ParagraphStyle]) -> Table:
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, -1), LIGHT_BLUE_BG),
-                ("TOPPADDING", (0, 0), (-1, -1), 3),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+                ("TOPPADDING", (0, 0), (-1, -1), 2.5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2.5),
                 ("LEFTPADDING", (0, 0), (-1, -1), 6),
             ]
         )
@@ -494,9 +569,305 @@ def _build_verification_elements(
 
 
 # ---------------------------------------------------------------------------
+# Bad-sector section builder (v1.2)
+# ---------------------------------------------------------------------------
+def _build_bad_sector_elements(
+    data: CertificateData,
+    styles: dict[str, ParagraphStyle],
+    lang: str,
+) -> list:
+    """Build the flowables for the Bad Sectors section.
+
+    Only call this when ``data.bad_sector_count > 0``. Renders the number of
+    unwritable regions, the affected data volume, an approximate sector count,
+    the first 10 byte offsets, and a prominent warning that those sectors may
+    still hold old data.
+    """
+    elements: list = []
+    elements.append(
+        _section_header(_label("Defekte Sektoren", "Bad Sectors", lang), styles)
+    )
+
+    approx_sectors = data.bad_sector_bytes // 512
+    rows: list[tuple[str, str]] = [
+        (
+            _label("Nicht beschreibbare Bereiche", "Unwritable Regions", lang),
+            f"{data.bad_sector_count:,}".replace(",", "."),
+        ),
+        (
+            _label("Betroffene Datenmenge", "Affected Data", lang),
+            format_capacity(data.bad_sector_bytes),
+        ),
+        (
+            _label("Betroffene Sektoren (ca.)", "Affected Sectors (approx.)", lang),
+            f"{approx_sectors:,}".replace(",", "."),
+        ),
+    ]
+    if data.bad_sector_offsets:
+        rows.append(
+            (
+                _label("Erste Offsets", "First Offsets", lang),
+                _format_offsets_hex(data.bad_sector_offsets, limit=10),
+            )
+        )
+    elements.append(_kv_table(rows, styles))
+
+    warning = _label(
+        "Achtung: Diese Sektoren konnten nicht überschrieben werden und können "
+        "Altdaten enthalten. Für hochsensible Daten wird physische Vernichtung "
+        "empfohlen.",
+        "Warning: these sectors could not be overwritten and may still contain "
+        "old data. Physical destruction is recommended for high-sensitivity data.",
+        lang,
+    )
+    elements.append(Paragraph(warning, styles["result_fail"]))
+    elements.append(Spacer(1, 4 * mm))
+    return elements
+
+
+# ---------------------------------------------------------------------------
+# Hidden-area section builder (v1.2)
+# ---------------------------------------------------------------------------
+def _build_hidden_area_elements(
+    data: CertificateData,
+    styles: dict[str, ParagraphStyle],
+    lang: str,
+) -> list:
+    """Build the Hidden Areas (HPA/DCO) section.
+
+    Only call when ``data.hidden_area_probed`` is True and at least one of
+    ``hpa_present`` / ``dco_present`` is set. These areas are hidden from the
+    operating system and are not reached by an overwrite wipe.
+    """
+    elements: list = []
+    elements.append(
+        _section_header(
+            _label("Versteckte Bereiche (HPA/DCO)", "Hidden Areas (HPA/DCO)", lang),
+            styles,
+        )
+    )
+    rows: list[tuple[str, str]] = []
+    if data.hpa_present:
+        rows.append(
+            (
+                "Host Protected Area (HPA)",
+                _label(
+                    f"vorhanden — {format_capacity(data.hpa_hidden_bytes)} versteckt",
+                    f"present — {format_capacity(data.hpa_hidden_bytes)} hidden",
+                    lang,
+                ),
+            )
+        )
+    if data.dco_present:
+        rows.append(
+            (
+                "Device Configuration Overlay (DCO)",
+                _label(
+                    f"vorhanden — {format_capacity(data.dco_hidden_bytes)} versteckt",
+                    f"present — {format_capacity(data.dco_hidden_bytes)} hidden",
+                    lang,
+                ),
+            )
+        )
+    elements.append(_kv_table(rows, styles))
+
+    warning = _label(
+        "Achtung: Diese versteckten Bereiche werden durch Überschreiben NICHT "
+        "erreicht und können Altdaten enthalten. Für hochsensible Daten wird "
+        "physische Vernichtung empfohlen.",
+        "Warning: these hidden areas are NOT reached by an overwrite wipe and "
+        "may still contain old data. Physical destruction is recommended for "
+        "high-sensitivity data.",
+        lang,
+    )
+    elements.append(Paragraph(warning, styles["result_fail"]))
+    elements.append(Spacer(1, 4 * mm))
+    return elements
+
+
+# ---------------------------------------------------------------------------
+# Overall result row and authenticity section (v2.0)
+# ---------------------------------------------------------------------------
+_RESULT_STYLE = {"ok": "result_pass", "limited": "result_limited", "failed": "result_fail"}
+
+_QR_SIZE = 3.4 * cm
+# Smallest printed QR module a phone camera reads reliably.
+QR_MIN_MODULE = 0.5 * mm
+
+
+def _build_result_row(
+    data: CertificateData,
+    styles: dict[str, ParagraphStyle],
+    lang: str,
+) -> Table:
+    """One-row table with the three-level overall result, coloured."""
+    status = result_status(data)
+    de, en = RESULT_LABELS[status]
+    tbl = Table(
+        [
+            [
+                Paragraph(_label("Gesamtergebnis", "Overall Result", lang), styles["cell_label"]),
+                Paragraph(_label(de, en, lang), styles[_RESULT_STYLE[status]]),
+            ]
+        ],
+        colWidths=[_TABLE_WIDTH * 0.42, _TABLE_WIDTH * 0.58],
+    )
+    tbl.setStyle(TableStyle(_COMMON_TABLE_STYLE))
+    return tbl
+
+
+def qr_module_count(widget: QrCodeWidget) -> int:
+    """Modules per side of ``widget``'s code, quiet zone included."""
+    widget.draw()   # builds widget.qr
+    return widget.qr.getModuleCount() + 2 * int(widget.barBorder)
+
+
+def _qr_drawing(value: str, size: float = _QR_SIZE) -> Drawing:
+    """QR code of ``value``, at least ``size`` wide and never finer than
+    QR_MIN_MODULE per module: the signed verify link (~700 characters) needs
+    ~97 modules, which at 3.4 cm printed 0.35 mm modules — too fine to scan."""
+    # Level L keeps the long verify link as coarse as possible.
+    widget = QrCodeWidget(value, barLevel="L")
+    size = max(size, qr_module_count(widget) * QR_MIN_MODULE)
+    x1, y1, x2, y2 = widget.getBounds()
+    drawing = Drawing(size, size, transform=[size / (x2 - x1), 0, 0, size / (y2 - y1), 0, 0])
+    drawing.add(widget)
+    return drawing
+
+
+def _build_authenticity_elements(
+    token: str,
+    fingerprint: str,
+    styles: dict[str, ParagraphStyle],
+    lang: str,
+) -> list:
+    """Section „Echtheit / Authenticity“: QR code of the verify link + fingerprint."""
+    from cert.signing import verify_url
+
+    text = _label(
+        "Echtheit prüfen: QR-Code scannen oder PDF in StickShredder öffnen. "
+        "Fingerabdruck mit der Schlüsselkarte Ihrer IT vergleichen.",
+        "Check authenticity: scan the QR code or open the PDF in StickShredder. "
+        "Compare the fingerprint with your IT department's key card.",
+        lang,
+    )
+    if lang == "both":
+        # One sentence per language reads better than "de / en" run together.
+        text = text.replace(" / Check authenticity", "<br/>Check authenticity")
+    right = [
+        Paragraph(
+            _label("Fingerabdruck des Schlüssels", "Key fingerprint", lang),
+            styles["cell_label"],
+        ),
+        Paragraph(fingerprint, styles["auth_fingerprint"]),
+        Spacer(1, 2 * mm),
+        Paragraph(text, styles["auth_text"]),
+    ]
+    qr = _qr_drawing(verify_url(token))
+    tbl = Table(
+        [[qr, right]],
+        colWidths=[qr.width + 4 * mm, _TABLE_WIDTH - qr.width - 4 * mm],
+    )
+    tbl.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("BOX", (0, 0), (-1, -1), 0.4, TABLE_BORDER),
+                ("LEFTPADDING", (0, 0), (0, 0), 2 * mm),
+                ("RIGHTPADDING", (0, 0), (0, 0), 2 * mm),
+                ("TOPPADDING", (0, 0), (-1, -1), 1.5 * mm),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5 * mm),
+                ("LEFTPADDING", (1, 0), (1, 0), 4 * mm),
+            ]
+        )
+    )
+    # Header and code stay on one page (the header alone ended page 1).
+    return [
+        KeepTogether([_section_header(_label("Echtheit", "Authenticity", lang), styles), tbl]),
+        Spacer(1, 2 * mm),
+    ]
+
+
+# ---------------------------------------------------------------------------
 # PDF generation
 # ---------------------------------------------------------------------------
-def generate_certificate(data: CertificateData, output_path: str) -> str:
+def _footer_lines(lang: str) -> list[str]:
+    """Footer text: program version and what the certificate is (not)."""
+    de = (f"Erstellt mit StickShredder v{APP_VERSION}, aufgebaut nach DIN 66399 / "
+          "ISO 21964. Software nicht von DEKRA, DIN oder einer anderen Stelle zertifiziert.")
+    en = (f"Created with StickShredder v{APP_VERSION}, structured according to DIN 66399 / "
+          "ISO 21964. Software not certified by DEKRA, DIN or any other body.")
+    return {"de": [de], "en": [en]}.get(lang, [de, en])
+
+
+# Footer baselines, from the bottom edge of the page: inside the 1.5 cm
+# margin, above what printers leave blank (~5 mm).
+_FOOTER_FIRST_BASELINE = 10 * mm
+_FOOTER_LEADING = 9
+
+
+def _draw_footer(canvas, lines: list[str]) -> None:
+    """Draw the footer lines centred in the bottom margin of the current page."""
+    canvas.saveState()
+    canvas.setFont("Helvetica", 7)
+    canvas.setFillColor(TEXT_GRAY)
+    width = canvas._pagesize[0]
+    for i, line in enumerate(lines):
+        canvas.drawCentredString(width / 2, _FOOTER_FIRST_BASELINE - i * _FOOTER_LEADING, line)
+    canvas.restoreState()
+
+
+def attachment_bytes(payload: dict, token: str) -> bytes:
+    """Content of the PDF attachment: the signed payload (incl. ``k``) and its token."""
+    return json.dumps(
+        {"format": ATTACHMENT_FORMAT, "version": 1, "payload": payload, "token": token},
+        indent=2, sort_keys=True, ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def _embed_file(canvas, name: str, content: bytes) -> None:
+    """Attach ``content`` to the PDF as an embedded file (PDF 1.7 §7.11.4).
+
+    reportlab has no high-level API for attachments; its PDF object layer
+    builds the EmbeddedFile stream, the file specification and the catalog's
+    ``/Names /EmbeddedFiles`` entry. Called from the first page's callback.
+    """
+    from reportlab.pdfbase.pdfdoc import (
+        PDFArray, PDFDictionary, PDFStream, PDFString, PDFZCompress,
+    )
+
+    document = canvas._doc
+    stream = PDFStream(
+        PDFDictionary({
+            "Type": "/EmbeddedFile",
+            "Subtype": "/application#2Fjson",  # MIME type "application/json"
+            "Params": PDFDictionary({"Size": len(content)}),
+        }),
+        content,
+        filters=[PDFZCompress],
+    )
+    filespec = PDFDictionary({
+        "Type": "/Filespec",
+        "F": PDFString(name),
+        "UF": PDFString(name),
+        "Desc": PDFString("StickShredder: signierte Zertifikatsdaten / signed certificate data"),
+        "AFRelationship": "/Data",
+        "EF": PDFDictionary({"F": document.Reference(stream)}),
+    })
+    names = PDFDictionary({
+        "EmbeddedFiles": PDFDictionary({
+            "Names": PDFArray([PDFString(name), document.Reference(filespec)]),
+        }),
+    })
+    document.Catalog.Names = names
+
+
+def generate_certificate(
+    data: CertificateData,
+    output_path: str,
+    signing_key: SigningKey | None = None,
+    history_hash: str = "",
+) -> str:
     """Generate a DIN 66399 / ISO 21964 deletion certificate PDF.
 
     Parameters
@@ -505,6 +876,12 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
         All certificate fields.
     output_path:
         Destination file path for the generated PDF.
+    signing_key:
+        When given, the certificate data is signed: the token is stored in the
+        PDF Keywords as ``stickshredder-token:<token>`` and an „Echtheit /
+        Authenticity“ section shows the verify QR code and the key fingerprint.
+    history_hash:
+        Hash of this wipe's history entry; becomes payload field ``h``.
 
     Returns
     -------
@@ -514,6 +891,12 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
     lang = data.language
     styles = _build_styles()
     elements: list = []
+
+    token = ""
+    payload: dict = {}
+    if signing_key is not None:
+        payload = build_payload(data, history_hash)
+        token = signing_key.sign_payload(payload)
 
     # Ensure output directory exists
     out = Path(output_path)
@@ -559,9 +942,13 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
         title_text = "Löschzertifikat / Deletion Certificate"
     elements.append(Paragraph(title_text, styles["title"]))
 
-    # Subtitle
+    # Subtitle: built after the standards, not certified against them.
     elements.append(
-        Paragraph("nach DIN 66399 / ISO 21964", styles["subtitle"])
+        Paragraph(
+            _label("aufgebaut nach", "structured according to", lang)
+            + " DIN 66399 / ISO 21964",
+            styles["subtitle"],
+        )
     )
 
     # ------------------------------------------------------------------
@@ -604,6 +991,7 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
         )
 
     elements.append(_kv_table(meta_rows, styles))
+    elements.append(_build_result_row(data, styles, lang))
     elements.append(Spacer(1, 2 * mm))
 
     # ------------------------------------------------------------------
@@ -623,7 +1011,7 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
         ),
         (
             _label("Seriennummer", "Serial Number", lang),
-            _safe(data.serial_number),
+            _safe(serial_text(data.serial_number, lang)),
         ),
         (
             _label("Kapazität", "Capacity", lang),
@@ -661,6 +1049,7 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
             _label("DIN 66399 Sicherheitsstufe", "DIN 66399 Security Level", lang),
             _safe(data.sicherheitsstufe),
         ),
+        ("NIST SP 800-88", nist_category(data)),
         (
             _label("Schutzklasse", "Protection Class", lang),
             schutzklasse_display,
@@ -683,12 +1072,58 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
         ),
     ]
     elements.append(_kv_table(wipe_rows, styles))
+
+    # Hardware erase (Beta) note: name the procedure and say what the
+    # verification below covers (spec G2).
+    if data.secure_erase_used:
+        if data.passes > 0:
+            se_note = _label(
+                "Hinweis: Hardware-Löschung (Beta) — das Laufwerk hat sich per "
+                "ATA Secure Erase (Firmware-Befehl) selbst gelöscht, danach wurde "
+                "es mit Nullen überschrieben. Die Prüfung unten bezieht sich auf "
+                "das Überschreiben.",
+                "Note: hardware erase (Beta) — the drive erased itself with ATA "
+                "Secure Erase (a firmware command), then it was overwritten with "
+                "zeros. The verification below covers the overwrite.",
+                lang,
+            )
+        else:
+            se_note = _label(
+                "Hinweis: Hardware-Löschung (Beta) per ATA Secure Erase "
+                "(Firmware-Befehl, EXPERIMENTELL — auf dieser Hardware nicht "
+                "verifiziert). Kein sektorweises Überschreiben.",
+                "Note: hardware erase (Beta) via ATA Secure Erase (a firmware "
+                "command, EXPERIMENTAL — not verified on this hardware). This is "
+                "not a sector-by-sector overwrite.",
+                lang,
+            )
+        elements.append(Paragraph(se_note, styles["result_skipped"]))
+
+    # Protection class 3 on an SSD or flash medium: overwriting can't reach
+    # the reserve areas, so the certificate says physical destruction is needed.
+    note = class3_note(data.media_type, data.schutzklasse, data.secure_erase_used)
+    if note is not None:
+        elements.append(Spacer(1, 1.5 * mm))
+        elements.append(Paragraph(_safe(_label(note[0], note[1], lang)),
+                                  styles["result_limited"]))
     elements.append(Spacer(1, 2 * mm))
 
     # ------------------------------------------------------------------
     # 5. Verification
     # ------------------------------------------------------------------
     elements.extend(_build_verification_elements(data, styles, lang))
+
+    # --------------------------------------------------------------------------
+    # 5c. Bad sectors (v1.2) — only when defects were recorded during the wipe.
+    # --------------------------------------------------------------------------
+    if data.bad_sector_count > 0:
+        elements.extend(_build_bad_sector_elements(data, styles, lang))
+
+    # --------------------------------------------------------------------------
+    # 5d. Hidden areas (HPA/DCO) (v1.2) — only when a hidden area was found.
+    # --------------------------------------------------------------------------
+    if data.hidden_area_probed and (data.hpa_present or data.dco_present):
+        elements.extend(_build_hidden_area_elements(data, styles, lang))
 
     # --------------------------------------------------------------------------
     # 5b. Reformat (v1.1)
@@ -717,6 +1152,14 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
         ]
         elements.append(_kv_table(reformat_rows, styles))
         elements.append(Spacer(1, 2 * mm))
+
+    # --------------------------------------------------------------------------
+    # 5e. Authenticity (v2.0) — only on signed certificates.
+    # --------------------------------------------------------------------------
+    if token:
+        elements.extend(
+            _build_authenticity_elements(token, signing_key.fingerprint(), styles, lang)
+        )
 
     # ------------------------------------------------------------------
     # 6. Signature area
@@ -776,42 +1219,23 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
             ]
         )
     )
-    elements.append(sig_tbl)
-    elements.append(Spacer(1, 4 * mm))
+    # A table splits by rows across pages: keep the signature lines together.
+    elements.append(KeepTogether([sig_tbl]))
 
     # ------------------------------------------------------------------
-    # 7. Footer
+    # 7. Footer — in the bottom margin of every page (_draw_footer). As the
+    #    last paragraphs it used to spill onto an otherwise empty page.
     # ------------------------------------------------------------------
-    elements.append(
-        Paragraph(
-            f"Erstellt mit StickShredder v{APP_VERSION}",
-            styles["footer"],
-        )
-    )
-    elements.append(Spacer(1, 1 * mm))
-
-    if lang == "de":
-        disclaimer = (
-            "Erstellt nach DIN 66399 / ISO 21964 Richtlinien. "
-            "Software nicht DEKRA-zertifiziert."
-        )
-    elif lang == "en":
-        disclaimer = (
-            "Generated according to DIN 66399 / ISO 21964 guidelines. "
-            "Software not DEKRA-certified."
-        )
-    else:
-        disclaimer = (
-            "Erstellt nach DIN 66399 / ISO 21964 Richtlinien. "
-            "Software nicht DEKRA-zertifiziert.<br/>"
-            "Generated according to DIN 66399 / ISO 21964 guidelines. "
-            "Software not DEKRA-certified."
-        )
-    elements.append(Paragraph(disclaimer, styles["footer"]))
+    footer = _footer_lines(lang)
 
     # ------------------------------------------------------------------
     # Build the PDF
     # ------------------------------------------------------------------
+    doc_kwargs = {}
+    if token:
+        # The token alphabet ([A-Za-z0-9_-.]) needs no escaping in a PDF
+        # string, so the raw file bytes contain it verbatim for the verifiers.
+        doc_kwargs["keywords"] = f"{TOKEN_MARKER}{token}"
     doc = SimpleDocTemplate(
         str(out),
         pagesize=A4,
@@ -822,14 +1246,28 @@ def generate_certificate(data: CertificateData, output_path: str) -> str:
         title=title_text,
         author=data.company_name or "StickShredder",
         subject="DIN 66399 / ISO 21964 Deletion Certificate",
+        **doc_kwargs,
     )
-    doc.build(elements)
+    attachment = attachment_bytes(payload, token) if token else None
+
+    def first_page(canvas, _doc):
+        if attachment is not None:
+            _embed_file(canvas, ATTACHMENT_NAME, attachment)
+        _draw_footer(canvas, footer)
+
+    doc.build(
+        elements,
+        onFirstPage=first_page,
+        onLaterPages=lambda canvas, _doc: _draw_footer(canvas, footer),
+    )
 
     abs_path = str(out.resolve())
+    signed = f" signed={signing_key.fingerprint()}" if token else " unsigned"
     audit_log(
         f"Certificate generated: #{data.cert_number:06d} "
         f"serial={data.serial_number} "
         f"result={'PASSED' if data.verification_passed else 'FAILED'} "
+        f"status={result_status(data)}{signed} "
         f"path={abs_path}"
     )
 

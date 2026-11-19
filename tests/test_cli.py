@@ -31,11 +31,11 @@ _REQUIRED_WIPE_ARGS = [
 ]
 
 
-def test_verify_flag_defaults_to_sample():
-    """When --verify is omitted, default is 'sample'."""
+def test_verify_flag_defaults_to_full():
+    """When --verify is omitted, default is 'full' (spec G6)."""
     parser = cli.build_parser()
     args = parser.parse_args(_REQUIRED_WIPE_ARGS)
-    assert args.verify == "sample"
+    assert args.verify == "full"
 
 
 def test_verify_flag_accepts_full():
@@ -110,6 +110,9 @@ def _fake_wipe_result():
         error_message=None,
         verify_result=verify,
         zero_blank_appended=False,
+        bad_sector_count=0,
+        bad_sector_bytes=0,
+        bad_sector_offsets=[],
     )
 
 
@@ -131,8 +134,6 @@ def test_cmd_wipe_passes_verify_mode_to_execute():
         patch.object(cli, "prepare_target"),
         patch.object(cli, "open_physical_drive", return_value=12345),
         patch.object(cli, "close_drive"),
-        patch.object(cli, "lock_volume"),
-        patch.object(cli, "unlock_volume"),
         patch.object(cli, "get_drive_size", return_value=1024 * 1024),
         patch.object(cli, "get_next_cert_number", return_value=1),
         patch.object(cli, "generate_certificate", return_value="C:/tmp/fake.pdf"),
@@ -161,6 +162,437 @@ def test_cmd_wipe_requires_admin_when_not_elevated():
     with patch.object(cli, "is_admin", return_value=False):
         with pytest.raises(SystemExit):
             cli.cmd_wipe(args)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# v1.2: HPA/DCO detection + experimental ATA Secure Erase
+# ─────────────────────────────────────────────────────────────────────
+
+_SECURE_ERASE_ARGS = [
+    "wipe", "--device", "E:", "--method", "secure-erase",
+    "--operator", "Test Operator",
+]
+
+
+def _no_hidden_areas():
+    return SimpleNamespace(
+        supported=False, hpa_present=False, dco_present=False,
+        hpa_hidden_sectors=0, dco_hidden_sectors=0,
+    )
+
+
+def test_secure_erase_requires_experimental_flag():
+    """--method secure-erase without --experimental must abort (SystemExit)."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_SECURE_ERASE_ARGS + ["--yes"])
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[_fake_device()]),
+        patch.object(cli, "audit_log"),
+    ):
+        with pytest.raises(SystemExit):
+            cli.cmd_wipe(args)
+
+
+import contextlib  # noqa: E402
+
+import wipe.hardware_erase as hardware_erase  # noqa: E402
+import wipe.secure_erase as secure_erase_mod  # noqa: E402
+from cert.payload import result_status  # noqa: E402
+
+
+def _fake_sata_ssd():
+    """A directly attached SATA SSD: the only disk the hardware erase is for."""
+    device = _fake_device()
+    device.connection_type = "SATA"
+    device.model = "Fake SATA SSD"
+    return device
+
+
+def _drive_status(method="ata-secure-erase", *, supported=True, frozen=False, error=None):
+    """What the drive answers to "is your own erase ready?" (no erase)."""
+    return secure_erase_mod.SecureEraseResult(
+        success=False, method=method, supported=supported, frozen=frozen,
+        duration_seconds=0.0, error=error, estimated_minutes=2,
+    )
+
+
+def _drive_erased(method="ata-secure-erase"):
+    return secure_erase_mod.SecureEraseResult(
+        success=True, method=method, supported=True, frozen=False,
+        duration_seconds=1.0, error=None,
+    )
+
+
+def _zero_pass_method(result=None):
+    """The 1x zeros after the hardware erase (fake: writes nothing)."""
+    method = MagicMock()
+    method.name = "ZeroFill"
+    method.passes = 1
+    method.sicherheitsstufe = "1-2"
+    method.execute.return_value = result if result is not None else _fake_wipe_result()
+    return method
+
+
+@contextlib.contextmanager
+def _hardware_wipe(*, status=None, erase=None, zero=None, locks=(), released=None,
+                   captured=None):
+    """cmd_wipe on a fake disk whose drive commands and writes are all fakes."""
+    erase_kwargs = (
+        {"side_effect": erase} if callable(erase) or isinstance(erase, BaseException)
+        else {"return_value": erase or _drive_erased()}
+    )
+
+    def capture_cert(cert_data, path, **_signing):
+        if captured is not None:
+            captured["cert"] = cert_data
+        return "C:/tmp/fake.pdf"
+
+    zero = zero or _zero_pass_method()
+    with contextlib.ExitStack() as stack:
+        mocks = SimpleNamespace(zero=zero)
+        enter = stack.enter_context
+        mocks.status = enter(patch.object(secure_erase_mod, "secure_erase_supported",
+                                          return_value=status or _drive_status()))
+        mocks.erase = enter(patch.object(secure_erase_mod, "secure_erase", **erase_kwargs))
+        mocks.resolver = enter(patch.object(cli, "_resolve_wipe_method", return_value=zero))
+        enter(patch.object(hardware_erase, "_set_execution_state"))
+        enter(patch.object(cli, "is_admin", return_value=True))
+        enter(patch.object(cli, "list_devices", return_value=[_fake_sata_ssd()]))
+        enter(patch.object(cli, "media_type_of", return_value="ssd"))
+        mocks.gate = enter(patch.object(cli, "prepare_target", return_value=list(locks)))
+        if released is not None:
+            enter(patch.object(cli, "release_volumes", side_effect=released.extend))
+        enter(patch.object(cli, "open_physical_drive", return_value=12345))
+        mocks.close = enter(patch.object(cli, "close_drive"))
+        enter(patch.object(cli, "get_drive_size", return_value=1024 * 1024))
+        enter(patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()))
+        enter(patch.object(cli, "get_next_cert_number", return_value=1))
+        mocks.cert = enter(patch.object(cli, "generate_certificate", side_effect=capture_cert))
+        mocks.history = enter(patch.object(cli, "log_wipe_to_csv"))
+        enter(patch.object(cli, "audit_log"))
+        enter(patch.object(hardware_erase, "audit_log"))
+        yield mocks
+
+
+def test_secure_erase_runs_and_marks_certificate():
+    """With --experimental the drive erases itself, then gets one pass of
+    zeros plus a full verification; the certificate names both."""
+    args = cli.build_parser().parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    captured = {}
+    with _hardware_wipe(captured=captured) as m:
+        cli.cmd_wipe(args)
+
+    m.gate.assert_called_once()
+    m.erase.assert_called_once()
+    assert m.erase.call_args.kwargs["enhanced"] is False
+    assert m.resolver.call_args.args[0].method == "zero"
+    m.zero.execute.assert_called_once()
+    assert m.zero.execute.call_args.kwargs["verify_mode"] == "full"
+    cert = captured["cert"]
+    assert cert.secure_erase_used is True
+    assert cert.secure_erase_method == "ata-secure-erase"
+    assert cert.wipe_method == "ATA Secure Erase + ZeroFill"
+    assert cert.passes == 1
+    assert cert.sicherheitsstufe == "1-2"
+    assert cert.verify_method == "full" and cert.verification_passed is True
+    assert result_status(cert) == "ok"
+
+
+def test_secure_erase_prefers_the_enhanced_erase_when_the_drive_offers_it():
+    args = cli.build_parser().parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    captured = {}
+    with _hardware_wipe(status=_drive_status("ata-enhanced"), erase=_drive_erased("ata-enhanced"),
+                        captured=captured) as m:
+        cli.cmd_wipe(args)
+    assert m.erase.call_args.kwargs["enhanced"] is True
+    assert captured["cert"].wipe_method == "ATA Secure Erase (enhanced) + ZeroFill"
+
+
+@pytest.mark.parametrize("status, words", [
+    (_drive_status("frozen", frozen=True), ["frozen", "Standby"]),
+    (_drive_status("unsupported", supported=False,
+                   error="NVMe disk on port driver 'iaStorVD'"), ["storahci", "iaStorVD"]),
+    (_drive_status("unsupported", supported=False), ["keine Hardware-Löschung"]),
+    (_drive_status("has_password"), ["bereits ein Passwort", "stickshredder unlock"]),
+])
+def test_secure_erase_refusal_stops_before_any_write(capsys, status, words):
+    args = cli.build_parser().parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    released: list[int] = []
+    with _hardware_wipe(status=status, locks=[7], released=released) as m:
+        with pytest.raises(SystemExit) as exc_info:
+            cli.cmd_wipe(args)
+
+    assert exc_info.value.code == 1
+    m.erase.assert_not_called()
+    m.zero.execute.assert_not_called()
+    m.cert.assert_not_called()
+    m.history.assert_not_called()
+    m.close.assert_called_once()
+    assert released == [7]
+    err = capsys.readouterr().err
+    assert "Nichts wurde geschrieben" in err and "--method zero" in err
+    for word in words:
+        assert word in err
+
+
+def test_secure_erase_failure_names_the_temporary_password(capsys):
+    args = cli.build_parser().parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    failed = secure_erase_mod.SecureEraseResult(
+        success=False, method="error", supported=True, frozen=False,
+        duration_seconds=3.0, error="SECURITY ERASE UNIT failed",
+    )
+    with _hardware_wipe(erase=failed) as m:
+        with pytest.raises(SystemExit) as exc_info:
+            cli.cmd_wipe(args)
+
+    assert exc_info.value.code == 1
+    m.zero.execute.assert_not_called()
+    m.cert.assert_not_called()
+    err = capsys.readouterr().err
+    assert "SECURITY ERASE UNIT failed" in err
+    assert hardware_erase.TEMP_PASSWORD in err
+
+
+def test_secure_erase_shows_the_temporary_password_before_erasing(capsys):
+    args = cli.build_parser().parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    seen = []
+
+    def erase(handle, **_kwargs):
+        seen.append(capsys.readouterr().out)
+        return _drive_erased()
+
+    with _hardware_wipe(erase=erase):
+        cli.cmd_wipe(args)
+    assert hardware_erase.TEMP_PASSWORD in seen[0]
+    assert "Hardware-Löschung (Beta)" in seen[0]
+
+
+@pytest.mark.parametrize("flag", [["--verify", "none"], ["--verify", "sample"], []])
+def test_secure_erase_always_verifies_every_sector(capsys, flag):
+    """The drive's own report never stands alone: the zero pass is always
+    fully verified, whatever --verify says."""
+    args = cli.build_parser().parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"] + flag)
+    captured = {}
+    with _hardware_wipe(captured=captured) as m:
+        cli.cmd_wipe(args)
+
+    assert m.zero.execute.call_args.kwargs["verify_mode"] == "full"
+    assert captured["cert"].verify_method == "full"
+    assert result_status(captured["cert"]) == "ok"
+    if flag and flag[1] != "full":
+        assert "jeden Sektor" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("connection, media", [
+    ("USB", "ssd"), ("NVMe", "ssd"), ("SATA", "hdd"), ("SATA", "flash"), ("SATA", "unknown"),
+])
+def test_secure_erase_is_only_for_directly_attached_sata_ssds(capsys, connection, media):
+    args = cli.build_parser().parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    device = _fake_sata_ssd()
+    device.connection_type = connection
+    opener = MagicMock(return_value=12345)
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[device]),
+        patch.object(cli, "media_type_of", return_value=media),
+        patch.object(cli, "prepare_target") as gate,
+        patch.object(cli, "open_physical_drive", opener),
+        patch.object(secure_erase_mod, "secure_erase_supported") as probe,
+        patch.object(cli, "audit_log"),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            cli.cmd_wipe(args)
+
+    assert exc_info.value.code == 1
+    gate.assert_not_called()
+    opener.assert_not_called()
+    probe.assert_not_called()
+    assert "SATA" in capsys.readouterr().err
+
+
+def test_ctrl_c_during_the_hardware_erase_stops_with_the_password(capsys):
+    args = cli.build_parser().parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    released: list[int] = []
+    with _hardware_wipe(erase=KeyboardInterrupt(), locks=[5], released=released) as m:
+        with pytest.raises(SystemExit) as exc_info:
+            cli.cmd_wipe(args)
+
+    assert exc_info.value.code == 1
+    m.zero.execute.assert_not_called()
+    m.cert.assert_not_called()
+    m.close.assert_called_once()
+    assert released == [5]
+    err = capsys.readouterr().err
+    assert hardware_erase.TEMP_PASSWORD in err
+    assert "abgebrochen" in err.lower() and "unlock" in err
+
+
+# ── stickshredder unlock („Gesperrte Platte entsperren“) ─────────────
+
+_UNLOCK_ARGS = ["unlock", "--device", "E:"]
+
+
+@contextlib.contextmanager
+def _unlock_run(*, result=None, locks=(), released=None, device=None, safe=(True, "")):
+    from wipe.secure_erase import UnlockResult
+
+    with contextlib.ExitStack() as stack:
+        enter = stack.enter_context
+        mocks = SimpleNamespace()
+        enter(patch.object(cli, "is_admin", return_value=True))
+        enter(patch.object(cli, "list_devices", return_value=[device or _fake_sata_ssd()]))
+        enter(patch.object(cli, "is_safe_to_wipe", return_value=safe))
+        mocks.gate = enter(patch.object(cli, "prepare_target", return_value=list(locks)))
+        if released is not None:
+            enter(patch.object(cli, "release_volumes", side_effect=released.extend))
+        mocks.open = enter(patch.object(cli, "open_physical_drive", return_value=4242))
+        mocks.close = enter(patch.object(cli, "close_drive"))
+        unlock_kwargs = ({"side_effect": result} if isinstance(result, BaseException)
+                         else {"return_value": result or UnlockResult(True, "unlocked")})
+        mocks.unlock = enter(patch.object(secure_erase_mod, "unlock_drive", **unlock_kwargs))
+        enter(patch.object(cli, "audit_log"))
+        yield mocks
+
+
+def test_unlock_needs_the_experimental_flag():
+    args = cli.build_parser().parse_args(_UNLOCK_ARGS + ["--yes"])
+    with _unlock_run() as m:
+        with pytest.raises(SystemExit) as exc_info:
+            cli.cmd_unlock(args)
+    assert exc_info.value.code == 1
+    m.open.assert_not_called()
+    m.unlock.assert_not_called()
+
+
+def test_unlock_goes_through_the_same_gate_and_releases_everything(capsys):
+    args = cli.build_parser().parse_args(_UNLOCK_ARGS + ["--experimental", "--yes"])
+    released: list[int] = []
+    with _unlock_run(locks=[9], released=released) as m:
+        cli.cmd_unlock(args)
+
+    m.gate.assert_called_once()
+    m.unlock.assert_called_once_with(4242)
+    m.close.assert_called_once_with(4242)
+    assert released == [9]
+    assert "Entsperrt" in capsys.readouterr().out
+
+
+def test_unlock_refuses_an_unsafe_disk_before_opening_it():
+    args = cli.build_parser().parse_args(_UNLOCK_ARGS + ["--experimental", "--yes"])
+    with _unlock_run(safe=(False, "Systemplatte / system disk")) as m:
+        with pytest.raises(SystemExit) as exc_info:
+            cli.cmd_unlock(args)
+    assert exc_info.value.code == 1
+    m.gate.assert_not_called()
+    m.open.assert_not_called()
+
+
+def test_unlock_stops_when_the_gate_refuses():
+    args = cli.build_parser().parse_args(_UNLOCK_ARGS + ["--experimental", "--yes"])
+    with _unlock_run() as m:
+        m.gate.side_effect = cli.UnsafeTargetError("stick swapped")
+        with pytest.raises(SystemExit):
+            cli.cmd_unlock(args)
+    m.open.assert_not_called()
+    m.unlock.assert_not_called()
+
+
+@pytest.mark.parametrize("state, words", [
+    ("wrong_password", ["passt nicht", "Versuch"]),
+    ("frozen", ["Standby"]),
+    ("expired", ["Fehlversuche"]),
+    ("unsupported", ["storahci"]),
+    ("error", ["fehlgeschlagen"]),
+])
+def test_unlock_explains_why_it_did_not_work(capsys, state, words):
+    from wipe.secure_erase import UnlockResult
+
+    args = cli.build_parser().parse_args(_UNLOCK_ARGS + ["--experimental", "--yes"])
+    with _unlock_run(result=UnlockResult(False, state, "detail")):
+        with pytest.raises(SystemExit) as exc_info:
+            cli.cmd_unlock(args)
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    for word in words:
+        assert word in err
+
+
+def test_unlock_of_a_drive_without_password_is_fine(capsys):
+    from wipe.secure_erase import UnlockResult
+
+    args = cli.build_parser().parse_args(_UNLOCK_ARGS + ["--experimental", "--yes"])
+    with _unlock_run(result=UnlockResult(True, "no_password")):
+        cli.cmd_unlock(args)
+    assert "kein Passwort" in capsys.readouterr().out
+
+
+def test_unlock_asks_first(monkeypatch):
+    args = cli.build_parser().parse_args(_UNLOCK_ARGS + ["--experimental"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "n")
+    with _unlock_run() as m:
+        with pytest.raises(SystemExit) as exc_info:
+            cli.cmd_unlock(args)
+    assert exc_info.value.code == 0
+    m.gate.assert_not_called()
+    m.unlock.assert_not_called()
+
+
+def test_unlock_releases_everything_when_it_crashes():
+    args = cli.build_parser().parse_args(_UNLOCK_ARGS + ["--experimental", "--yes"])
+    released: list[int] = []
+    with _unlock_run(result=RuntimeError("boom"), locks=[3], released=released) as m:
+        with pytest.raises(RuntimeError):
+            cli.cmd_unlock(args)
+    m.close.assert_called_once_with(4242)
+    assert released == [3]
+
+
+def test_hpa_detection_flows_to_certificate():
+    """A detected HPA must land on the certificate (hidden_area fields)."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_REQUIRED_WIPE_ARGS + ["--verify", "none", "--yes"])
+
+    captured = {}
+
+    def _capture_cert(cert_data, path, **_signing):
+        captured["cert"] = cert_data
+        return "C:/tmp/fake.pdf"
+
+    fake_method = MagicMock()
+    fake_method.name = "ZeroFill"
+    fake_method.passes = 1
+    fake_method.sicherheitsstufe = "1-2"
+    fake_method.execute.return_value = _fake_wipe_result()
+
+    hidden = SimpleNamespace(
+        supported=True, hpa_present=True, hpa_hidden_sectors=2048 * 1024,
+        dco_present=False, dco_hidden_sectors=0,
+    )
+
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[_fake_device()]),
+        patch.object(cli, "_resolve_wipe_method", return_value=fake_method),
+        patch.object(cli, "prepare_target"),
+        patch.object(cli, "open_physical_drive", return_value=12345),
+        patch.object(cli, "close_drive"),
+        patch.object(cli, "get_drive_size", return_value=1024 * 1024),
+        patch.object(cli, "detect_hidden_areas", return_value=hidden),
+        patch.object(cli, "get_next_cert_number", return_value=1),
+        patch.object(cli, "generate_certificate", side_effect=_capture_cert),
+        patch.object(cli, "log_wipe_to_csv"),
+        patch.object(cli, "audit_log"),
+    ):
+        # A hidden area that was not removed limits the result: exit code 3.
+        with pytest.raises(SystemExit) as exc_info:
+            cli.cmd_wipe(args)
+    assert exc_info.value.code == 3
+
+    cert = captured["cert"]
+    assert cert.hidden_area_probed is True
+    assert cert.hpa_present is True
+    assert cert.hpa_hidden_bytes == 2048 * 1024 * 512
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -193,6 +625,9 @@ def _fake_wipe_result_vsitr_with_blank():
         error_message=None,
         verify_result=verify,
         zero_blank_appended=True,
+        bad_sector_count=0,
+        bad_sector_bytes=0,
+        bad_sector_offsets=[],
     )
 
 
@@ -218,7 +653,7 @@ def test_cert_uses_wipe_result_passes_not_method_passes():
     captured_cert: dict = {}
     captured_csv: dict = {}
 
-    def _capture_cert(cert_data, cert_path):
+    def _capture_cert(cert_data, cert_path, **_signing):
         captured_cert["data"] = cert_data
         return cert_path
 
@@ -232,8 +667,6 @@ def test_cert_uses_wipe_result_passes_not_method_passes():
         patch.object(cli, "prepare_target"),
         patch.object(cli, "open_physical_drive", return_value=12345),
         patch.object(cli, "close_drive"),
-        patch.object(cli, "lock_volume"),
-        patch.object(cli, "unlock_volume"),
         patch.object(cli, "get_drive_size", return_value=1024 * 1024),
         patch.object(cli, "get_next_cert_number", return_value=42),
         patch.object(cli, "generate_certificate", side_effect=_capture_cert),
@@ -338,8 +771,6 @@ def test_cmd_wipe_calls_reformat_when_requested():
             patch.object(cli, "prepare_target"),
             patch.object(cli, "open_physical_drive", return_value=12345),
             patch.object(cli, "close_drive"),
-            patch.object(cli, "lock_volume"),
-            patch.object(cli, "unlock_volume"),
             patch.object(cli, "get_drive_size", return_value=1024 * 1024),
             patch.object(cli, "get_next_cert_number", return_value=1),
             patch.object(cli, "generate_certificate", return_value="C:/tmp/fake.pdf"),
@@ -387,6 +818,83 @@ def test_cmd_wipe_aborts_before_opening_disk_when_target_unsafe():
     opener.assert_not_called()
 
 
+def test_secure_erase_calls_prepare_target_first():
+    """--method secure-erase passes the same gate: when prepare_target
+    refuses, the disk is never opened and no ATA command is sent."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    opener = MagicMock(return_value=12345)
+
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[_fake_sata_ssd()]),
+        patch.object(cli, "media_type_of", return_value="ssd"),
+        patch.object(
+            cli, "prepare_target",
+            side_effect=cli.UnsafeTargetError("is the system disk"),
+        ) as gate,
+        patch.object(cli, "open_physical_drive", opener),
+        patch.object(cli, "close_drive"),
+        patch.object(secure_erase_mod, "secure_erase_supported") as mock_probe,
+        patch.object(secure_erase_mod, "secure_erase") as mock_se,
+        patch.object(cli, "audit_log"),
+    ):
+        with pytest.raises(SystemExit) as exc_info:
+            cli.cmd_wipe(args)
+
+    assert exc_info.value.code != 0
+    gate.assert_called_once()
+    opener.assert_not_called()
+    mock_probe.assert_not_called()
+    mock_se.assert_not_called()
+
+
+def test_reformat_rechecks_target_and_is_skipped_when_refused():
+    """Reformat writes a new partition table, so prepare_target runs again
+    right before it. A refusal skips the reformat; the wipe's certificate
+    is still issued."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_REQUIRED_WIPE_ARGS + ["--reformat", "exfat", "--yes"])
+
+    fake_method = MagicMock()
+    fake_method.name = "ZeroFill"
+    fake_method.passes = 1
+    fake_method.sicherheitsstufe = "1-2"
+    fake_method.execute.return_value = _fake_wipe_result()
+    fake_reformat = MagicMock(return_value=_fake_format_result())
+
+    import sys as _sys
+    import types as _types
+    fake_format_mod = _types.ModuleType("wipe.format")
+    fake_format_mod.reformat_drive = fake_reformat
+    _sys.modules["wipe.format"] = fake_format_mod
+
+    gate = MagicMock(side_effect=[[], cli.UnsafeTargetError("stick swapped")])
+    try:
+        with (
+            patch.object(cli, "is_admin", return_value=True),
+            patch.object(cli, "list_devices", return_value=[_fake_device()]),
+            patch.object(cli, "_resolve_wipe_method", return_value=fake_method),
+            patch.object(cli, "prepare_target", gate),
+            patch.object(cli, "open_physical_drive", return_value=12345),
+            patch.object(cli, "close_drive"),
+            patch.object(cli, "get_drive_size", return_value=1024 * 1024),
+            patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()),
+            patch.object(cli, "get_next_cert_number", return_value=1),
+            patch.object(cli, "generate_certificate",
+                         return_value="C:/tmp/fake.pdf") as mock_cert,
+            patch.object(cli, "log_wipe_to_csv"),
+            patch.object(cli, "audit_log"),
+        ):
+            cli.cmd_wipe(args)
+    finally:
+        _sys.modules.pop("wipe.format", None)
+
+    assert gate.call_count == 2
+    fake_reformat.assert_not_called()
+    mock_cert.assert_called_once()
+
+
 def test_cmd_wipe_confirmation_names_every_letter_of_the_disk(capsys, monkeypatch):
     """1.1.1: 'wipe --device E:' on a disk with E: and G: must warn about both."""
     parser = cli.build_parser()
@@ -431,8 +939,8 @@ def test_cmd_wipe_holds_volume_locks_until_the_wipe_is_done():
         patch.object(cli, "release_volumes", side_effect=released.extend),
         patch.object(cli, "open_physical_drive", return_value=12345),
         patch.object(cli, "close_drive"),
-        patch.object(cli, "unlock_volume"),
         patch.object(cli, "get_drive_size", return_value=1024 * 1024),
+        patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()),
         patch.object(cli, "get_next_cert_number", return_value=1),
         patch.object(cli, "generate_certificate", return_value="C:/tmp/fake.pdf"),
         patch.object(cli, "log_wipe_to_csv"),
@@ -442,3 +950,203 @@ def test_cmd_wipe_holds_volume_locks_until_the_wipe_is_done():
 
     assert held == [True]
     assert released == [5]
+
+
+def test_secure_erase_holds_volume_locks_during_the_erase():
+    """1.1.2 on v2: the drive's own erase and the zero pass after it run with
+    the volumes locked; the locks are released exactly once afterwards."""
+    args = cli.build_parser().parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    released: list[int] = []
+    held: list[bool] = []
+
+    def erase(*_a, **_k):
+        held.append(released == [])
+        return _drive_erased()
+
+    def zero_pass(**_k):
+        held.append(released == [])
+        return _fake_wipe_result()
+
+    zero = _zero_pass_method()
+    zero.execute.side_effect = zero_pass
+    with _hardware_wipe(erase=erase, zero=zero, locks=[5, 6], released=released):
+        cli.cmd_wipe(args)
+
+    assert held == [True, True]
+    assert released == [5, 6]
+
+
+def test_secure_erase_releases_volume_locks_when_the_erase_raises():
+    """An unexpected error during the erase still releases the locks."""
+    args = cli.build_parser().parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    released: list[int] = []
+    with _hardware_wipe(erase=OSError("bridge gone"), locks=[5], released=released) as m:
+        with pytest.raises(SystemExit):
+            cli.cmd_wipe(args)
+
+    m.zero.execute.assert_not_called()
+    assert released == [5]
+
+
+def test_reformat_releases_the_gate_locks_before_reformatting():
+    """The safety re-check before reformat dismounts and locks the volumes
+    again. Clear-Disk needs the disk free, so those locks are released
+    before the reformat runs; the identity/system check itself stays."""
+    parser = cli.build_parser()
+    args = parser.parse_args(_REQUIRED_WIPE_ARGS + ["--reformat", "exfat", "--yes"])
+    released: list[int] = []
+    seen_at_reformat: list[list[int]] = []
+
+    fake_method = MagicMock()
+    fake_method.name = "ZeroFill"
+    fake_method.passes = 1
+    fake_method.sicherheitsstufe = "1-2"
+    fake_method.execute.return_value = _fake_wipe_result()
+
+    def fake_reformat(**_kw):
+        seen_at_reformat.append(list(released))
+        return _fake_format_result()
+
+    import sys as _sys
+    import types as _types
+    fake_format_mod = _types.ModuleType("wipe.format")
+    fake_format_mod.reformat_drive = MagicMock(side_effect=fake_reformat)
+    _sys.modules["wipe.format"] = fake_format_mod
+
+    gate = MagicMock(side_effect=[[5], [6]])
+    try:
+        with (
+            patch.object(cli, "is_admin", return_value=True),
+            patch.object(cli, "list_devices", return_value=[_fake_device()]),
+            patch.object(cli, "_resolve_wipe_method", return_value=fake_method),
+            patch.object(cli, "prepare_target", gate),
+            patch.object(cli, "release_volumes", side_effect=released.extend),
+            patch.object(cli, "open_physical_drive", return_value=12345),
+            patch.object(cli, "close_drive"),
+            patch.object(cli, "get_drive_size", return_value=1024 * 1024),
+            patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()),
+            patch.object(cli, "get_next_cert_number", return_value=1),
+            patch.object(cli, "generate_certificate", return_value="C:/tmp/fake.pdf"),
+            patch.object(cli, "log_wipe_to_csv"),
+            patch.object(cli, "audit_log"),
+        ):
+            cli.cmd_wipe(args)
+    finally:
+        _sys.modules.pop("wipe.format", None)
+
+    assert gate.call_count == 2
+    assert seen_at_reformat == [[5, 6]]
+    assert released == [5, 6]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# list: the footer counts physical disks, not drive letters (2.0 polish)
+# ─────────────────────────────────────────────────────────────────────
+
+def _listed(letter: str, disk: int, **kw):
+    values = dict(
+        drive_letter=letter, device_id=f"\\.\PhysicalDrive{disk}",
+        model=f"Disk{disk}", serial_number=f"SN{disk}", capacity_bytes=64 * 1024**3,
+        filesystem="NTFS", connection_type="USB", is_removable=True,
+        is_system_drive=False, is_internal=False,
+    )
+    values.update(kw)
+    return cli.DeviceInfo(**values)
+
+
+def test_list_footer_counts_disks_not_letters(capsys):
+    devices = [
+        _listed("C:", 0, connection_type="NVMe", is_removable=False, is_system_drive=True),
+        _listed("D:", 1), _listed("E:", 1),          # one stick, two partitions
+        _listed("F:", 2),
+        _listed("G:", 3), _listed("", 3),
+        _listed("H:", 4, connection_type="SATA", is_removable=False, is_internal=True),
+        _listed("I:", 4, connection_type="SATA", is_removable=False, is_internal=True),
+    ]
+    with patch.object(cli, "list_devices", return_value=devices):
+        cli.cmd_list(cli.build_parser().parse_args(["list"]))
+    out = capsys.readouterr().out
+    assert "Found 3 removable disk(s) ready for wiping." in out
+    assert "1 internal disk(s) detected" in out
+
+
+# ─────────────────────────────────────────────────────────────────────
+# The partition table goes right before the first write (Rufus disks)
+# ─────────────────────────────────────────────────────────────────────
+
+def _plain_wipe_events(*, clear_ok=True):
+    """cmd_wipe (overwrite) on a fake disk; returns the recorded steps."""
+    events: list = []
+    args = cli.build_parser().parse_args(_REQUIRED_WIPE_ARGS + ["--verify", "full", "--yes"])
+    method = _zero_pass_method()
+    method.execute.side_effect = (
+        lambda **kw: events.append(("write", kw["handle"])) or _fake_wipe_result()
+    )
+    with (
+        patch.object(cli, "is_admin", return_value=True),
+        patch.object(cli, "list_devices", return_value=[_fake_device()]),
+        patch.object(cli, "_resolve_wipe_method", return_value=method),
+        patch.object(cli, "prepare_target",
+                     side_effect=lambda d: events.append("gate") or [3]),
+        patch.object(cli, "release_volumes",
+                     side_effect=lambda locks: events.append(("release", list(locks)))),
+        patch.object(cli, "open_physical_drive",
+                     side_effect=lambda d: events.append("open") or 12345),
+        patch.object(cli, "clear_partition_table",
+                     side_effect=lambda h: events.append(("clear", h)) or clear_ok),
+        patch.object(cli, "close_drive"),
+        patch.object(cli, "get_drive_size", return_value=1024 * 1024),
+        patch.object(cli, "detect_hidden_areas", return_value=_no_hidden_areas()),
+        patch.object(cli, "get_next_cert_number", return_value=1),
+        patch.object(cli, "generate_certificate", return_value="C:/tmp/fake.pdf"),
+        patch.object(cli, "log_wipe_to_csv"),
+        patch.object(cli, "audit_log"),
+    ):
+        cli.cmd_wipe(args)
+    return events
+
+
+def test_cli_removes_the_partition_table_after_the_gate_and_before_writing():
+    events = _plain_wipe_events()
+    assert events[:4] == ["gate", "open", ("clear", 12345), ("write", 12345)]
+    assert ("release", [3]) in events[4:]
+
+
+def test_cli_wipes_on_when_the_partition_table_cannot_be_removed():
+    events = _plain_wipe_events(clear_ok=False)
+    assert events[:4] == ["gate", "open", ("clear", 12345), ("write", 12345)]
+
+
+def test_cli_hardware_erase_removes_the_partition_table_once_after_the_erase():
+    """The hardware procedure removes the layout itself (after the drive's
+    erase, before the zeros); the CLI must not remove it before the drive
+    has said yes."""
+    args = cli.build_parser().parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    seen: list = []
+    with _hardware_wipe() as m:
+        def hw_clear(handle):
+            seen.append(("hw", handle, m.erase.called, m.zero.execute.called))
+            return True
+
+        with (
+            patch.object(cli, "clear_partition_table",
+                         side_effect=lambda h: seen.append(("cli", h))),
+            patch.object(hardware_erase, "clear_partition_table", side_effect=hw_clear),
+        ):
+            cli.cmd_wipe(args)
+
+    assert seen == [("hw", 12345, True, False)]
+    m.zero.execute.assert_called_once()
+
+
+def test_cli_hardware_refusal_keeps_the_partition_table():
+    args = cli.build_parser().parse_args(_SECURE_ERASE_ARGS + ["--experimental", "--yes"])
+    cleared = MagicMock()
+    with _hardware_wipe(status=_drive_status("frozen", frozen=True)):
+        with (
+            patch.object(cli, "clear_partition_table", cleared),
+            patch.object(hardware_erase, "clear_partition_table", cleared),
+        ):
+            with pytest.raises(SystemExit):
+                cli.cmd_wipe(args)
+    cleared.assert_not_called()

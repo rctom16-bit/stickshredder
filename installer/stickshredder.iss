@@ -2,7 +2,7 @@
 ; Requires Inno Setup 6.x — https://jrsoftware.org/isinfo.php
 
 #define MyAppName "StickShredder"
-#define MyAppVersion "1.1.2"
+#define MyAppVersion "2.0.0"
 #define MyAppPublisher "Robin Oertel"
 #define MyAppURL "https://github.com/rctom16-bit/stickshredder"
 #define MyAppExeName "StickShredder.exe"

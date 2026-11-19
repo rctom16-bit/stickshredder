@@ -12,7 +12,8 @@ from core.config import AppConfig, CompanyInfo, get_next_cert_number, APP_NAME, 
 def test_appconfig_default_values():
     cfg = AppConfig()
     assert cfg.operator_name == ""
-    assert cfg.default_wipe_method == "standard"
+    assert cfg.default_wipe_method == "quick"
+    assert cfg.default_verify_mode == "full"
     assert cfg.default_schutzklasse == 2
     assert cfg.cert_language == "de"
     assert cfg.show_ssd_warning is True
@@ -75,7 +76,7 @@ def test_appconfig_load_corrupted_json(tmp_path, monkeypatch):
     loaded = AppConfig.load()
     # Should fall back to defaults
     assert loaded.operator_name == ""
-    assert loaded.default_wipe_method == "standard"
+    assert loaded.default_wipe_method == "quick"
 
 
 def test_appconfig_load_invalid_keys(tmp_path, monkeypatch):
@@ -245,7 +246,7 @@ def test_constants():
 
 
 def test_version_is_consistent_everywhere():
-    """1.1.1: one version everywhere (pyproject, installer, app, no stale literals)."""
+    """One version everywhere (pyproject, installer, app, no stale literals)."""
     import re
     import tomllib
     from pathlib import Path
@@ -255,10 +256,11 @@ def test_version_is_consistent_everywhere():
     iss = (root / "installer" / "stickshredder.iss").read_text(encoding="utf-8")
     iss_version = re.search(r'#define MyAppVersion "([^"]+)"', iss).group(1)
 
-    assert APP_VERSION == "1.1.2"
+    assert APP_VERSION == "2.0.0"
     assert pyproject["project"]["version"] == APP_VERSION
     assert iss_version == APP_VERSION
     for py in (root / "src").rglob("*.py"):
         text = py.read_text(encoding="utf-8")
         assert '"1.0.0"' not in text and "v1.0.0" not in text, py
         assert '"1.1.0"' not in text, py
+        assert "1.1.1" not in text and "1.2.0" not in text, py

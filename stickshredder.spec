@@ -16,6 +16,11 @@ icons_dir = os.path.join("src", "gui", "icons")
 if os.path.isdir(icons_dir):
     datas.append((icons_dir, os.path.join("gui", "icons")))
 
+# Bundled fonts (Space Grotesk, Inter, JetBrains Mono) with their OFL licences
+fonts_dir = os.path.join("src", "gui", "fonts")
+if os.path.isdir(fonts_dir):
+    datas.append((fonts_dir, os.path.join("gui", "fonts")))
+
 a = Analysis(
     ["src/main.py"],
     pathex=["src"],

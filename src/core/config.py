@@ -19,13 +19,20 @@ except ImportError:  # pragma: no cover - non-Windows fallback
 _CERT_COUNTER_LOCK = threading.Lock()
 
 APP_NAME = "StickShredder"
-APP_VERSION = "1.1.2"
+APP_VERSION = "2.0.0"
 CONFIG_DIR = Path.home() / ".stickshredder"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 AUDIT_LOG_FILE = CONFIG_DIR / "audit.log"
 CERT_COUNTER_FILE = CONFIG_DIR / "cert_counter.txt"
 WIPE_HISTORY_FILE = CONFIG_DIR / "wipe_history.csv"
 DEFAULT_CERT_OUTPUT = CONFIG_DIR / "certificates"
+
+# Certificate signing (v2.0): the DPAPI-protected key file ``signing_key.bin``
+# lives in KEY_DIR; TRUST_FILE lists the public keys whose certificates count
+# as genuine. Read through this module at call time (tests redirect them).
+KEY_DIR = CONFIG_DIR
+TRUST_FILE = CONFIG_DIR / "trusted_keys.json"
+OWN_KEY_NAME = "Eigener Schlüssel / Own key"
 
 # Cert counter is stored as a decimal integer. Anything beyond 10 digits is
 # treated as corruption (10 digits covers values up to ~9.9 billion, which is
@@ -44,11 +51,21 @@ class CompanyInfo:
 class AppConfig:
     company: CompanyInfo = field(default_factory=CompanyInfo)
     operator_name: str = ""
-    default_wipe_method: str = "standard"
+    # One zero pass + full verify is the recommendation for today's media
+    # (spec G6); "quick" is the GUI's key for the one-pass zero fill.
+    default_wipe_method: str = "quick"
     default_schutzklasse: int = 2
+    default_verify_mode: str = "full"  # "full" | "sample"
     cert_output_dir: str = str(DEFAULT_CERT_OUTPUT)
     cert_language: str = "de"
     show_ssd_warning: bool = True
+    # GUI appearance: "system" follows Windows, "light"/"dark" override it.
+    theme: str = "system"
+    # GUI language ("de" | "en"); the certificate language is separate.
+    ui_language: str = "de"
+    # „Beta-Funktionen aktivieren“: the hardware erase (Beta) is only offered
+    # when this is on (spec G2). Off by default.
+    beta_features: bool = False
 
     def save(self) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
@@ -67,6 +84,38 @@ class AppConfig:
             return cls(company=company, **data)
         except (json.JSONDecodeError, TypeError):
             return cls()
+
+
+def trust_own_key(key) -> bool:
+    """Add ``key`` (this installation's signing key) to the trust list.
+
+    Returns ``False`` without touching anything if the trust list exists but
+    is damaged — it is left for the user to repair, never overwritten.
+    """
+    from cert.verify_cert import TrustStore
+
+    try:
+        store = TrustStore.load(TRUST_FILE)
+    except ValueError:
+        return False
+    store.add(key.public_key_bytes(), OWN_KEY_NAME)
+    return True
+
+
+def load_signing_key():
+    """Return this installation's signing key, creating it on first use.
+
+    A newly created key is added to the trust list, so the installation's own
+    certificates verify as genuine. Raises ``cert.signing.SigningKeyError`` if
+    an existing key file cannot be read (it is never replaced silently).
+    """
+    from cert.signing import KEY_FILE_NAME, SigningKey
+
+    created = not (KEY_DIR / KEY_FILE_NAME).exists()
+    key = SigningKey.load_or_create(KEY_DIR)
+    if created:
+        trust_own_key(key)
+    return key
 
 
 def _audit_counter_reset(reason: str) -> None:

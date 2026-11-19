@@ -580,3 +580,50 @@ def _write_tiny_png(path: Path) -> None:
         f.write(_chunk(b"IHDR", ihdr_data))
         f.write(_chunk(b"IDAT", idat_data))
         f.write(_chunk(b"IEND", b""))
+
+
+# ── Protection class 3 note on SSDs and flash (2.0 polish) ───────────
+
+def _certificate_text(tmp_path, data) -> str:
+    """All paragraph text of the generated certificate (document build captured)."""
+    from reportlab.platypus import SimpleDocTemplate
+
+    captured: list = []
+    real_build = SimpleDocTemplate.build
+
+    def build(self, flowables, *args, **kwargs):
+        captured.extend(flowables)
+        return real_build(self, flowables, *args, **kwargs)
+
+    with patch.object(SimpleDocTemplate, "build", build), patch("cert.generator.audit_log"):
+        generate_certificate(data, str(tmp_path / "cert.pdf"))
+    return _paragraph_texts(captured)
+
+
+def test_cert_ssd_class_3_says_destruction_is_required(tmp_path):
+    text = _certificate_text(tmp_path, _make_cert_data(
+        media_type="ssd", schutzklasse=3, language="both"))
+    assert "Reserve-Bereiche der SSD nicht" in text
+    assert "physisch vernichtet" in text
+    assert "physically destroying the SSD" in text
+
+
+def test_cert_ssd_class_3_after_hardware_erase_names_it(tmp_path):
+    text = _certificate_text(tmp_path, _make_cert_data(
+        media_type="ssd", schutzklasse=3, secure_erase_used=True,
+        secure_erase_method="ata-secure-erase", language="de"))
+    assert "Ob das Hardware-Löschen (Beta) die Reserve-Bereiche" in text
+
+
+def test_cert_flash_class_3_says_destroy(tmp_path):
+    text = _certificate_text(tmp_path, _make_cert_data(
+        media_type="flash", schutzklasse=3, language="en"))
+    assert "For protection class 3, destroy physically" in text
+
+
+@pytest.mark.parametrize("media,klasse", [("ssd", 2), ("hdd", 3), ("", 3), ("unknown", 3)])
+def test_cert_without_the_class_3_note(tmp_path, media, klasse):
+    text = _certificate_text(tmp_path, _make_cert_data(
+        media_type=media, schutzklasse=klasse, language="both"))
+    assert "physisch vernicht" not in text
+    assert "destroy" not in text.lower()

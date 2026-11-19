@@ -20,6 +20,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from core.log import audit_log
+
 # ─────────────────────────────────────────────────────────────────────
 # Public types
 # ─────────────────────────────────────────────────────────────────────
@@ -106,7 +108,13 @@ def _build_command_script(
     """
     # Note: label is pre-sanitised to ASCII alnum/underscore/hyphen/space, so
     # double-quoting it inside the PowerShell script is safe.
+    # Last guard inside PowerShell itself: never clear the disk Windows boots
+    # from or runs on, whatever the caller passed in.
     return (
+        f"$d = Get-Disk -Number {disk_number} -ErrorAction Stop; "
+        f"if ($d.IsBoot -or $d.IsSystem) {{ throw "
+        f"'Disk {disk_number} ist Start-/Systemplatte - Formatieren verweigert / "
+        f"is a boot/system disk - refusing to format' }}; "
         f"Clear-Disk -Number {disk_number} -RemoveData -RemoveOEM -Confirm:$false; "
         f"Initialize-Disk -Number {disk_number} -PartitionStyle {partition_style}; "
         f"$p = New-Partition -DiskNumber {disk_number} -UseMaximumSize -AssignDriveLetter; "
@@ -146,6 +154,42 @@ def reformat_drive(
     label: str = "USB",
     partition_style: str = "MBR",
     progress_callback: FormatProgressCallback | None = None,
+) -> FormatResult:
+    """Clear, partition, and format the disk at `disk_number`.
+
+    See :func:`_reformat` for the behaviour. Every call is written to the
+    audit log: the start (disk, file system, label, partition style), then
+    the success or the failure with its reason — also when it raises.
+    """
+    disk = rf"\\.\PhysicalDrive{disk_number}"
+    audit_log(
+        f"Reformat started: {disk}, filesystem="
+        f"{_SUPPORTED_FILESYSTEMS.get(str(filesystem).strip().lower(), filesystem)}, "
+        f"label={label!r}, partition_style={partition_style}"
+    )
+    try:
+        result = _reformat(disk_number, filesystem, label, partition_style,
+                           progress_callback)
+    except Exception as exc:
+        audit_log(f"Reformat failed: {disk}: {type(exc).__name__}: {exc}")
+        raise
+    if result.success:
+        audit_log(
+            f"Reformat succeeded: {disk}, {result.filesystem}, "
+            f"label={result.label!r}, {result.partition_style}, "
+            f"{result.duration_seconds:.1f}s"
+        )
+    else:
+        audit_log(f"Reformat failed: {disk}: {result.error_message}")
+    return result
+
+
+def _reformat(
+    disk_number: int,
+    filesystem: str,
+    label: str,
+    partition_style: str,
+    progress_callback: FormatProgressCallback | None,
 ) -> FormatResult:
     """Clear, partition, and format the disk at `disk_number`.
 
